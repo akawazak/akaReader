@@ -1,11 +1,11 @@
 {
   "name": "akareader",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "description": "Manga reader powered by Suwayomi",
   "main": "electron-main.js",
   "repository": {
     "type": "git",
-    "url": "https://github.com/akawazak/akareader"
+    "url": "https://github.com/akawazak/akaReader"
   },
   "scripts": {
     "dev": "vite",
@@ -36,7 +36,7 @@
     "publish": {
       "provider": "github",
       "owner": "akawazak",
-      "repo": "akareader",
+      "repo": "akaReader",
       "releaseType": "release"
     },
     "directories": {
@@ -58,7 +58,10 @@
       }
     ],
     "win": {
-      "target": "nsis",
+      "target": [
+        { "target": "nsis",     "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
       "icon": "public/icon.ico"
     },
     "mac": {
