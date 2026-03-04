@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
-  base: process.env.ELECTRON ? './' : '/',
+  base: './',
   server: { port: 5173 },
   build: { outDir: 'dist' },
 });

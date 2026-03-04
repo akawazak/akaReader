@@ -1,5 +1,5 @@
 // electron-main.js
-const { app, BrowserWindow, Menu, shell, dialog, Tray, globalShortcut, ipcMain, screen, utilityProcess } = require('electron');
+const { app, BrowserWindow, Menu, shell, dialog, Tray, globalShortcut, ipcMain, screen } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const http = require('http');
@@ -98,25 +98,18 @@ function startSuwayomi() {
 }
 
 // ── Start backend ──────────────────────────────────────────────────────────
-// IMPORTANT: utilityProcess.fork() instead of spawn(process.execPath, [...]).
-// In packaged Electron, process.execPath IS the Electron binary (akaReader.exe).
-// spawn(process.execPath, ['server.js']) re-launches a full Electron instance
-// for every call — that's the "too many processes / memory leak" you saw.
-// utilityProcess.fork() is Electron's proper API: runs server.js as a lightweight
-// background Node.js worker with no browser window attached.
 function startServer() {
-  if (serverProcess) return; // guard: never double-spawn
   console.log('[server] starting:', serverPath);
-  serverProcess = utilityProcess.fork(serverPath, [], {
+  serverProcess = spawn(process.execPath, [serverPath], {
     cwd: backendDir,
     env: { ...process.env, PORT: '3001', SUWAYOMI_URL: 'http://localhost:4567' },
     stdio: 'pipe',
-    serviceName: 'akaReader-backend',
+    windowsHide: true,
   });
-  serverProcess.on('spawn', () => console.log('[server] spawned OK'));
-  serverProcess.on('exit', code => {
+  serverProcess.stdout.on('data', d => console.log('[server]', d.toString().trim()));
+  serverProcess.stderr.on('data', d => console.log('[server:err]', d.toString().trim()));
+  serverProcess.on('close', code => {
     console.log('[server] exited', code);
-    serverProcess = null;
     if (!isQuitting) mainWindow?.webContents?.send('services-status', 'crashed');
   });
 }
@@ -203,20 +196,20 @@ function killAll() {
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
 
+  // Create tray + window FIRST so user sees the app immediately
+  // React's StartupScreen component handles the loading UI
+  createTray();
+  createMainWindow();
+
+  // Start services in background after window is visible
   const alreadyRunning = await isSuwayomiRunning();
   if (!alreadyRunning) {
     startSuwayomi();
-    await new Promise(r => setTimeout(r, 6000));
   } else {
     console.log('[suwayomi] already running, skipping');
   }
 
   startServer();
-
-  // Create main window immediately — it shows the built-in startup screen
-  // while the backend warms up (no blank black rectangle)
-  createTray();
-  createMainWindow();
 
   const ready = await waitFor('http://localhost:3001/api/health');
   if (!ready) {
