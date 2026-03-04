@@ -11,7 +11,7 @@ let autoUpdater = null;
 try { autoUpdater = require('electron-updater').autoUpdater; } catch {}
 
 const isDev = !app.isPackaged;
-let mainWindow, splashWindow, tray, suwayomiProcess, serverProcess;
+let mainWindow, tray, suwayomiProcess, serverProcess;
 let isQuitting = false;
 let isRestarting = false;
 let startupPhase = 'initializing';
@@ -30,8 +30,6 @@ app.on('second-instance', (event, commandLine, workingDirectory) => {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
-  } else if (splashWindow) {
-    splashWindow.focus();
   }
 });
 
@@ -251,121 +249,6 @@ async function waitFor(url, retries = 15, delay = 500) {
   return false;
 }
 
-// ── Splash Window ──────────────────────────────────────────────────────────
-function createSplashWindow() {
-  splashWindow = new BrowserWindow({
-    width: 400,
-    height: 300,
-    frame: false,
-    alwaysOnTop: true,
-    center: true,
-    resizable: false,
-    skipTaskbar: true,
-    backgroundColor: '#0a0a0f',
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true
-    },
-    icon: iconPath,
-    show: false
-  });
-
-  const splashHtml = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-          background: #0a0a0f;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          height: 100vh;
-          color: #f97316;
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-          overflow: hidden;
-        }
-        .logo {
-          width: 80px;
-          height: 80px;
-          background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
-          border-radius: 20px;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 40px;
-          font-weight: bold;
-          color: white;
-          margin-bottom: 20px;
-          animation: pulse 2s ease-in-out infinite;
-        }
-        @keyframes pulse {
-          0%, 100% { transform: scale(1); opacity: 1; }
-          50% { transform: scale(1.05); opacity: 0.9; }
-        }
-        .title {
-          font-size: 24px;
-          font-weight: 600;
-          margin-bottom: 10px;
-          color: #fff;
-        }
-        .status {
-          font-size: 14px;
-          color: #888;
-          margin-bottom: 20px;
-        }
-        .loader {
-          width: 200px;
-          height: 3px;
-          background: #1a1a2e;
-          border-radius: 3px;
-          overflow: hidden;
-          position: relative;
-        }
-        .loader-bar {
-          position: absolute;
-          left: 0;
-          top: 0;
-          height: 100%;
-          width: 40%;
-          background: linear-gradient(90deg, #f97316, #ea580c);
-          border-radius: 3px;
-          animation: slide 1.5s ease-in-out infinite;
-        }
-        @keyframes slide {
-          0% { left: -40%; }
-          100% { left: 100%; }
-        }
-      </style>
-    </head>
-    <body>
-      <div class="logo">R</div>
-      <div class="title">akaReader</div>
-      <div class="status" id="status">Starting up...</div>
-      <div class="loader"><div class="loader-bar"></div></div>
-    </body>
-    </html>
-  `;
-  
-  splashWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(splashHtml)}`);
-  splashWindow.once('ready-to-show', () => splashWindow.show());
-}
-
-function updateSplashStatus(message) {
-  if (!splashWindow || splashWindow.isDestroyed()) return;
-  splashWindow.webContents.executeJavaScript(`
-    document.getElementById('status').textContent = ${JSON.stringify(message)};
-  `).catch(() => {});
-}
-
-function closeSplash() {
-  if (splashWindow && !splashWindow.isDestroyed()) {
-    splashWindow.close();
-    splashWindow = null;
-  }
-}
 
 // ── Tray ────────────────────────────────────────────────────────────
 function createTray() {
@@ -442,11 +325,8 @@ function createMainWindow() {
     mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
   }
 
-  // FIXED: Use ready-to-show instead of dom-ready
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
-    closeSplash();
-  });
+  // Show immediately — React's StartupScreen handles the loading UI
+  mainWindow.once('ready-to-show', () => mainWindow.show());
 }
 
 // ── Kill all ───────────────────────────────────────────────────────────────
@@ -478,59 +358,33 @@ function killAll() {
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   
-  // 1. SHOW SPLASH IMMEDIATELY - BEFORE ANYTHING ELSE
-  createSplashWindow();
-  updateSplashStatus('Initializing...');
-  
-  // 2. START SERVICES IN PARALLEL (don't block)
+  // 1. START SERVICES IN PARALLEL (don't block UI)
   const startServices = async () => {
-    // Check and start Suwayomi
     const suwayomiRunning = await isSuwayomiRunning();
     if (!suwayomiRunning) {
-      updateSplashStatus('Starting Suwayomi...');
       startSuwayomi();
-      // Give it a head start but don't wait fully
       await new Promise(r => setTimeout(r, 1000));
     }
-    
-    // Check and start backend
     const serverRunning = await waitFor('http://localhost:3001/api/health', 1, 100);
-    if (!serverRunning) {
-      updateSplashStatus('Starting backend...');
-      startServer();
-    }
+    if (!serverRunning) startServer();
   };
-  
-  // Start services without awaiting (let them run in background)
   const servicesPromise = startServices();
-  
-  // 3. CREATE MAIN WINDOW (this loads the UI)
-  updateSplashStatus('Loading app...');
+
+  // 2. CREATE MAIN WINDOW IMMEDIATELY — React's StartupScreen handles loading UI
   createTray();
   createMainWindow();
-  
-  // 4. WAIT FOR SERVICES TO BE READY
-  updateSplashStatus('Connecting...');
-  await servicesPromise; // Now wait for services we started
-  
+
+  // 3. WAIT FOR SERVICES AND NOTIFY REACT
+  await servicesPromise;
+
   let attempts = 0;
   const maxAttempts = 30;
-  
   while (attempts < maxAttempts) {
     const ready = await waitFor('http://localhost:3001/api/health', 1, 500);
-    if (ready) {
-      sendProgress('online', 'Ready');
-      updateSplashStatus('Ready!');
-      break;
-    }
+    if (ready) { sendProgress('online', 'Ready'); break; }
     attempts++;
-    updateSplashStatus(`Connecting... (${attempts}/${maxAttempts})`);
   }
-  
-  if (attempts >= maxAttempts) {
-    updateSplashStatus('Connection failed - Click Retry');
-    sendProgress('offline', 'Failed to connect');
-  }
+  if (attempts >= maxAttempts) sendProgress('offline', 'Failed to connect');
 
   // Setup Windows startup if enabled
   if (electronSettings.startWithWindows) {
