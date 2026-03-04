@@ -31,7 +31,10 @@ jobs:
       # Install Electron/React frontend deps (inside manga-nexus/)
       - name: Install frontend dependencies
         working-directory: manga-nexus
-        run: npm install --prefer-offline
+        run: npm install --prefer-offline --no-audit --no-fund
+        env:
+          CI: true
+          npm_config_yes: true
 
       # Install backend deps (inside backend/ at repo root)
       - name: Install backend dependencies
