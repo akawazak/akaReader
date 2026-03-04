@@ -2,11 +2,10 @@
   "name": "akareader",
   "version": "1.0.4",
   "description": "Manga reader powered by Suwayomi",
-  "main": "electron-main.js",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/akawazak/akaReader"
-  },
+  "author": {
+  "name": "akawazak",
+  "email": "akawazak@users.noreply.github.com"
+},
   "scripts": {
     "dev": "vite",
     "build": "vite build",
