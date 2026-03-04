@@ -40,7 +40,7 @@ jobs:
         shell: bash
         run: |
           curl -L -o backend/Suwayomi-Server-v2.1.1867.jar \
-            https://github.com/Suwayomi/Suwayomi-Server/releases/download/v2.1.1867/Suwayomi-Server-v2.1.1867.jar 
+            https://github.com/Suwayomi/Suwayomi-Server/releases/download/v2.1.1867/Suwayomi-Server-v2.1.1867.jar  
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
@@ -90,8 +90,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist-*/*
-          draft: true
+          draft: false
           prerelease: false
           generate_release_notes: true
+          make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
