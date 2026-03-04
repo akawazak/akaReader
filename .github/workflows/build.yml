@@ -40,32 +40,29 @@ jobs:
         shell: bash
         run: |
           curl -L -o backend/Suwayomi-Server-v2.1.1867.jar \
-            https://github.com/Suwayomi/Suwayomi-Server/releases/download/v2.1.1867/Suwayomi-Server-v2.1.1867.jar
+            https://github.com/Suwayomi/Suwayomi-Server/releases/download/v2.1.1867/Suwayomi-Server-v2.1.1867.jar 
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
         working-directory: manga-nexus
         shell: bash
-        run: npm run dist -- --win
+        run: npm run dist -- --win --publish=never
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: true
 
       - name: Package (macOS)
         if: matrix.os == 'macos-latest'
         working-directory: manga-nexus
-        run: npm run dist -- --mac
+        run: npm run dist -- --mac --publish=never
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
           ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: true
 
       - name: Package (Linux)
         if: matrix.os == 'ubuntu-latest'
         working-directory: manga-nexus
-        run: npm run dist -- --linux
+        run: npm run dist -- --linux --publish=never
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: true
 
       - name: Upload artifacts
