@@ -31,12 +31,12 @@ jobs:
       # Install Electron/React frontend deps (inside manga-nexus/)
       - name: Install frontend dependencies
         working-directory: manga-nexus
-        run: npm ci
+        run: npm install --prefer-offline
 
       # Install backend deps (inside backend/ at repo root)
       - name: Install backend dependencies
         working-directory: backend
-        run: npm ci
+        run: npm install --prefer-offline
 
       # Download Suwayomi JAR to backend/ — runs from repo root
       - name: Download Suwayomi JAR
