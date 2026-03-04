@@ -1,0 +1,8 @@
+# Build outputs
+manga-nexus/dist/
+manga-nexus/dist-electron/
+manga-nexus/node_modules/
+backend/node_modules/
+
+# Large binary — CI downloads this automatically
+backend/*.jar
