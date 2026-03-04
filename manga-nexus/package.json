@@ -1,11 +1,16 @@
 {
   "name": "akareader",
-  "version": "1.0.4",
+  "version": "1.0.8",
   "description": "Manga reader powered by Suwayomi",
+  "main": "electron-main.js",
   "author": {
-  "name": "akawazak",
-  "email": "akawazak@users.noreply.github.com"
-},
+    "name": "akawazak",
+    "email": "akawazak@users.noreply.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/akawazak/akaReader"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -41,12 +46,11 @@
     "directories": {
       "output": "dist-electron"
     },
-      "files": [
-    "dist/**/*",
-    "electron-main.js",
-    "preload.js",
-    "package.json"
-  ],
+    "files": [
+      "dist/**/*",
+      "electron-main.js",
+      "preload.js"
+    ],
     "extraResources": [
       {
         "from": "../backend",
@@ -66,11 +70,14 @@
     },
     "mac": {
       "target": "dmg",
-      "icon": "public/icon.icns"
+      "icon": "public/icon.icns",
+      "category": "public.app-category.entertainment"
     },
     "linux": {
       "target": ["AppImage", "deb"],
-      "icon": "public/icon.png"
+      "icon": "public/icon.png",
+      "category": "Utility",
+      "maintainer": "akawazak <akawazak@users.noreply.github.com>"
     },
     "nsis": {
       "oneClick": false,
