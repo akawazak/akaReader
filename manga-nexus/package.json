@@ -1,6 +1,6 @@
 {
   "name": "akareader",
-  "version": "1.0.8",
+  "version": "1.1.0",
   "description": "Manga reader powered by Suwayomi",
   "main": "electron-main.js",
   "author": {
@@ -49,7 +49,8 @@
     "files": [
       "dist/**/*",
       "electron-main.js",
-      "preload.js"
+      "preload.js",
+      "public/**/*"
     ],
     "extraResources": [
       {
@@ -63,7 +64,7 @@
     ],
     "win": {
       "target": [
-        { "target": "nsis",     "arch": ["x64"] },
+        { "target": "nsis", "arch": ["x64"] },
         { "target": "portable", "arch": ["x64"] }
       ],
       "icon": "public/icon.ico"
