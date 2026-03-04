@@ -117,12 +117,25 @@ const fmtNum = n => {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ── Health ─────────────────────────────────────────────────────────────────
+// OPTIMIZED: Fast health check - don't block on Suwayomi GraphQL query
+// Just check if our server is up. Suwayomi status is checked separately.
 app.get('/api/health', async (_, res) => {
+  // Instant response - no waiting for Suwayomi
+  res.json({ 
+    ok: true, 
+    timestamp: Date.now(),
+    server: 'akaReader-backend',
+    version: '1.1.3'
+  });
+});
+
+// NEW: Separate endpoint for full health check including Suwayomi
+app.get('/api/health/full', async (_, res) => {
   try {
     await gql('query { aboutServer { version } }');
-    res.json({ ok: true, timestamp: Date.now() });
+    res.json({ ok: true, suwayomi: true, timestamp: Date.now() });
   } catch (e) {
-    res.status(503).json({ ok: false, error: e.message });
+    res.status(503).json({ ok: false, suwayomi: false, error: e.message });
   }
 });
 
@@ -208,7 +221,7 @@ app.get('/api/source/:sourceId/search', async (req, res) => {
   const q = req.query.q || '';
   const page = Math.max(1, parseInt(req.query.page) || 1);
   
-  // NEW: Extract filter parameters
+  // Extract filter parameters
   const filters = {
     status: req.query.status || 'all',
     sort: req.query.sort || 'latest',
@@ -216,7 +229,7 @@ app.get('/api/source/:sourceId/search', async (req, res) => {
     tags: req.query.tags || ''
   };
   
-  // NEW: Include filters in cache key
+  // Include filters in cache key
   const cacheKey = `search-${sourceId}-${q}-${page}-${filters.status}-${filters.sort}-${filters.contentType}-${filters.tags}`;
 
   try {
@@ -235,7 +248,7 @@ app.get('/api/source/:sourceId/search', async (req, res) => {
 
     let { mangas = [], hasNextPage = false } = data.fetchSourceManga;
     
-    // NEW: Apply post-fetch filtering if needed
+    // Apply post-fetch filtering if needed
     if (filters.status !== 'all' || filters.tags) {
       const detailedMangas = await Promise.all(
         mangas.map(async (m) => {
@@ -263,7 +276,7 @@ app.get('/api/source/:sourceId/search', async (req, res) => {
       });
     }
     
-    // NEW: Apply sorting
+    // Apply sorting
     if (filters.sort === 'alphabetical') {
       mangas.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
     }
@@ -337,7 +350,6 @@ app.get('/api/source/:sourceId/manga/:mangaId', async (req, res) => {
         title:  ch.name || '',
         date:   (() => {
           if (!ch.uploadDate) return '';
-          // Suwayomi returns ms epoch as a number or numeric string
           const ts = Number(ch.uploadDate);
           const d  = isNaN(ts) ? new Date(ch.uploadDate) : new Date(ts);
           return isNaN(d.getTime()) ? '' : d.toLocaleDateString();

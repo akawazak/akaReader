@@ -4,15 +4,17 @@ const path = require('path');
 const { spawn } = require('child_process');
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
 
 // Auto updater — gracefully skip if not available (dev mode)
 let autoUpdater = null;
 try { autoUpdater = require('electron-updater').autoUpdater; } catch {}
 
 const isDev = !app.isPackaged;
-let mainWindow, tray, suwayomiProcess, serverProcess;
+let mainWindow, splashWindow, tray, suwayomiProcess, serverProcess;
 let isQuitting = false;
 let isRestarting = false;
+let startupPhase = 'initializing'; // Track startup progress
 
 // SINGLE INSTANCE LOCK - Prevent multiple app instances
 const gotTheLock = app.requestSingleInstanceLock();
@@ -28,6 +30,8 @@ app.on('second-instance', (event, commandLine, workingDirectory) => {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
+  } else if (splashWindow) {
+    splashWindow.focus();
   }
 });
 
@@ -56,7 +60,7 @@ function saveWindowState(win) {
 
 function loadElectronSettings() {
   try { return JSON.parse(fs.readFileSync(settingsPath, 'utf8')); }
-  catch { return { closeToTray: true }; }
+  catch { return { closeToTray: true, startWithWindows: false }; }
 }
 
 function saveElectronSettings(obj) {
@@ -65,6 +69,29 @@ function saveElectronSettings(obj) {
 
 let electronSettings = loadElectronSettings();
 
+// ── Windows Startup Item ───────────────────────────────────────────────────
+function setWindowsStartup(enable) {
+  if (process.platform !== 'win32') return;
+  
+  const { exec } = require('child_process');
+  const appName = 'akaReader';
+  const appPath = process.execPath;
+  
+  if (enable) {
+    // Add to startup registry
+    exec(`reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "${appName}" /t REG_SZ /d "${appPath}" /f`, (err) => {
+      if (err) console.error('[startup] Failed to add to startup:', err);
+      else console.log('[startup] Added to Windows startup');
+    });
+  } else {
+    // Remove from startup registry
+    exec(`reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "${appName}" /f`, (err) => {
+      if (err && !err.message.includes('unable to find')) console.error('[startup] Failed to remove from startup:', err);
+      else console.log('[startup] Removed from Windows startup');
+    });
+  }
+}
+
 // ── IPC ────────────────────────────────────────────────────────────────────
 ipcMain.on('set-close-to-tray', (_, val) => {
   electronSettings.closeToTray = val;
@@ -72,6 +99,21 @@ ipcMain.on('set-close-to-tray', (_, val) => {
 });
 
 ipcMain.handle('get-close-to-tray', () => electronSettings.closeToTray);
+
+ipcMain.on('set-start-with-windows', (_, val) => {
+  electronSettings.startWithWindows = val;
+  saveElectronSettings(electronSettings);
+  setWindowsStartup(val);
+});
+
+ipcMain.handle('get-start-with-windows', () => electronSettings.startWithWindows);
+
+// Send startup progress to renderer
+function sendProgress(status, message) {
+  startupPhase = status;
+  mainWindow?.webContents?.send('startup-progress', { status, message });
+  console.log(`[startup] ${status}: ${message}`);
+}
 
 // ── Restart services IPC ───────────────────────────────────────────────────
 ipcMain.handle('restart-services', async () => {
@@ -82,19 +124,26 @@ ipcMain.handle('restart-services', async () => {
   isRestarting = true;
   
   try {
+    sendProgress('restarting', 'Stopping services...');
     killAll();
-    await new Promise(r => setTimeout(r, 1500));
+    await new Promise(r => setTimeout(r, 1000));
+    
+    sendProgress('starting', 'Starting Suwayomi...');
     const alreadyRunning = await isSuwayomiRunning();
     if (!alreadyRunning) {
       startSuwayomi();
-      await new Promise(r => setTimeout(r, 6000));
+      await new Promise(r => setTimeout(r, 4000)); // Reduced wait
     }
+    
+    sendProgress('starting', 'Starting backend...');
     startServer();
-    const ready = await waitFor('http://localhost:3001/api/health', 20, 1500);
-    mainWindow?.webContents?.send('services-status', ready ? 'online' : 'offline');
+    
+    sendProgress('connecting', 'Waiting for backend...');
+    const ready = await waitFor('http://localhost:3001/api/health', 15, 1000);
+    sendProgress(ready ? 'online' : 'offline', ready ? 'Services ready' : 'Failed to start');
     return ready;
   } catch (e) {
-    mainWindow?.webContents?.send('services-status', 'offline');
+    sendProgress('error', e.message);
     return false;
   } finally {
     isRestarting = false;
@@ -106,7 +155,7 @@ function isSuwayomiRunning() {
   return new Promise(resolve => {
     const req = http.get('http://localhost:4567', () => resolve(true));
     req.on('error', () => resolve(false));
-    req.setTimeout(1500, () => { req.destroy(); resolve(false); });
+    req.setTimeout(1000, () => { req.destroy(); resolve(false); });
   });
 }
 
@@ -120,13 +169,31 @@ function startSuwayomi() {
     suwayomiProcess = null;
   }
   
-  suwayomiProcess = spawn('java', ['-Djava.awt.headless=true', '-jar', jarPath], {
+  // OPTIMIZED JVM flags for faster startup
+  const javaFlags = [
+    '-Djava.awt.headless=true',
+    '-XX:+UseG1GC',
+    '-XX:MaxRAM=512m',
+    '-Xms64m',
+    '-Xmx512m',
+    '-XX:+UseStringDeduplication',
+    '-XX:+OptimizeStringConcat',
+    '-jar', jarPath
+  ];
+  
+  suwayomiProcess = spawn('java', javaFlags, {
     cwd: backendDir,
     stdio: 'pipe',
     windowsHide: true,
   });
   
-  suwayomiProcess.stdout.on('data', d => console.log('[suwayomi]', d.toString().trim()));
+  suwayomiProcess.stdout.on('data', d => {
+    const msg = d.toString().trim();
+    if (msg.includes('Started Application')) {
+      sendProgress('starting', 'Suwayomi ready');
+    }
+  });
+  
   suwayomiProcess.stderr.on('data', d => console.log('[suwayomi:err]', d.toString().trim()));
   
   suwayomiProcess.on('close', code => {
@@ -150,8 +217,6 @@ function startServer() {
     serverProcess = null;
   }
   
-  // CRITICAL FIX: Use 'node' command instead of process.execPath
-  // process.execPath in production is the Electron EXE, not Node!
   const nodeCommand = isDev ? process.execPath : 'node';
   
   serverProcess = spawn(nodeCommand, [serverPath], {
@@ -179,7 +244,7 @@ function startServer() {
 }
 
 // ── Wait for URL ───────────────────────────────────────────────────────────
-async function waitFor(url, retries = 40, delay = 1500) {
+async function waitFor(url, retries = 15, delay = 1000) {
   for (let i = 0; i < retries; i++) {
     try { 
       const res = await fetch(url); 
@@ -190,10 +255,126 @@ async function waitFor(url, retries = 40, delay = 1500) {
   return false;
 }
 
+// ── Splash Window ──────────────────────────────────────────────────────────
+function createSplashWindow() {
+  splashWindow = new BrowserWindow({
+    width: 400,
+    height: 300,
+    frame: false,
+    alwaysOnTop: true,
+    center: true,
+    resizable: false,
+    skipTaskbar: true,
+    backgroundColor: '#0a0a0f',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true
+    },
+    icon: iconPath,
+    show: false
+  });
+
+  // Create inline splash HTML
+  const splashHtml = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+          background: #0a0a0f;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          height: 100vh;
+          color: #f97316;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          overflow: hidden;
+        }
+        .logo {
+          width: 80px;
+          height: 80px;
+          background: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+          border-radius: 20px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 40px;
+          font-weight: bold;
+          color: white;
+          margin-bottom: 20px;
+          animation: pulse 2s ease-in-out infinite;
+        }
+        @keyframes pulse {
+          0%, 100% { transform: scale(1); opacity: 1; }
+          50% { transform: scale(1.05); opacity: 0.9; }
+        }
+        .title {
+          font-size: 24px;
+          font-weight: 600;
+          margin-bottom: 10px;
+          color: #fff;
+        }
+        .status {
+          font-size: 14px;
+          color: #888;
+          margin-bottom: 20px;
+        }
+        .loader {
+          width: 200px;
+          height: 3px;
+          background: #1a1a2e;
+          border-radius: 3px;
+          overflow: hidden;
+          position: relative;
+        }
+        .loader-bar {
+          position: absolute;
+          left: 0;
+          top: 0;
+          height: 100%;
+          width: 40%;
+          background: linear-gradient(90deg, #f97316, #ea580c);
+          border-radius: 3px;
+          animation: slide 1.5s ease-in-out infinite;
+        }
+        @keyframes slide {
+          0% { left: -40%; }
+          100% { left: 100%; }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="logo">R</div>
+      <div class="title">akaReader</div>
+      <div class="status" id="status">Starting up...</div>
+      <div class="loader"><div class="loader-bar"></div></div>
+    </body>
+    </html>
+  `;
+  
+  splashWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(splashHtml)}`);
+  splashWindow.once('ready-to-show', () => splashWindow.show());
+}
+
+function updateSplashStatus(message) {
+  if (!splashWindow || splashWindow.isDestroyed()) return;
+  splashWindow.webContents.executeJavaScript(`
+    document.getElementById('status').textContent = ${JSON.stringify(message)};
+  `).catch(() => {});
+}
+
+function closeSplash() {
+  if (splashWindow && !splashWindow.isDestroyed()) {
+    splashWindow.close();
+    splashWindow = null;
+  }
+}
+
 // ── Tray ────────────────────────────────────────────────────────────
 function createTray() {
   if (tray) {
-    console.log('[tray] Already exists, destroying old one');
     tray.destroy();
   }
   
@@ -214,7 +395,6 @@ function createTray() {
 // ── Main window ────────────────────────────────────────────────────────────
 function createMainWindow() {
   if (mainWindow) {
-    console.log('[window] Already exists, focusing');
     mainWindow.show();
     mainWindow.focus();
     return;
@@ -232,7 +412,7 @@ function createMainWindow() {
     x, y,
     minWidth: 960, minHeight: 640,
     backgroundColor: '#0a0a0f',
-    show: false,
+    show: false, // Don't show until ready
     titleBarStyle: 'hiddenInset',
     titleBarOverlay: { color: '#0f0f18', symbolColor: '#f97316', height: 36 },
     webPreferences: {
@@ -267,7 +447,11 @@ function createMainWindow() {
     mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
   }
 
-  mainWindow.once('ready-to-show', () => mainWindow.show());
+  // Show main window when content is ready, then close splash
+  mainWindow.webContents.on('dom-ready', () => {
+    mainWindow.show();
+    closeSplash();
+  });
 }
 
 // ── Kill all ───────────────────────────────────────────────────────────────
@@ -278,7 +462,6 @@ function killAll() {
     serverProcess.kill('SIGTERM');
     setTimeout(() => {
       if (serverProcess && !serverProcess.killed) {
-        console.log('[killAll] Force killing server');
         serverProcess.kill('SIGKILL');
       }
     }, 2000);
@@ -289,7 +472,6 @@ function killAll() {
     suwayomiProcess.kill('SIGTERM');
     setTimeout(() => {
       if (suwayomiProcess && !suwayomiProcess.killed) {
-        console.log('[killAll] Force killing suwayomi');
         suwayomiProcess.kill('SIGKILL');
       }
     }, 2000);
@@ -297,35 +479,76 @@ function killAll() {
   }
 }
 
+// ── Fast Startup Check ─────────────────────────────────────────────────────
+async function fastStartupCheck() {
+  // Quick check if services are already running (from previous session)
+  const [suwayomiRunning, serverRunning] = await Promise.all([
+    isSuwayomiRunning(),
+    waitFor('http://localhost:3001/api/health', 1, 500).catch(() => false)
+  ]);
+  
+  return { suwayomiRunning, serverRunning };
+}
+
 // ── Start ──────────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
-
+  
+  // 1. SHOW SPLASH IMMEDIATELY (within 100ms)
+  createSplashWindow();
+  updateSplashStatus('Checking services...');
+  
+  // 2. Check if already running (fast path)
+  const { suwayomiRunning, serverRunning } = await fastStartupCheck();
+  
+  // 3. Create main window in background (hidden)
   createTray();
   createMainWindow();
-
-  const suwayomiRunning = await isSuwayomiRunning();
-  const serverRunning = await waitFor('http://localhost:3001/api/health', 1, 500).catch(() => false);
   
+  // 4. Start services if needed (async, don't block UI)
   if (!suwayomiRunning) {
-    console.log('[startup] Starting Suwayomi...');
+    updateSplashStatus('Starting Suwayomi...');
     startSuwayomi();
+    // Reduced wait time - don't block for 6 seconds
+    await new Promise(r => setTimeout(r, 2000));
   } else {
-    console.log('[startup] Suwayomi already running, skipping');
+    updateSplashStatus('Suwayomi already running');
   }
 
   if (!serverRunning) {
-    console.log('[startup] Starting backend server...');
+    updateSplashStatus('Starting backend...');
     startServer();
   } else {
-    console.log('[startup] Backend already running, skipping');
+    updateSplashStatus('Backend already running');
   }
 
-  const ready = await waitFor('http://localhost:3001/api/health', 30, 1000);
-  if (!ready) {
-    dialog.showErrorBox('Startup failed', 'Backend did not respond.\n\nCheck Java is installed: java -version\n\nThen relaunch akaReader.');
-  } else {
-    console.log('[startup] All services ready');
+  // 5. Wait for backend in background with progress updates
+  updateSplashStatus('Connecting...');
+  let attempts = 0;
+  const maxAttempts = 20;
+  
+  while (attempts < maxAttempts) {
+    const ready = await waitFor('http://localhost:3001/api/health', 1, 800);
+    if (ready) {
+      sendProgress('online', 'Ready');
+      updateSplashStatus('Ready!');
+      // Splash closes when main window dom-ready fires
+      break;
+    }
+    attempts++;
+    updateSplashStatus(`Connecting... (${attempts}/${maxAttempts})`);
+  }
+  
+  if (attempts >= maxAttempts) {
+    updateSplashStatus('Connection failed');
+    sendProgress('offline', 'Failed to connect');
+    // Still show main window, let user retry
+    setTimeout(closeSplash, 2000);
+  }
+
+  // Setup Windows startup if enabled
+  if (electronSettings.startWithWindows) {
+    setWindowsStartup(true);
   }
 
   globalShortcut.register('CommandOrControl+Shift+M', () => {
