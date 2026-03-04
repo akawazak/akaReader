@@ -26,6 +26,25 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Sync version with tag
+        shell: bash
+        run: |
+          TAG_VERSION=${GITHUB_REF#refs/tags/v}
+          cd manga-nexus
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          if [ "$TAG_VERSION" != "$CURRENT_VERSION" ]; then
+            echo "Updating package.json from $CURRENT_VERSION to $TAG_VERSION"
+            npm version $TAG_VERSION --no-git-tag-version --allow-same-version
+            cd ..
+            git config user.name "github-actions"
+            git config user.email "github-actions@github.com"
+            git add manga-nexus/package.json manga-nexus/package-lock.json
+            git commit -m "chore: sync version to $TAG_VERSION [skip ci]" || echo "No changes to commit"
+            git push || echo "Nothing to push"
+          else
+            echo "Version already matches: $TAG_VERSION"
+          fi
+
       - name: Install frontend dependencies
         working-directory: manga-nexus
         shell: bash

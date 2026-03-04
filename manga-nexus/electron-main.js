@@ -14,7 +14,7 @@ const isDev = !app.isPackaged;
 let mainWindow, splashWindow, tray, suwayomiProcess, serverProcess;
 let isQuitting = false;
 let isRestarting = false;
-let startupPhase = 'initializing'; // Track startup progress
+let startupPhase = 'initializing';
 
 // SINGLE INSTANCE LOCK - Prevent multiple app instances
 const gotTheLock = app.requestSingleInstanceLock();
@@ -78,13 +78,11 @@ function setWindowsStartup(enable) {
   const appPath = process.execPath;
   
   if (enable) {
-    // Add to startup registry
     exec(`reg add "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "${appName}" /t REG_SZ /d "${appPath}" /f`, (err) => {
       if (err) console.error('[startup] Failed to add to startup:', err);
       else console.log('[startup] Added to Windows startup');
     });
   } else {
-    // Remove from startup registry
     exec(`reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v "${appName}" /f`, (err) => {
       if (err && !err.message.includes('unable to find')) console.error('[startup] Failed to remove from startup:', err);
       else console.log('[startup] Removed from Windows startup');
@@ -108,7 +106,6 @@ ipcMain.on('set-start-with-windows', (_, val) => {
 
 ipcMain.handle('get-start-with-windows', () => electronSettings.startWithWindows);
 
-// Send startup progress to renderer
 function sendProgress(status, message) {
   startupPhase = status;
   mainWindow?.webContents?.send('startup-progress', { status, message });
@@ -132,14 +129,14 @@ ipcMain.handle('restart-services', async () => {
     const alreadyRunning = await isSuwayomiRunning();
     if (!alreadyRunning) {
       startSuwayomi();
-      await new Promise(r => setTimeout(r, 4000)); // Reduced wait
+      await new Promise(r => setTimeout(r, 2000));
     }
     
     sendProgress('starting', 'Starting backend...');
     startServer();
     
     sendProgress('connecting', 'Waiting for backend...');
-    const ready = await waitFor('http://localhost:3001/api/health', 15, 1000);
+    const ready = await waitFor('http://localhost:3001/api/health', 20, 1000);
     sendProgress(ready ? 'online' : 'offline', ready ? 'Services ready' : 'Failed to start');
     return ready;
   } catch (e) {
@@ -169,7 +166,6 @@ function startSuwayomi() {
     suwayomiProcess = null;
   }
   
-  // OPTIMIZED JVM flags for faster startup
   const javaFlags = [
     '-Djava.awt.headless=true',
     '-XX:+UseG1GC',
@@ -244,7 +240,7 @@ function startServer() {
 }
 
 // ── Wait for URL ───────────────────────────────────────────────────────────
-async function waitFor(url, retries = 15, delay = 1000) {
+async function waitFor(url, retries = 15, delay = 500) {
   for (let i = 0; i < retries; i++) {
     try { 
       const res = await fetch(url); 
@@ -274,7 +270,6 @@ function createSplashWindow() {
     show: false
   });
 
-  // Create inline splash HTML
   const splashHtml = `
     <!DOCTYPE html>
     <html>
@@ -412,7 +407,7 @@ function createMainWindow() {
     x, y,
     minWidth: 960, minHeight: 640,
     backgroundColor: '#0a0a0f',
-    show: false, // Don't show until ready
+    show: false,
     titleBarStyle: 'hiddenInset',
     titleBarOverlay: { color: '#0f0f18', symbolColor: '#f97316', height: 36 },
     webPreferences: {
@@ -447,8 +442,8 @@ function createMainWindow() {
     mainWindow.loadFile(path.join(__dirname, 'dist', 'index.html'));
   }
 
-  // Show main window when content is ready, then close splash
-  mainWindow.webContents.on('dom-ready', () => {
+  // FIXED: Use ready-to-show instead of dom-ready
+  mainWindow.once('ready-to-show', () => {
     mainWindow.show();
     closeSplash();
   });
@@ -479,60 +474,53 @@ function killAll() {
   }
 }
 
-// ── Fast Startup Check ─────────────────────────────────────────────────────
-async function fastStartupCheck() {
-  // Quick check if services are already running (from previous session)
-  const [suwayomiRunning, serverRunning] = await Promise.all([
-    isSuwayomiRunning(),
-    waitFor('http://localhost:3001/api/health', 1, 500).catch(() => false)
-  ]);
-  
-  return { suwayomiRunning, serverRunning };
-}
-
 // ── Start ──────────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   
-  // 1. SHOW SPLASH IMMEDIATELY (within 100ms)
+  // 1. SHOW SPLASH IMMEDIATELY - BEFORE ANYTHING ELSE
   createSplashWindow();
-  updateSplashStatus('Checking services...');
+  updateSplashStatus('Initializing...');
   
-  // 2. Check if already running (fast path)
-  const { suwayomiRunning, serverRunning } = await fastStartupCheck();
+  // 2. START SERVICES IN PARALLEL (don't block)
+  const startServices = async () => {
+    // Check and start Suwayomi
+    const suwayomiRunning = await isSuwayomiRunning();
+    if (!suwayomiRunning) {
+      updateSplashStatus('Starting Suwayomi...');
+      startSuwayomi();
+      // Give it a head start but don't wait fully
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    
+    // Check and start backend
+    const serverRunning = await waitFor('http://localhost:3001/api/health', 1, 100);
+    if (!serverRunning) {
+      updateSplashStatus('Starting backend...');
+      startServer();
+    }
+  };
   
-  // 3. Create main window in background (hidden)
+  // Start services without awaiting (let them run in background)
+  const servicesPromise = startServices();
+  
+  // 3. CREATE MAIN WINDOW (this loads the UI)
+  updateSplashStatus('Loading app...');
   createTray();
   createMainWindow();
   
-  // 4. Start services if needed (async, don't block UI)
-  if (!suwayomiRunning) {
-    updateSplashStatus('Starting Suwayomi...');
-    startSuwayomi();
-    // Reduced wait time - don't block for 6 seconds
-    await new Promise(r => setTimeout(r, 2000));
-  } else {
-    updateSplashStatus('Suwayomi already running');
-  }
-
-  if (!serverRunning) {
-    updateSplashStatus('Starting backend...');
-    startServer();
-  } else {
-    updateSplashStatus('Backend already running');
-  }
-
-  // 5. Wait for backend in background with progress updates
+  // 4. WAIT FOR SERVICES TO BE READY
   updateSplashStatus('Connecting...');
+  await servicesPromise; // Now wait for services we started
+  
   let attempts = 0;
-  const maxAttempts = 20;
+  const maxAttempts = 30;
   
   while (attempts < maxAttempts) {
-    const ready = await waitFor('http://localhost:3001/api/health', 1, 800);
+    const ready = await waitFor('http://localhost:3001/api/health', 1, 500);
     if (ready) {
       sendProgress('online', 'Ready');
       updateSplashStatus('Ready!');
-      // Splash closes when main window dom-ready fires
       break;
     }
     attempts++;
@@ -540,10 +528,8 @@ app.whenReady().then(async () => {
   }
   
   if (attempts >= maxAttempts) {
-    updateSplashStatus('Connection failed');
+    updateSplashStatus('Connection failed - Click Retry');
     sendProgress('offline', 'Failed to connect');
-    // Still show main window, let user retry
-    setTimeout(closeSplash, 2000);
   }
 
   // Setup Windows startup if enabled
