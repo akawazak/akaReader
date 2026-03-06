@@ -31,35 +31,26 @@ jobs:
         run: |
           TAG_VERSION=${GITHUB_REF#refs/tags/v}
           cd manga-nexus
-          CURRENT_VERSION=$(node -p "require('./package.json').version")
-          if [ "$TAG_VERSION" != "$CURRENT_VERSION" ]; then
-            echo "Updating package.json from $CURRENT_VERSION to $TAG_VERSION"
+          CURRENT=$(node -p "require('./package.json').version")
+          if [ "$TAG_VERSION" != "$CURRENT" ]; then
             npm version $TAG_VERSION --no-git-tag-version --allow-same-version
             cd ..
             git config user.name "github-actions"
             git config user.email "github-actions@github.com"
             git add manga-nexus/package.json manga-nexus/package-lock.json
-            git commit -m "chore: sync version to $TAG_VERSION [skip ci]" || echo "No changes to commit"
-            git push || echo "Nothing to push"
-          else
-            echo "Version already matches: $TAG_VERSION"
+            git commit -m "chore: sync version to $TAG_VERSION [skip ci]" || true
+            git push || true
           fi
 
       - name: Install frontend dependencies
         working-directory: manga-nexus
-        shell: bash
         run: npm install --no-audit --no-fund --legacy-peer-deps
 
       - name: Install backend dependencies
         working-directory: backend
-        shell: bash
         run: npm install --no-audit --no-fund
 
-      - name: Download Suwayomi JAR
-        shell: bash
-        run: |
-          curl -L -o backend/Suwayomi-Server-v2.1.1867.jar \
-            https://github.com/Suwayomi/Suwayomi-Server/releases/download/v2.1.1867/Suwayomi-Server-v2.1.1867.jar  
+      # No Java, no JAR download needed anymore
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'

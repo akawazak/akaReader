@@ -18,7 +18,6 @@ import {
 
 const CONFIG = {
   API: 'http://localhost:3001/api',
-  SUWAYOMI: 'http://localhost:4567',
   DEBOUNCE_DELAY: 300,
   UPDATE_INTERVAL: 3600000,
 };
@@ -285,18 +284,31 @@ const useToast = () => useContext(ToastContext);
 const DataContext = createContext(null);
 const DataProvider = memo(({ children }) => {
   const [backendOnline, setBackendOnlineRaw] = useState(null);
+  // Track current value in a ref so the callback never has a stale closure
+  const backendOnlineRef = useRef(null);
   // Debounce going offline so a brief wifi blip doesn't flash the error modal
   const offlineTimer = useRef(null);
   const setBackendOnline = useCallback((val) => {
     if (val === false) {
-      // Only go "offline" if still down after 6 seconds
-      offlineTimer.current = offlineTimer.current || setTimeout(() => {
-        setBackendOnlineRaw(false);
+      // Only debounce true→false (brief connectivity hiccup).
+      // null→false (first health check failed) should resolve immediately so
+      // the startup screen exits right away instead of hanging for 6 seconds.
+      if (backendOnlineRef.current === true) {
+        offlineTimer.current = offlineTimer.current || setTimeout(() => {
+          backendOnlineRef.current = false;
+          setBackendOnlineRaw(false);
+          offlineTimer.current = null;
+        }, 6000);
+      } else {
+        clearTimeout(offlineTimer.current);
         offlineTimer.current = null;
-      }, 6000);
+        backendOnlineRef.current = false;
+        setBackendOnlineRaw(false);
+      }
     } else {
       clearTimeout(offlineTimer.current);
       offlineTimer.current = null;
+      backendOnlineRef.current = val;
       setBackendOnlineRaw(val);
     }
   }, []);
@@ -345,7 +357,7 @@ const DataProvider = memo(({ children }) => {
       const data = await fetchJSON('/sources');
       if (!Array.isArray(data)) return;
       const map = {};
-      data.forEach(s => { map[String(s.id)] = { id: String(s.id), name: s.displayName || s.name, lang: s.lang, icon: s.iconUrl ? `${CONFIG.SUWAYOMI}${s.iconUrl}` : null }; });
+      data.forEach(s => { map[String(s.id)] = { id: String(s.id), name: s.displayName || s.name, lang: s.lang, icon: s.icon || s.iconUrl || null }; });
       if (JSON.stringify(map) !== JSON.stringify(sourcesRef.current)) { sourcesRef.current = map; setSources(map); }
     } catch {}
   }, [fetchJSON]);
@@ -354,8 +366,19 @@ const DataProvider = memo(({ children }) => {
     try {
       const data = await fetchJSON('/extensions');
       if (!Array.isArray(data)) return [];
-      if (JSON.stringify(data) !== JSON.stringify(extRef.current)) { extRef.current = data; setExtensions(data); }
-      return data;
+      // Normalize JS extension format → legacy shape ExtCard expects
+      const normalized = data.map(e => ({
+        ...e,
+        pkgName:     e.pkgName  || e.id,
+        isInstalled: e.isInstalled ?? e.installed ?? false,
+        isNsfw:      e.isNsfw   ?? e.nsfw ?? false,
+        versionName: e.versionName || e.version || '1.0.0',
+        versionCode: e.versionCode || 1,
+        hasUpdate:   e.hasUpdate ?? false,
+        iconUrl:     e.iconUrl  || null,  // null = use ext.icon (full URL)
+      }));
+      if (JSON.stringify(normalized) !== JSON.stringify(extRef.current)) { extRef.current = normalized; setExtensions(normalized); }
+      return normalized;
     } catch { return []; }
   }, [fetchJSON]);
 
@@ -363,12 +386,10 @@ const DataProvider = memo(({ children }) => {
     setInstalling(s => new Set([...s, pkgName]));
     try {
       await fetchJSON(`/extensions/install/${encodeURIComponent(pkgName)}`, { method: 'POST' });
-      for (let i = 0; i < 30; i++) {
-        await new Promise(r => setTimeout(r, 2000));
-        const exts = await fetchExtensions();
-        const found = exts.find(e => e.pkgName === pkgName);
-        if (found?.isInstalled) { await fetchSources(); toastRef.current?.(`${found.name} installed`, 'success'); break; }
-      }
+      const exts = await fetchExtensions();
+      await fetchSources();
+      const found = exts.find(e => e.pkgName === pkgName || e.id === pkgName);
+      toastRef.current?.(`${found?.name || pkgName} installed`, 'success');
     } catch (e) { toastRef.current?.(`Install failed: ${e.message}`, 'error'); }
     finally { setInstalling(s => { const n = new Set(s); n.delete(pkgName); return n; }); }
   }, [fetchJSON, fetchExtensions, fetchSources]);
@@ -700,7 +721,7 @@ const ExtCard = memo(({ ext, onInstall, onUninstall, installing, onUpdate }) => 
     <div className="hover-lift" style={{ display:'flex', alignItems:'center', gap:16, padding:'16px 20px', borderRadius:16, background:'var(--card)', border:`1.5px solid ${isInstalled?'rgba(34,197,94,0.2)':'var(--border)'}`, transition:'all 0.3s', position:'relative', overflow:'hidden' }}>
       {isInstalled && <div style={{ position:'absolute', inset:0, background:'linear-gradient(90deg,rgba(34,197,94,0.03),transparent)', pointerEvents:'none' }}/>}
       <div style={{ width:52, height:52, borderRadius:14, background:'var(--card2)', border:'1.5px solid var(--border)', overflow:'hidden', display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, position:'relative' }}>
-        {ext.iconUrl ? <img src={`${CONFIG.SUWAYOMI}${ext.iconUrl}`} style={{ width:'100%', height:'100%', objectFit:'contain', padding:8 }} onError={e=>e.target.style.display='none'} alt="" loading="lazy"/> : <Globe size={22} style={{ color:'var(--muted)' }}/>}
+        {(ext.icon || ext.iconUrl) ? <img src={ext.icon || ext.iconUrl} style={{ width:'100%', height:'100%', objectFit:'contain', padding:8 }} onError={e=>e.target.style.display='none'} alt="" loading="lazy"/> : <Globe size={22} style={{ color:'var(--muted)' }}/>}
         {isInstalled && <div style={{ position:'absolute', bottom:-1, right:-1, width:16, height:16, background:'#22c55e', borderRadius:'50%', border:'2px solid var(--card)', boxShadow:'0 0 8px #22c55e' }}/>}
       </div>
       <div style={{ flex:1, minWidth:0 }}>
@@ -1222,9 +1243,6 @@ const SettingsPage = memo(() => {
             </div>
             <Btn variant="outline" size="sm" onClick={() => { checkHealth(); fetchSources(); fetchExtensions(); toast('Refreshing...', 'info'); }}><RefreshCw size={14}/> Refresh</Btn>
           </div>
-        </Row>
-        <Row label="Suwayomi URL" sub="Server address">
-          <span style={{ fontSize:12, color:'var(--muted)', fontFamily:'monospace', background:'var(--card2)', padding:'6px 12px', borderRadius:8 }}>{CONFIG.SUWAYOMI}</span>
         </Row>
       </Section>
 
@@ -2106,7 +2124,7 @@ const ServiceErrorModal = memo(({ onRestart }) => {
         <AlertCircle size={48} style={{ color:'#f87171', marginBottom:16 }}/>
         <h2 style={{ fontFamily:"'Exo 2',sans-serif", fontWeight:800, fontSize:20, marginBottom:10 }}>Backend Offline</h2>
         <p style={{ color:'var(--muted)', fontSize:14, lineHeight:1.8, marginBottom:28 }}>
-          The akaReader backend has stopped responding. This can happen if Suwayomi crashed or the server process exited unexpectedly.
+          The akaReader backend has stopped responding. This can happen if the server process exited unexpectedly.
         </p>
         <div style={{ display:'flex', gap:12, justifyContent:'center' }}>
           <Btn variant="outline" onClick={onRestart}>Dismiss</Btn>
@@ -2125,41 +2143,65 @@ const ServiceErrorModal = memo(({ onRestart }) => {
 
 const StartupScreen = memo(() => {
   const [phase, setPhase] = useState(0);
-  // phase 0 = icon drops in, 1 = title appears, 2 = bar fills, 3 = tips cycle
-  const tips = [
-    'Loading manga sources...',
-    'Warming up Suwayomi...',
-    'Preparing your library...',
-    'Almost there...',
-  ];
-  const [tipIdx, setTipIdx] = useState(0);
+  const [statusMsg, setStatusMsg] = useState('Starting services...');
   const [barW, setBarW] = useState(0);
+  const [downloadPct, setDownloadPct] = useState(null); // null = not downloading
+
+  // Map Electron status codes to human messages + bar progress
+  const STATUS_MAP = {
+    'downloading-jre':       { msg: 'Downloading Java runtime (first launch only)...', bar: null },
+    'extracting-jre':        { msg: 'Extracting Java runtime...', bar: 15 },
+    'downloading-suwayomi':  { msg: 'Downloading Suwayomi server (first launch only)...', bar: null },
+    'starting-suwayomi':     { msg: 'Starting Suwayomi — this can take 20–30 seconds...', bar: 50 },
+    'online':                { msg: 'Ready!', bar: 100 },
+    'offline':               { msg: 'Waiting for services...', bar: 40 },
+    'crashed':               { msg: 'Service crashed — retrying...', bar: 30 },
+    'suwayomi-failed':       { msg: 'Suwayomi failed to start. Check Java is installed.', bar: 30 },
+  };
 
   useEffect(() => {
     const t1 = setTimeout(() => setPhase(1), 300);
     const t2 = setTimeout(() => setPhase(2), 700);
-    const t3 = setTimeout(() => setPhase(3), 1100);
+    const t3 = setTimeout(() => { setPhase(3); }, 1100);
     return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
   }, []);
 
-  // Animate the progress bar
+  // Animate bar slowly while waiting (stops at 90 unless we get real progress)
   useEffect(() => {
     if (phase < 2) return;
     let w = 0;
     const tick = setInterval(() => {
-      w += Math.random() * 3.5 + 0.5;
-      if (w >= 92) { w = 92; clearInterval(tick); }
-      setBarW(w);
-    }, 80);
+      w += Math.random() * 1.2 + 0.2;
+      if (w >= 90) { w = 90; clearInterval(tick); }
+      setBarW(prev => downloadPct !== null ? downloadPct : Math.max(prev, w));
+    }, 120);
     return () => clearInterval(tick);
   }, [phase]);
 
-  // Cycle tips
+  // Listen for real status from Electron
   useEffect(() => {
-    if (phase < 3) return;
-    const t = setInterval(() => setTipIdx(i => (i + 1) % tips.length), 1800);
-    return () => clearInterval(t);
-  }, [phase]);
+    if (!window.electronAPI?.onServicesStatus) return;
+    window.electronAPI.onServicesStatus((status) => {
+      // Handle download progress like "downloading-suwayomi:75"
+      if (status.includes(':') && !status.startsWith('update-available')) {
+        const [code, val] = status.split(':');
+        const pct = parseInt(val);
+        if (!isNaN(pct)) {
+          setDownloadPct(pct);
+          setBarW(pct * 0.45); // downloads are 0-45% of bar
+          const label = code === 'downloading-jre' ? 'Downloading Java runtime' : 'Downloading Suwayomi';
+          setStatusMsg(`${label}... ${pct}%`);
+          return;
+        }
+      }
+      setDownloadPct(null);
+      const mapped = STATUS_MAP[status];
+      if (mapped) {
+        setStatusMsg(mapped.msg);
+        if (mapped.bar !== null) setBarW(mapped.bar);
+      }
+    });
+  }, []);
 
   return (
     <div style={{
@@ -2299,12 +2341,12 @@ const StartupScreen = memo(() => {
             }}/>
           </div>
 
-          {/* Cycling tip */}
+          {/* Real status message */}
           <div style={{ height:20, overflow:'hidden', textAlign:'center' }}>
-            <p key={tipIdx} className="ss-tip-key" style={{
-              color:'#475569', fontSize:12, fontWeight:500,
+            <p style={{
+              color:'#64748b', fontSize:12, fontWeight:500, transition:'all 0.3s',
             }}>
-              {tips[tipIdx]}
+              {statusMsg}
             </p>
           </div>
         </div>
@@ -2648,8 +2690,10 @@ const App = memo(() => {
   }, [activeSource, mangaDetail, fetchJSON, updateProgress, markChapterRead, toast]);
 
   const chIdx = chapRef.current.findIndex(c => c.id === currentChapter?.id);
-  const hasNextCh = chIdx >= 0 && chIdx < chapRef.current.length - 1;
-  const hasPrevCh = chIdx > 0;
+  // Chapters are sorted descending (highest number = index 0).
+  // "Next" in reading order means higher chapter number = lower array index.
+  const hasNextCh = chIdx > 0;
+  const hasPrevCh = chIdx >= 0 && chIdx < chapRef.current.length - 1;
 
   const handleDownload = useCallback(async (chapter) => {
     const mangaId = mangaDetail?.id;
@@ -2873,8 +2917,8 @@ const App = memo(() => {
       <Reader
         pages={pages} currentChapter={currentChapter} mangaTitle={mangaDetail?.title}
         onBack={goBack}
-        onNextChapter={() => { const n=chapRef.current[chIdx+1]; if(n)openChapter(n); }}
-        onPrevChapter={() => { const p=chapRef.current[chIdx-1]; if(p)openChapter(p); }}
+        onNextChapter={() => { const n=chapRef.current[chIdx-1]; if(n)openChapter(n); }}
+        onPrevChapter={() => { const p=chapRef.current[chIdx+1]; if(p)openChapter(p); }}
         hasNext={hasNextCh} hasPrev={hasPrevCh}
         onPageChange={setReaderPage}
         initialPage={progress[mangaDetail?.id]?.page||0}
@@ -3085,7 +3129,7 @@ const App = memo(() => {
             <AlertTriangle size={18} style={{ color:'#facc15', flexShrink:0 }}/>
             <div style={{ flex:1 }}>
               <p style={{ fontWeight:700, fontSize:14, color:'#facc15', marginBottom:2 }}>Backend offline</p>
-              <p style={{ fontSize:12, color:'rgba(253,224,71,0.8)', lineHeight:1.5 }}>1. Start Suwayomi &nbsp; 2. <code style={{ background:'rgba(0,0,0,0.3)', padding:'1px 6px', borderRadius:4 }}>node server.js</code></p>
+              <p style={{ fontSize:12, color:'rgba(253,224,71,0.8)', lineHeight:1.5 }}>Run <code style={{ background:'rgba(0,0,0,0.3)', padding:'1px 6px', borderRadius:4 }}>node backend/server.js</code> then refresh.</p>
             </div>
             <Btn variant="outline" size="sm" onClick={checkHealth} style={{ flexShrink:0 }}><RefreshCw size={13}/> Retry</Btn>
           </div>

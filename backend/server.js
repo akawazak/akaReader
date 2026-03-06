@@ -117,25 +117,12 @@ const fmtNum = n => {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ── Health ─────────────────────────────────────────────────────────────────
-// OPTIMIZED: Fast health check - don't block on Suwayomi GraphQL query
-// Just check if our server is up. Suwayomi status is checked separately.
 app.get('/api/health', async (_, res) => {
-  // Instant response - no waiting for Suwayomi
-  res.json({ 
-    ok: true, 
-    timestamp: Date.now(),
-    server: 'akaReader-backend',
-    version: '1.1.3'
-  });
-});
-
-// NEW: Separate endpoint for full health check including Suwayomi
-app.get('/api/health/full', async (_, res) => {
   try {
     await gql('query { aboutServer { version } }');
-    res.json({ ok: true, suwayomi: true, timestamp: Date.now() });
+    res.json({ ok: true, timestamp: Date.now() });
   } catch (e) {
-    res.status(503).json({ ok: false, suwayomi: false, error: e.message });
+    res.status(503).json({ ok: false, error: e.message });
   }
 });
 
@@ -220,17 +207,7 @@ app.get('/api/source/:sourceId/search', async (req, res) => {
   const { sourceId } = req.params;
   const q = req.query.q || '';
   const page = Math.max(1, parseInt(req.query.page) || 1);
-  
-  // Extract filter parameters
-  const filters = {
-    status: req.query.status || 'all',
-    sort: req.query.sort || 'latest',
-    contentType: req.query.contentType || 'all',
-    tags: req.query.tags || ''
-  };
-  
-  // Include filters in cache key
-  const cacheKey = `search-${sourceId}-${q}-${page}-${filters.status}-${filters.sort}-${filters.contentType}-${filters.tags}`;
+  const cacheKey = `search-${sourceId}-${q}-${page}`;
 
   try {
     const cached = caches.search.get(cacheKey);
@@ -246,50 +223,15 @@ app.get('/api/source/:sourceId/search', async (req, res) => {
       { src: sourceId, type: q ? 'SEARCH' : 'POPULAR', q, page }
     );
 
-    let { mangas = [], hasNextPage = false } = data.fetchSourceManga;
-    
-    // Apply post-fetch filtering if needed
-    if (filters.status !== 'all' || filters.tags) {
-      const detailedMangas = await Promise.all(
-        mangas.map(async (m) => {
-          try {
-            const d = await gql(`query($id:Int!){ manga(id:$id){ id status genre } }`, { id: m.id });
-            return { ...m, ...d.manga };
-          } catch { return m; }
-        })
-      );
-      
-      mangas = detailedMangas.filter(m => {
-        if (filters.status !== 'all' && m.status) {
-          const status = m.status.toLowerCase();
-          if (!status.includes(filters.status)) return false;
-        }
-        if (filters.tags && m.genre) {
-          const genres = Array.isArray(m.genre) ? m.genre : m.genre.split(',').map(g => g.trim());
-          const searchTags = filters.tags.toLowerCase().split(',').map(t => t.trim());
-          const hasTag = searchTags.some(tag => 
-            genres.some(g => g.toLowerCase().includes(tag))
-          );
-          if (!hasTag) return false;
-        }
-        return true;
-      });
-    }
-    
-    // Apply sorting
-    if (filters.sort === 'alphabetical') {
-      mangas.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
-    }
-
+    const { mangas = [], hasNextPage = false } = data.fetchSourceManga;
     const result = {
       results: mangas.map(m => ({ id: String(m.id), title: m.title, cover: fixUrl(m.thumbnailUrl) })),
       hasNextPage,
-      appliedFilters: filters
     };
-    
     caches.search.set(cacheKey, result);
     res.json(result);
   } catch (e) {
+    console.error(`[search:${sourceId}]`, e.message);
     res.status(500).json({ error: e.message });
   }
 });
@@ -348,12 +290,7 @@ app.get('/api/source/:sourceId/manga/:mangaId', async (req, res) => {
         id:     String(ch.id),
         number: fmtNum(ch.chapterNumber) ?? ch.name?.match(/[\d.]+/)?.[0] ?? '?',
         title:  ch.name || '',
-        date:   (() => {
-          if (!ch.uploadDate) return '';
-          const ts = Number(ch.uploadDate);
-          const d  = isNaN(ts) ? new Date(ch.uploadDate) : new Date(ts);
-          return isNaN(d.getTime()) ? '' : d.toLocaleDateString();
-        })(),
+        date:   ch.uploadDate ? new Date(ch.uploadDate).toLocaleDateString() : '',
         group:  ch.scanlator || '',
         read:   ch.isRead || false,
       }))
