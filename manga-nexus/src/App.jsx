@@ -362,6 +362,7 @@ const DataProvider = memo(({ children }) => {
   }));
   const [updates, setUpdates] = useState([]);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [suwayomiReady, setSuwayomiReady] = useState(false);
 
   const toastRef = useRef(null);
   toastRef.current = useToast();
@@ -545,13 +546,13 @@ const DataProvider = memo(({ children }) => {
   const value = useMemo(() => ({
     backendOnline, sources, extensions, library, history, progress,
     mangaCategories, installing, readingTime, settings, updates, checkingUpdates,
-    readChapters,
+    readChapters, suwayomiReady, setSuwayomiReady,
     fetchJSON, checkHealth, fetchSources, fetchExtensions,
     installExt, uninstallExt, updateExt,
     toggleLibrary, setCategory, addToHistory, removeFromHistory,
     updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates,
     inLibrary: (id) => library.some(m => m.id === id)
-  }), [backendOnline, sources, extensions, library, history, progress, mangaCategories, installing, readingTime, settings, updates, checkingUpdates, readChapters, fetchJSON, checkHealth, fetchSources, fetchExtensions, installExt, uninstallExt, updateExt, toggleLibrary, setCategory, addToHistory, removeFromHistory, updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates]);
+  }), [backendOnline, sources, extensions, library, history, progress, mangaCategories, installing, readingTime, settings, updates, checkingUpdates, readChapters, suwayomiReady, setSuwayomiReady, fetchJSON, checkHealth, fetchSources, fetchExtensions, installExt, uninstallExt, updateExt, toggleLibrary, setCategory, addToHistory, removeFromHistory, updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates]);
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 });
@@ -2495,7 +2496,8 @@ const App = memo(() => {
     fetchJSON, checkHealth, fetchSources, fetchExtensions,
     installExt, uninstallExt, updateExt, toggleLibrary, setCategory,
     addToHistory, removeFromHistory, updateProgress, inLibrary,
-    checkForUpdates, addReadingTime, updateSetting
+    checkForUpdates, addReadingTime, updateSetting,
+    suwayomiReady, setSuwayomiReady,
   } = data;
 
   const { downloadedKeys, refreshDownloads } = useDownloads();
@@ -2519,8 +2521,7 @@ const App = memo(() => {
   // Error recovery
   const [showErrorModal, setShowErrorModal] = useState(false);
   const errorTimerRef = useRef(null);
-  // Tracks whether Suwayomi (port 4567) is up — false while it's still starting
-  const [suwayomiReady, setSuwayomiReady] = useState(false);
+  // Tracks whether Suwayomi (port 4567) is up — lives in DataProvider/context
 
   // Listen for services status from Electron
   useEffect(() => {
