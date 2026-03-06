@@ -383,7 +383,12 @@ const DataProvider = memo(({ children }) => {
   }, []);
 
   const checkHealth = useCallback(async () => {
-    try { const d = await fetchJSON('/health'); setBackendOnline(d.ok); }
+    try {
+      const d = await fetchJSON('/health');
+      setBackendOnline(d.ok);
+      // Sync Suwayomi state from the health response when polling
+      if (d.ok && d.suwayomi !== undefined) setSuwayomiReady(d.suwayomi);
+    }
     catch { setBackendOnline(false); }
   }, [fetchJSON]);
 
@@ -2262,7 +2267,9 @@ const StartupScreen = memo(() => {
     'downloading-jre':       { msg: 'Downloading Java runtime (first launch only)...', bar: null },
     'extracting-jre':        { msg: 'Extracting Java runtime...', bar: 15 },
     'downloading-suwayomi':  { msg: 'Downloading Suwayomi server (first launch only)...', bar: null },
+    'suwayomi-starting':     { msg: 'Starting Suwayomi server...', bar: 45 },
     'starting-suwayomi':     { msg: 'Starting Suwayomi — this can take 20–30 seconds...', bar: 50 },
+    'suwayomi-ready':        { msg: 'Suwayomi ready!', bar: 95 },
     'online':                { msg: 'Ready!', bar: 100 },
     'offline':               { msg: 'Waiting for services...', bar: 40 },
     'crashed':               { msg: 'Service crashed — retrying...', bar: 30 },
@@ -2512,6 +2519,8 @@ const App = memo(() => {
   // Error recovery
   const [showErrorModal, setShowErrorModal] = useState(false);
   const errorTimerRef = useRef(null);
+  // Tracks whether Suwayomi (port 4567) is up — false while it's still starting
+  const [suwayomiReady, setSuwayomiReady] = useState(false);
 
   // Listen for services status from Electron
   useEffect(() => {
@@ -2520,14 +2529,21 @@ const App = memo(() => {
         if (status === 'crashed' || status === 'offline') {
           setShowErrorModal(true);
         } else if (status === 'online') {
+          // Node server (port 3001) is up — exit startup screen immediately.
+          // Suwayomi may still be starting; checkHealth now returns ok:true
+          // as long as the server itself is responding.
           setShowErrorModal(false);
-          // Immediately probe the backend — this transitions backendOnline from
-          // null → true, which exits the startup screen right away instead of
-          // waiting up to 10s for the next health-check poll.
-          checkHealth().then(() => {
-            fetchSources();
-            fetchExtensions();
-          });
+          checkHealth().then(() => { fetchSources(); fetchExtensions(); });
+        } else if (status === 'suwayomi-starting') {
+          setSuwayomiReady(false);
+        } else if (status === 'suwayomi-ready') {
+          setSuwayomiReady(true);
+          // Suwayomi is now up — refresh sources & extensions
+          fetchSources();
+          fetchExtensions();
+        } else if (status.startsWith('suwayomi-failed:')) {
+          setSuwayomiReady(false);
+          // Leave the banner up so the user knows why browse isn't working
         } else if (status.startsWith('update-available:')) {
           setUpdateAvailable(status.split(':')[1]);
         }
@@ -3067,6 +3083,13 @@ const App = memo(() => {
       {showOnboarding && <Onboarding onFinish={() => { setShowOnboarding(false); storage.set('onboardingDone', true); }}/>}
       {showErrorModal && <ServiceErrorModal onRestart={() => { setShowErrorModal(false); checkHealth(); }}/>}
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)}/>}
+      {/* Non-blocking banner while Suwayomi is still booting in the background */}
+      {backendOnline && !suwayomiReady && !showErrorModal && (
+        <div className="anim-slideDown" style={{ position:'fixed', top:38, left:0, right:0, zIndex:800, background:'rgba(15,15,24,0.96)', backdropFilter:'blur(12px)', borderBottom:'1px solid rgba(249,115,22,0.25)', padding:'9px 20px', display:'flex', alignItems:'center', gap:10 }}>
+          <div className="anim-spin" style={{ width:13, height:13, border:'2px solid rgba(249,115,22,0.3)', borderTopColor:'var(--accent)', borderRadius:'50%', flexShrink:0 }}/>
+          <span style={{ fontSize:12, color:'var(--muted)', fontWeight:500 }}>Suwayomi is starting… browse and extensions will load shortly</span>
+        </div>
+      )}
       {updateAvailable && (
         <div className="anim-fadeIn" style={{ position:'fixed', top:0, left:0, right:0, zIndex:900, background:'linear-gradient(90deg,rgba(234,179,8,0.95),rgba(251,191,36,0.95))', backdropFilter:'blur(12px)', padding:'10px 20px', display:'flex', alignItems:'center', justifyContent:'center', gap:12 }}>
           <BellRing size={16} style={{ color:'#78350f' }}/>

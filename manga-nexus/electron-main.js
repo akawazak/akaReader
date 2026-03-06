@@ -74,10 +74,20 @@ function saveWindowState(win) {
 let appSettings = loadSettings();
 
 // ── Status helper ─────────────────────────────────────────────────────────────
+// Messages fired before the renderer finishes loading are queued and flushed
+// the moment React is ready — otherwise early statuses (download progress etc.)
+// are silently dropped and the startup screen never shows what's happening.
+let _statusQueue = [];
 function sendStatus(status) {
-  if (mainWindow && !mainWindow.isDestroyed())
-    mainWindow.webContents.send('services-status', status);
   console.log('[status]', status);
+  if (!mainWindow || mainWindow.isDestroyed()) { _statusQueue.push(status); return; }
+  if (mainWindow.webContents.isLoading()) { _statusQueue.push(status); return; }
+  mainWindow.webContents.send('services-status', status);
+}
+function flushStatusQueue() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  _statusQueue.forEach(s => mainWindow.webContents.send('services-status', s));
+  _statusQueue = [];
 }
 
 // ── HTTPS download with progress ──────────────────────────────────────────────
@@ -467,6 +477,8 @@ function createMainWindow() {
     icon: iconPath,
   });
 
+  mainWindow.webContents.on('did-finish-load', flushStatusQueue);
+
   ['resize', 'move'].forEach(ev => mainWindow.on(ev, () => saveWindowState(mainWindow)));
   mainWindow.on('close', e => {
     if (!isQuitting && appSettings.closeToTray) { e.preventDefault(); mainWindow.hide(); }
@@ -502,6 +514,7 @@ app.whenReady().then(async () => {
         'Content-Security-Policy': [
           "default-src 'self' 'unsafe-inline' http://localhost:* file:;",
           "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;",
+          "style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com;",
           "font-src 'self' https://fonts.gstatic.com data:;",
           "img-src 'self' data: blob: http://localhost:* file:;",
           "script-src 'self' 'unsafe-inline' http://localhost:*;",
@@ -519,31 +532,33 @@ app.whenReady().then(async () => {
   createMainWindow(); // window appears instantly
   startServer();      // kick off in background
 
-  try {
-    await ensureJre();
-    await ensureJar();
+  // ── Step 1: unblock the UI as soon as the Node server responds ─────────────
+  // This exits the startup screen within ~2 seconds so the user sees the app.
+  // Suwayomi continues starting in the background (step 2).
+  waitForServer(40, 250).then(ok => {
+    if (ok) sendStatus('online');
+    else    sendStatus('offline');
+  });
 
-    // FIX: async, doesn't block window rendering
-    if (await isServiceRunning()) {
-      console.log('[startup] Service running — instant start');
-      serviceMode = true;
-      sendStatus('online');
-    } else {
-      const firstRun = !fs.existsSync(path.join(userData, '.service-installed'));
-      if (firstRun && process.platform === 'win32') {
-        await startSuwayomi();
-        fs.writeFileSync(path.join(userData, '.service-installed'), '1');
+  // ── Step 2: start Suwayomi in the background — doesn't block the UI ────────
+  (async () => {
+    try {
+      sendStatus('suwayomi-starting');
+      await ensureJre();
+      await ensureJar();
+
+      if (await isServiceRunning()) {
+        console.log('[startup] Service already running');
+        serviceMode = true;
       } else {
         await startSuwayomi();
       }
-      sendStatus('online');
+      sendStatus('suwayomi-ready');
+    } catch (e) {
+      console.error('[startup] Suwayomi error:', e.message);
+      sendStatus('suwayomi-failed:' + e.message);
     }
-  } catch (e) {
-    console.error('[startup] Error:', e.message);
-    sendStatus('offline');
-  }
-
-  waitForServer(30, 200).then(ok => sendStatus(ok ? 'online' : 'offline'));
+  })();
 
   if (appSettings.startWithWindows) setWindowsStartup(true);
 
