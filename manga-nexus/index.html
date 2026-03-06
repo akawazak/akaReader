@@ -2,9 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>manga-nexus</title>
+    <meta http-equiv="Content-Security-Policy"
+      content="default-src 'self' 'unsafe-inline' http://localhost:* file:;
+               img-src 'self' data: blob: http://localhost:* file:;
+               script-src 'self' 'unsafe-inline' http://localhost:*;
+               connect-src 'self' http://localhost:* ws://localhost:*;" />
+    <title>akaReader</title>
   </head>
   <body>
     <div id="root"></div>

@@ -117,6 +117,35 @@ const fmtNum = n => {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ── Health ─────────────────────────────────────────────────────────────────
+// ── Image Proxy ────────────────────────────────────────────────────────────
+// Suwayomi icons/covers/pages are served from localhost:4567 — the browser
+// can't load them directly due to mixed-content blocking in Electron
+// (file:// → http://) and missing CORS headers on Suwayomi's image endpoints.
+// This proxy fetches them server-side and re-serves with proper headers.
+app.get('/api/img', async (req, res) => {
+  const raw = req.query.url;
+  if (!raw) return res.status(400).end();
+
+  let url;
+  try { url = decodeURIComponent(raw); } catch { return res.status(400).end(); }
+
+  // Only allow proxying from our Suwayomi instance
+  if (!url.startsWith(SUWAYOMI) && !url.startsWith('http://localhost:')) {
+    return res.status(403).end();
+  }
+
+  try {
+    const r = await http.get(url, { responseType: 'arraybuffer', timeout: 15000 });
+    res.set('Content-Type', r.headers['content-type'] || 'image/jpeg');
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.set('Access-Control-Allow-Origin', '*');
+    res.send(Buffer.from(r.data));
+  } catch (e) {
+    console.error('[img-proxy]', e.message);
+    res.status(502).end();
+  }
+});
+
 app.get('/api/health', async (_, res) => {
   try {
     await gql('query { aboutServer { version } }');

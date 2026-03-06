@@ -16,10 +16,43 @@ import {
 
 // ==================== CONFIG & CONSTANTS ====================
 
+// Catches JS render errors and shows a recovery UI instead of white-screening
+class ErrorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(e) { return { error: e }; }
+  componentDidCatch(e, info) { console.error('[ErrorBoundary]', e, info); }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div style={{ display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', height:'100vh', background:'#0a0a0f', color:'#f87171', gap:16, padding:32 }}>
+        <span style={{ fontSize:32 }}>💥</span>
+        <h2 style={{ color:'#f1f5f9', margin:0 }}>Something crashed</h2>
+        <p style={{ color:'#64748b', textAlign:'center', maxWidth:400 }}>{this.state.error.message}</p>
+        <button
+          onClick={() => this.setState({ error: null })}
+          style={{ padding:'10px 24px', background:'#f97316', border:'none', borderRadius:10, color:'#fff', fontWeight:700, cursor:'pointer', fontSize:14 }}
+        >Try again</button>
+      </div>
+    );
+  }
+}
+
 const CONFIG = {
   API: 'http://localhost:3001/api',
+  SUWAYOMI: 'http://localhost:4567',
   DEBOUNCE_DELAY: 300,
   UPDATE_INTERVAL: 3600000,
+};
+
+// Route Suwayomi images through our backend proxy so Electron doesn't
+// block them as mixed-content (file:// → http://localhost:4567)
+const proxyImg = (url) => {
+  if (!url) return null;
+  if (url.startsWith('http://localhost:4567') || url.startsWith('/')) {
+    const absolute = url.startsWith('/') ? `${CONFIG.SUWAYOMI}${url}` : url;
+    return `${CONFIG.API}/img?url=${encodeURIComponent(absolute)}`;
+  }
+  return url; // already an external CDN URL — serve directly
 };
 
 const LANGUAGES = [
@@ -128,7 +161,9 @@ const GlobalStyles = memo(({ appTheme }) => {
   useEffect(() => {
     const style = document.createElement('style');
     style.textContent = `
-      @import url('https://fonts.googleapis.com/css2?family=Exo+2:wght@400;500;600;700;800;900&family=Inter:wght@300;400;500;600;700&display=swap');
+      /* Zero external font dependencies — works fully offline.
+         Uses 'Segoe UI Variable Display' on Win11, 'Segoe UI' on Win10,
+         system-ui everywhere else. Looks sharp on all platforms. */
       :root {
         --bg: #0a0a0f; --bg2: #0f0f18; --bg3: #13131f;
         --card: #16161f; --card2: #1c1c2a; --card-hover: #222230;
@@ -163,7 +198,7 @@ const GlobalStyles = memo(({ appTheme }) => {
       [data-theme="light"] .anim-shimmer { background: linear-gradient(90deg, rgba(0,0,0,0.04) 0%, rgba(0,0,0,0.08) 50%, rgba(0,0,0,0.04) 100%); background-size: 200% 100%; animation: shimmer 1.5s infinite; }
       *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
       html { scroll-behavior: smooth; }
-      body, #root { min-height: 100vh; background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+      body, #root { min-height: 100vh; background: var(--bg); color: var(--text); font-family: 'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,'Helvetica Neue',Arial,sans-serif; -webkit-font-smoothing: antialiased; overflow-x: hidden; }
       ::-webkit-scrollbar { width: 6px; height: 6px; }
       ::-webkit-scrollbar-track { background: var(--bg2); }
       ::-webkit-scrollbar-thumb { background: linear-gradient(180deg, var(--accent), var(--accent2)); border-radius: 3px; }
@@ -357,7 +392,7 @@ const DataProvider = memo(({ children }) => {
       const data = await fetchJSON('/sources');
       if (!Array.isArray(data)) return;
       const map = {};
-      data.forEach(s => { map[String(s.id)] = { id: String(s.id), name: s.displayName || s.name, lang: s.lang, icon: s.icon || s.iconUrl || null }; });
+      data.forEach(s => { map[String(s.id)] = { id: String(s.id), name: s.displayName || s.name, lang: s.lang, icon: proxyImg(s.icon || s.iconUrl || null) }; });
       if (JSON.stringify(map) !== JSON.stringify(sourcesRef.current)) { sourcesRef.current = map; setSources(map); }
     } catch {}
   }, [fetchJSON]);
@@ -375,7 +410,7 @@ const DataProvider = memo(({ children }) => {
         versionName: e.versionName || e.version || '1.0.0',
         versionCode: e.versionCode || 1,
         hasUpdate:   e.hasUpdate ?? false,
-        iconUrl:     e.iconUrl  || null,  // null = use ext.icon (full URL)
+        iconUrl:     proxyImg(e.iconUrl || null),  // proxied through backend
       }));
       if (JSON.stringify(normalized) !== JSON.stringify(extRef.current)) { extRef.current = normalized; setExtensions(normalized); }
       return normalized;
@@ -496,7 +531,9 @@ const DataProvider = memo(({ children }) => {
 
   useEffect(() => {
     checkHealth(); fetchSources(); fetchExtensions();
-    const t = setInterval(() => { checkHealth(); fetchSources(); fetchExtensions(); }, 10000);
+    // Health every 30s is plenty — sources/extensions only need refreshing
+    // when something changes (install/uninstall already clears caches).
+    const t = setInterval(() => { checkHealth(); }, 30000);
     return () => clearInterval(t);
   }, [checkHealth, fetchSources, fetchExtensions]);
 
@@ -522,7 +559,7 @@ const Spin = memo(({ size = 24 }) => (
 ));
 
 const Btn = memo(({ children, variant = 'default', size = 'md', onClick, disabled, className = '', style = {}, icon: Icon, type = 'button' }) => {
-  const base = { display:'inline-flex', alignItems:'center', justifyContent:'center', gap:8, border:'none', cursor:disabled?'not-allowed':'pointer', fontFamily:'Inter,sans-serif', fontWeight:600, borderRadius:12, whiteSpace:'nowrap', opacity:disabled?0.4:1, position:'relative', overflow:'hidden', transition:'all var(--transition-fast)' };
+  const base = { display:'inline-flex', alignItems:'center', justifyContent:'center', gap:8, border:'none', cursor:disabled?'not-allowed':'pointer', fontFamily:'system-ui,-apple-system,Segoe UI,sans-serif', fontWeight:600, borderRadius:12, whiteSpace:'nowrap', opacity:disabled?0.4:1, position:'relative', overflow:'hidden', transition:'all var(--transition-fast)' };
   const sizes = { sm:{padding:'7px 14px',fontSize:12,height:32}, md:{padding:'10px 20px',fontSize:13,height:40}, lg:{padding:'14px 28px',fontSize:14,height:48}, icon:{padding:10,borderRadius:12,width:40,height:40} };
   const variants = {
     default:{ background:'linear-gradient(135deg,var(--accent) 0%,var(--accent2) 100%)', color:'#fff', boxShadow:'0 4px 16px rgba(249,115,22,0.3)' },
@@ -563,7 +600,7 @@ const EmptyState = memo(({ icon: Icon, title, sub, action, compact }) => (
       <Icon size={compact?24:36} style={{ opacity:0.6 }}/>
     </div>
     <div>
-      <p style={{ fontFamily:"'Exo 2',sans-serif", fontWeight:700, fontSize:compact?15:20, color:'var(--text)', marginBottom:compact?4:8 }}>{title}</p>
+      <p style={{ fontFamily:"'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight:700, fontSize:compact?15:20, color:'var(--text)', marginBottom:compact?4:8 }}>{title}</p>
       {sub && <p style={{ color:'var(--muted)', fontSize:compact?12:14, maxWidth:360, lineHeight:1.7 }}>{sub}</p>}
     </div>
     {action && <div style={{ marginTop:compact?8:12 }}>{action}</div>}
@@ -648,7 +685,7 @@ const MangaCard = memo(({ manga, onClick, index = 0, badge, progress, category, 
       }}>
         {!loaded && !imageError && inView && <div className="anim-shimmer" style={{ position:'absolute', inset:0, zIndex:1 }}/>}
         {inView && manga.cover && !imageError ? (
-          <img src={manga.cover} style={{ width:'100%', height:'100%', objectFit:'cover', transform:hovered?'scale(1.07)':'scale(1)', transition:'transform 0.6s cubic-bezier(0.16,1,0.3,1)', opacity:loaded?1:0 }} alt={manga.title} loading="lazy" onLoad={() => setLoaded(true)} onError={() => setImageError(true)}/>
+          <img src={proxyImg(manga.cover)} style={{ width:'100%', height:'100%', objectFit:'cover', transform:hovered?'scale(1.07)':'scale(1)', transition:'transform 0.6s cubic-bezier(0.16,1,0.3,1)', opacity:loaded?1:0 }} alt={manga.title} loading="lazy" onLoad={() => setLoaded(true)} onError={() => setImageError(true)}/>
         ) : (
           <div style={{ width:'100%', height:'100%', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', background:'linear-gradient(135deg,var(--card),var(--card2))', gap:10 }}>
             <BookOpen size={32} style={{ color:'var(--muted)', opacity:0.4 }}/>
@@ -689,7 +726,7 @@ const MangaListCard = memo(({ manga, onClick, category, progress: prog, onContex
       {categoryColor && <div style={{ position:'absolute', left:0, top:0, bottom:0, width:3, background:categoryColor, borderRadius:'2px 0 0 2px' }}/>}
       <div style={{ width:56, height:80, borderRadius:10, overflow:'hidden', flexShrink:0, background:'var(--card2)', border:'1px solid var(--border)' }}>
         {manga.cover && !imageError
-          ? <img src={manga.cover} style={{ width:'100%', height:'100%', objectFit:'cover' }} alt={manga.title} loading="lazy" onError={() => setImageError(true)}/>
+          ? <img src={proxyImg(manga.cover)} style={{ width:'100%', height:'100%', objectFit:'cover' }} alt={manga.title} loading="lazy" onError={() => setImageError(true)}/>
           : <div style={{ width:'100%', height:'100%', display:'flex', alignItems:'center', justifyContent:'center' }}><BookOpen size={20} style={{ color:'var(--muted)', opacity:0.4 }}/></div>
         }
       </div>
@@ -1006,7 +1043,7 @@ const Reader = memo(({ pages, currentChapter, mangaTitle, onBack, onNextChapter,
           }}>
             <img
               key={`paged-${currentPage}`}
-              src={pages[currentPage]}
+              src={proxyImg(pages[currentPage])}
               style={{
                 display: 'block',
                 userSelect: 'none',
@@ -1072,7 +1109,7 @@ const Reader = memo(({ pages, currentChapter, mangaTitle, onBack, onNextChapter,
               }}
             >
               <img
-                src={url}
+                src={proxyImg(url)}
                 style={getScrollImageStyle(isWebtoon, fitMode, zoom)}
                 alt={`Page ${i+1}`}
                 loading={i < 3 ? 'eager' : 'lazy'}
@@ -1123,11 +1160,20 @@ const SettingsPage = memo(() => {
   const toast = useToast();
   const [confirmClear, setConfirmClear] = useState(null);
 
-  // Sync closeToTray from Electron on mount
+  // Sync Electron settings on mount
+  const [serviceStatus, setServiceStatus]   = useState(null); // null | 'running' | 'stopped'
+  const [serviceWorking, setServiceWorking] = useState(false);
+
   useEffect(() => {
     window.electronAPI?.getCloseToTray?.().then(val => {
       if (val !== undefined) updateSetting('closeToTray', val);
     }).catch(() => {});
+    window.electronAPI?.getStartWithWindows?.().then(val => {
+      if (val !== undefined) updateSetting('startWithWindows', val);
+    }).catch(() => {});
+    if (window.electronAPI?.checkService) {
+      window.electronAPI.checkService().then(running => setServiceStatus(running ? 'running' : 'stopped')).catch(() => setServiceStatus('stopped'));
+    }
   }, []);
 
   const totalReadingMins = Object.values(readingTime).reduce((a, b) => a + b, 0);
@@ -1135,7 +1181,7 @@ const SettingsPage = memo(() => {
 
   const Section = ({ title, children }) => (
     <div style={{ marginBottom:32 }}>
-      <h3 style={{ fontFamily:"'Exo 2',sans-serif", fontWeight:700, fontSize:16, color:'var(--text)', marginBottom:16, paddingBottom:10, borderBottom:'1px solid var(--border)', display:'flex', alignItems:'center', gap:8 }}>
+      <h3 style={{ fontFamily:"'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight:700, fontSize:16, color:'var(--text)', marginBottom:16, paddingBottom:10, borderBottom:'1px solid var(--border)', display:'flex', alignItems:'center', gap:8 }}>
         {title}
       </h3>
       <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
@@ -1177,7 +1223,7 @@ const SettingsPage = memo(() => {
           ].map(s => (
             <div key={s.label} style={{ padding:'18px 16px', background:'var(--card)', borderRadius:14, border:'1px solid var(--border)', textAlign:'center' }}>
               <div style={{ fontSize:28, marginBottom:8 }}>{s.icon}</div>
-              <p style={{ fontFamily:"'Exo 2',sans-serif", fontWeight:800, fontSize:22, color:'var(--text)' }}>{s.value}</p>
+              <p style={{ fontFamily:"'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight:800, fontSize:22, color:'var(--text)' }}>{s.value}</p>
               <p style={{ fontSize:11, color:'var(--muted)', fontWeight:500, textTransform:'uppercase', letterSpacing:'0.04em' }}>{s.label}</p>
             </div>
           ))}
@@ -1268,7 +1314,71 @@ const SettingsPage = memo(() => {
             }}
           />
         </Row>
+        {window.electronAPI?.setStartWithWindows && (
+          <Row label="Start with Windows" sub="Launch akaReader automatically when you log in">
+            <Toggle
+              value={!!settings?.startWithWindows}
+              onChange={v => {
+                updateSetting('startWithWindows', v);
+                window.electronAPI.setStartWithWindows(v);
+                toast(`Start with Windows ${v ? 'enabled' : 'disabled'}`, 'success');
+              }}
+            />
+          </Row>
+        )}
+        {window.electronAPI?.openDataDir && (
+          <Row label="Data Directory" sub="Open the folder where akaReader stores your settings and data">
+            <Btn variant="outline" size="sm" onClick={() => window.electronAPI.openDataDir()}>
+              <ExternalLink size={14}/> Open Folder
+            </Btn>
+          </Row>
+        )}
       </Section>
+
+      {(window.electronAPI?.installService || window.electronAPI?.checkService) && (
+        <Section title="⚙️ Windows Service">
+          <div style={{ padding:'12px 16px', background:'rgba(59,130,246,0.06)', borderRadius:12, border:'1px solid rgba(59,130,246,0.15)', fontSize:13, color:'var(--muted)', lineHeight:1.7, marginBottom:4 }}>
+            Run the Suwayomi backend as a Windows service so it starts automatically and runs without a visible window.
+          </div>
+          <Row label="Service Status" sub="Current state of the Suwayomi Windows service">
+            <div style={{ display:'flex', alignItems:'center', gap:12 }}>
+              <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                <div style={{ width:8, height:8, borderRadius:'50%', background:serviceStatus==='running'?'#22c55e':serviceStatus==='stopped'?'#f87171':'#f59e0b', boxShadow:`0 0 8px ${serviceStatus==='running'?'#22c55e':serviceStatus==='stopped'?'#f87171':'#f59e0b'}` }}/>
+                <span style={{ fontSize:13, fontWeight:600, color:serviceStatus==='running'?'#4ade80':serviceStatus==='stopped'?'#f87171':'#facc15' }}>
+                  {serviceStatus==='running'?'Running':serviceStatus==='stopped'?'Not installed':serviceWorking?'Working…':'Checking…'}
+                </span>
+              </div>
+              <Btn variant="outline" size="sm" disabled={serviceWorking} onClick={async () => {
+                setServiceWorking(true);
+                try { const r = await window.electronAPI.checkService(); setServiceStatus(r ? 'running' : 'stopped'); }
+                catch { setServiceStatus('stopped'); }
+                finally { setServiceWorking(false); }
+              }}><RefreshCw size={13}/> Check</Btn>
+            </div>
+          </Row>
+          <Row label={serviceStatus==='running' ? 'Uninstall Service' : 'Install Service'} sub={serviceStatus==='running' ? 'Remove the Windows service (Suwayomi will only run while akaReader is open)' : 'Install as a Windows service for automatic background startup'}>
+            {serviceStatus==='running' ? (
+              <Btn variant="danger" size="sm" disabled={serviceWorking} onClick={async () => {
+                setServiceWorking(true);
+                try { await window.electronAPI.uninstallService(); setServiceStatus('stopped'); toast('Service uninstalled', 'warning'); }
+                catch(e) { toast(`Failed: ${e.message}`, 'error'); }
+                finally { setServiceWorking(false); }
+              }}>
+                {serviceWorking ? <><Spin size={13}/> Working…</> : <><Trash2 size={13}/> Uninstall</>}
+              </Btn>
+            ) : (
+              <Btn size="sm" disabled={serviceWorking} onClick={async () => {
+                setServiceWorking(true);
+                try { await window.electronAPI.installService(); setServiceStatus('running'); toast('Service installed and started', 'success'); }
+                catch(e) { toast(`Failed: ${e.message}`, 'error'); }
+                finally { setServiceWorking(false); }
+              }}>
+                {serviceWorking ? <><Spin size={13}/> Working…</> : 'Install Service'}
+              </Btn>
+            )}
+          </Row>
+        </Section>
+      )}
 
       <Section title="📦 Extension Repositories">
         <div style={{ padding:'12px 16px', background:'rgba(249,115,22,0.06)', borderRadius:12, border:'1px solid rgba(249,115,22,0.15)', fontSize:13, color:'var(--muted)', lineHeight:1.7, marginBottom:4 }}>
@@ -1314,7 +1424,7 @@ const SettingsPage = memo(() => {
         <div className="anim-fadeIn" style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.7)', backdropFilter:'blur(8px)', zIndex:1000, display:'flex', alignItems:'center', justifyContent:'center' }}>
           <div style={{ background:'var(--card)', border:'1px solid var(--border)', borderRadius:20, padding:32, maxWidth:380, width:'90%', textAlign:'center' }}>
             <AlertTriangle size={40} style={{ color:'#facc15', marginBottom:16 }}/>
-            <h3 style={{ fontFamily:"'Exo 2',sans-serif", fontWeight:700, fontSize:18, marginBottom:8 }}>Are you sure?</h3>
+            <h3 style={{ fontFamily:"'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight:700, fontSize:18, marginBottom:8 }}>Are you sure?</h3>
             <p style={{ color:'var(--muted)', fontSize:14, marginBottom:24 }}>This will permanently delete your {confirmClear}. This cannot be undone.</p>
             <div style={{ display:'flex', gap:12, justifyContent:'center' }}>
               <Btn variant="outline" onClick={() => setConfirmClear(null)}>Cancel</Btn>
@@ -1393,7 +1503,7 @@ const GlobalSearch = memo(({ sources, onSelectManga, onClose, fetchJSON }) => {
           value={query}
           onChange={e => { setQuery(e.target.value); dSearch(e.target.value); }}
           onKeyDown={e => { if(e.key==='Enter') doSearch(query); if(e.key==='Escape') onClose(); }}
-          style={{ width:'100%', background:'rgba(22,22,31,0.98)', border:'2px solid var(--accent)', borderRadius:16, padding:'16px 50px 16px 52px', color:'var(--text)', fontSize:16, outline:'none', fontFamily:'Inter,sans-serif', boxShadow:'0 8px 40px rgba(249,115,22,0.2)' }}
+          style={{ width:'100%', background:'rgba(22,22,31,0.98)', border:'2px solid var(--accent)', borderRadius:16, padding:'16px 50px 16px 52px', color:'var(--text)', fontSize:16, outline:'none', fontFamily:'system-ui,-apple-system,Segoe UI,sans-serif', boxShadow:'0 8px 40px rgba(249,115,22,0.2)' }}
         />
         <Btn variant="ghost" size="icon" onClick={onClose} style={{ position:'absolute', right:12, top:'50%', transform:'translateY(-50%)' }}>
           <X size={18}/>
@@ -2053,7 +2163,7 @@ const Onboarding = memo(({ onFinish }) => {
             {s.icon}
           </div>
           <h2 style={{
-            fontFamily: "'Exo 2',sans-serif", fontWeight: 800, fontSize: 16,
+            fontFamily: "'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight: 800, fontSize: 16,
             color: '#f1f5f9', lineHeight: 1.3, margin: 0,
           }}>
             {s.title}
@@ -2122,7 +2232,7 @@ const ServiceErrorModal = memo(({ onRestart }) => {
     <div className="anim-fadeIn" style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.8)', backdropFilter:'blur(12px)', zIndex:1500, display:'flex', alignItems:'center', justifyContent:'center', padding:24 }}>
       <div style={{ background:'var(--card)', border:'1.5px solid rgba(239,68,68,0.3)', borderRadius:24, padding:'40px 36px', maxWidth:400, width:'100%', textAlign:'center', boxShadow:'0 32px 80px rgba(0,0,0,0.5)' }}>
         <AlertCircle size={48} style={{ color:'#f87171', marginBottom:16 }}/>
-        <h2 style={{ fontFamily:"'Exo 2',sans-serif", fontWeight:800, fontSize:20, marginBottom:10 }}>Backend Offline</h2>
+        <h2 style={{ fontFamily:"'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight:800, fontSize:20, marginBottom:10 }}>Backend Offline</h2>
         <p style={{ color:'var(--muted)', fontSize:14, lineHeight:1.8, marginBottom:28 }}>
           The akaReader backend has stopped responding. This can happen if the server process exited unexpectedly.
         </p>
@@ -2309,7 +2419,7 @@ const StartupScreen = memo(() => {
           animation: phase >= 1 ? 'ss-rise 0.5s cubic-bezier(0.16,1,0.3,1) both' : 'none',
         }}>
           <h1 style={{
-            fontFamily:"'Exo 2',sans-serif", fontWeight:900, fontSize:36,
+            fontFamily:"'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight:900, fontSize:36,
             letterSpacing:'-0.03em', lineHeight:1, marginBottom:8,
             background:'linear-gradient(135deg,#f97316 0%,#fb923c 45%,#fbbf24 100%)',
             WebkitBackgroundClip:'text', WebkitTextFillColor:'transparent',
@@ -2403,19 +2513,27 @@ const App = memo(() => {
   const [showErrorModal, setShowErrorModal] = useState(false);
   const errorTimerRef = useRef(null);
 
-  // Listen for services crash from Electron
+  // Listen for services status from Electron
   useEffect(() => {
     if (window.electronAPI?.onServicesStatus) {
       window.electronAPI.onServicesStatus((status) => {
-        if (status === 'crashed' || status === 'offline') setShowErrorModal(true);
-        else if (status === 'online') setShowErrorModal(false);
-        else if (status.startsWith('update-available:')) {
-          const ver = status.split(':')[1];
-          setUpdateAvailable(ver);
+        if (status === 'crashed' || status === 'offline') {
+          setShowErrorModal(true);
+        } else if (status === 'online') {
+          setShowErrorModal(false);
+          // Immediately probe the backend — this transitions backendOnline from
+          // null → true, which exits the startup screen right away instead of
+          // waiting up to 10s for the next health-check poll.
+          checkHealth().then(() => {
+            fetchSources();
+            fetchExtensions();
+          });
+        } else if (status.startsWith('update-available:')) {
+          setUpdateAvailable(status.split(':')[1]);
         }
       });
     }
-  }, []);
+  }, [checkHealth, fetchSources, fetchExtensions]);
 
   // Mouse button shortcuts (back = button 3, forward = button 4)
   // Use refs so the listener doesn't need to be re-registered on every view change
@@ -2551,10 +2669,12 @@ const App = memo(() => {
   const [pages, setPages] = useState([]);
   const [pagesLoading, setPagesLoading] = useState(false);
   const [readerPage, setReaderPage] = useState(0);
+  const chapterAbortRef = useRef(null); // cancel in-flight page fetches when chapter changes
 
   // Library
   const [activeCategory, setActiveCategory] = useState('all');
   const [libraryView, setLibraryView] = useState(() => settings?.libraryView || 'grid');
+  const [librarySearch, setLibrarySearch] = useState('');
 
   // UI
   const [contextMenu, setContextMenu] = useState(null);
@@ -2670,23 +2790,32 @@ const App = memo(() => {
   }, [activeSource, sources, fetchJSON, addToHistory, toast]);
 
   const openChapter = useCallback(async (chapter) => {
+    // Cancel any previous in-flight fetch
+    if (chapterAbortRef.current) chapterAbortRef.current.abort();
+    const ac = new AbortController();
+    chapterAbortRef.current = ac;
+
     setCurrentChapter(chapter); setPages([]); setReaderPage(0); setView('reader'); setPagesLoading(true);
     try {
       const mangaId = mangaDetail?.id;
-      // Check if this chapter is downloaded locally first
       const localPages = mangaId ? await loadChapterBlobs(mangaId, chapter.id) : null;
+      if (ac.signal.aborted) return;
       if (localPages && localPages.length > 0) {
         setPages(localPages);
         toast(`Chapter ${chapter.number} (offline)`, 'success');
       } else {
         const imgs = await fetchJSON(`/source/${activeSource.id}/chapter/${chapter.id}`);
+        if (ac.signal.aborted) return;
         setPages(Array.isArray(imgs) ? imgs : []);
         toast(`Chapter ${chapter.number} loaded`, 'success');
       }
       updateProgress(mangaDetail?.id, chapter.id, chapter.number, 0);
       markChapterRead(mangaDetail?.id, chapter.id, true);
-    } catch { toast('Failed to load chapter', 'error'); }
-    finally { setPagesLoading(false); }
+    } catch (e) {
+      if (!ac.signal.aborted) toast('Failed to load chapter', 'error');
+    } finally {
+      if (!ac.signal.aborted) setPagesLoading(false);
+    }
   }, [activeSource, mangaDetail, fetchJSON, updateProgress, markChapterRead, toast]);
 
   const chIdx = chapRef.current.findIndex(c => c.id === currentChapter?.id);
@@ -2811,7 +2940,11 @@ const App = memo(() => {
     return filtered;
   }, [extensions, extTab, extLang, extSearch, showNsfw, extSort]);
 
-  const filteredLibrary = useMemo(() => activeCategory === 'all' ? library : library.filter(m => mangaCategories[m.id] === activeCategory), [library, activeCategory, mangaCategories]);
+  const filteredLibrary = useMemo(() => {
+    let list = activeCategory === 'all' ? library : library.filter(m => mangaCategories[m.id] === activeCategory);
+    if (librarySearch.trim()) list = list.filter(m => m.title.toLowerCase().includes(librarySearch.toLowerCase()) || m.author?.toLowerCase().includes(librarySearch.toLowerCase()));
+    return list;
+  }, [library, activeCategory, mangaCategories, librarySearch]);
   const installedSources = useMemo(() => Object.values(sources), [sources]);
   const installedExts = useMemo(() => extensions.filter(e => e.isInstalled), [extensions]);
 
@@ -2948,16 +3081,52 @@ const App = memo(() => {
         <GlobalSearch sources={sources} onSelectManga={(manga, srcId) => openManga(manga, srcId)} onClose={() => setShowGlobalSearch(false)} fetchJSON={fetchJSON}/>
       )}
 
-      {/* Electron drag region — sits at top, lets user drag the window */}
-      <div style={{ position:'fixed', top:0, left:0, right:0, height:36, WebkitAppRegion:'drag', zIndex:200, pointerEvents:'none' }}/>
+      {/* Titlebar — draggable with real window controls */}
+      <div style={{
+        position:'fixed', top:0, left:0, right:0, height:38,
+        WebkitAppRegion:'drag', zIndex:300,
+        background:'var(--bg)', borderBottom:'1px solid var(--border)',
+        display:'flex', alignItems:'center', justifyContent:'flex-end',
+      }}>
+        {/* Window control buttons — no-drag so clicks work */}
+        <div style={{ display:'flex', alignItems:'center', WebkitAppRegion:'no-drag', height:'100%' }}>
+          <button
+            onClick={() => window.electronAPI?.minimize?.()}
+            title="Minimize"
+            style={{ width:46, height:'100%', border:'none', background:'transparent', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', color:'var(--muted)', transition:'background 0.15s' }}
+            onMouseEnter={e => e.currentTarget.style.background='rgba(255,255,255,0.07)'}
+            onMouseLeave={e => e.currentTarget.style.background='transparent'}
+          >
+            <svg width="11" height="1" viewBox="0 0 11 1"><rect width="11" height="1" fill="currentColor"/></svg>
+          </button>
+          <button
+            onClick={() => window.electronAPI?.maximize?.()}
+            title="Maximize"
+            style={{ width:46, height:'100%', border:'none', background:'transparent', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', color:'var(--muted)', transition:'background 0.15s' }}
+            onMouseEnter={e => e.currentTarget.style.background='rgba(255,255,255,0.07)'}
+            onMouseLeave={e => e.currentTarget.style.background='transparent'}
+          >
+            <svg width="11" height="11" viewBox="0 0 11 11"><rect x="0.5" y="0.5" width="10" height="10" rx="1" fill="none" stroke="currentColor" strokeWidth="1"/></svg>
+          </button>
+          <button
+            onClick={() => window.electronAPI?.close?.()}
+            title="Close"
+            style={{ width:46, height:'100%', border:'none', background:'transparent', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', color:'var(--muted)', transition:'all 0.15s' }}
+            onMouseEnter={e => { e.currentTarget.style.background='#e81123'; e.currentTarget.style.color='#fff'; }}
+            onMouseLeave={e => { e.currentTarget.style.background='transparent'; e.currentTarget.style.color='var(--muted)'; }}
+          >
+            <svg width="11" height="11" viewBox="0 0 11 11"><path d="M1 1l9 9M10 1l-9 9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/></svg>
+          </button>
+        </div>
+      </div>
 
       {/* Sidebar */}
-      <aside style={{ position:'fixed', left:0, top:0, bottom:0, width:sidebarCollapsed?76:248, background:'var(--bg2)', borderRight:'1px solid var(--border)', zIndex:50, display:'flex', flexDirection:'column', padding:sidebarCollapsed?'52px 12px 20px':'0', transition:'width var(--transition-base)' }}>
-        <div style={{ display:'flex', alignItems:'center', gap:12, padding:sidebarCollapsed?'0 8px':'36px 22px 16px', marginBottom:sidebarCollapsed?16:0 }}>
+      <aside style={{ position:'fixed', left:0, top:38, bottom:0, width:sidebarCollapsed?76:248, background:'var(--bg2)', borderRight:'1px solid var(--border)', zIndex:50, display:'flex', flexDirection:'column', padding:sidebarCollapsed?'14px 12px 20px':'0', transition:'width var(--transition-base)' }}>
+        <div style={{ display:'flex', alignItems:'center', gap:12, padding:sidebarCollapsed?'0 8px':'18px 22px 16px', marginBottom:sidebarCollapsed?16:0 }}>
           <div className="gradient-primary" style={{ width:42, height:42, borderRadius:12, display:'flex', alignItems:'center', justifyContent:'center', flexShrink:0, boxShadow:'0 8px 24px rgba(249,115,22,0.3)', WebkitAppRegion:'no-drag' }}>
             <BookOpen size={20} color="#fff"/>
           </div>
-          {!sidebarCollapsed && <span className="text-gradient" style={{ fontFamily:"'Exo 2',sans-serif", fontWeight:800, fontSize:20, WebkitAppRegion:'no-drag' }}>akaReader</span>}
+          {!sidebarCollapsed && <span className="text-gradient" style={{ fontFamily:"'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight:800, fontSize:20, WebkitAppRegion:'no-drag' }}>akaReader</span>}
         </div>
 
         {!sidebarCollapsed && (
@@ -3023,7 +3192,7 @@ const App = memo(() => {
       </aside>
 
       {/* Main */}
-      <main style={{ marginLeft:sidebarCollapsed?76:248, minHeight:'100vh', transition:'margin-left var(--transition-base)' }}>
+      <main style={{ marginLeft:sidebarCollapsed?76:248, marginTop:38, minHeight:'calc(100vh - 38px)', transition:'margin-left var(--transition-base)' }}>
         {/* Sticky page header */}
         <div className="glass-strong" style={{
           position:'sticky', top:0, zIndex:40,
@@ -3070,7 +3239,7 @@ const App = memo(() => {
             /* ── Regular tab header ── */
             <>
               <div>
-                <h1 style={{ fontFamily:"'Exo 2',sans-serif", fontWeight:800, fontSize:'clamp(22px,2.5vw,30px)', letterSpacing:'-0.02em', marginBottom:2, display:'flex', alignItems:'center', gap:10 }}>
+                <h1 style={{ fontFamily:"'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight:800, fontSize:'clamp(22px,2.5vw,30px)', letterSpacing:'-0.02em', marginBottom:2, display:'flex', alignItems:'center', gap:10 }}>
                   {tab==='browse'&&view==='source'?activeSource?.name:
                    tab==='browse'?'Browse':
                    tab==='extensions'?'Extensions':
@@ -3095,7 +3264,7 @@ const App = memo(() => {
                   <>
                     <div style={{ position:'relative', width:'min(320px,100%)' }}>
                       <Search size={15} style={{ position:'absolute', left:14, top:'50%', transform:'translateY(-50%)', color:'var(--muted)', pointerEvents:'none'}}/>
-                      <input placeholder={`Search ${activeSource?.name}...`} value={inputVal} onChange={e=>{setInputVal(e.target.value);debouncedSearch(e.target.value);}} style={{ width:'100%', background:'var(--card)', border:'1.5px solid var(--border)', borderRadius:12, padding:'12px 40px 12px 40px', color:'var(--text)', fontSize:14, outline:'none', fontFamily:'Inter,sans-serif', transition:'border-color 0.2s' }} onFocus={e=>e.target.style.borderColor='var(--accent)'} onBlur={e=>e.target.style.borderColor='var(--border)'}/>
+                      <input placeholder={`Search ${activeSource?.name}...`} value={inputVal} onChange={e=>{setInputVal(e.target.value);debouncedSearch(e.target.value);}} style={{ width:'100%', background:'var(--card)', border:'1.5px solid var(--border)', borderRadius:12, padding:'12px 40px 12px 40px', color:'var(--text)', fontSize:14, outline:'none', fontFamily:'system-ui,-apple-system,Segoe UI,sans-serif', transition:'border-color 0.2s' }} onFocus={e=>e.target.style.borderColor='var(--accent)'} onBlur={e=>e.target.style.borderColor='var(--border)'}/>
                       {inputVal && <Btn variant="ghost" size="icon" onClick={()=>{setInputVal('');setQuery('');}} style={{ position:'absolute', right:8, top:'50%', transform:'translateY(-50%)' }}><X size={14}/></Btn>}
                     </div>
                     <Btn
@@ -3142,7 +3311,7 @@ const App = memo(() => {
             {mangaDetail?.cover && (
               <div style={{
                 position:'absolute', top:0, left:0, right:0, height:280,
-                backgroundImage:`url(${mangaDetail.cover})`,
+                backgroundImage:`url(${proxyImg(mangaDetail.cover)})`,
                 backgroundSize:'cover', backgroundPosition:'center top',
                 filter:'blur(60px) brightness(0.12) saturate(1.5)',
                 transform:'scaleX(1.05)',
@@ -3161,12 +3330,12 @@ const App = memo(() => {
                   <div style={{ display:'flex', gap:28, marginBottom:32, flexWrap:'wrap' }}>
                     <div style={{ width:160, height:240, borderRadius:20, overflow:'hidden', flexShrink:0, border:'1.5px solid var(--border)', background:'var(--card)', boxShadow:'0 24px 64px rgba(0,0,0,0.5)' }}>
                       {mangaDetail.cover
-                        ? <img src={mangaDetail.cover} style={{ width:'100%', height:'100%', objectFit:'cover' }} alt={mangaDetail.title}/>
+                        ? <img src={proxyImg(mangaDetail.cover)} style={{ width:'100%', height:'100%', objectFit:'cover' }} alt={mangaDetail.title}/>
                         : <div style={{ width:'100%', height:'100%', display:'flex', alignItems:'center', justifyContent:'center' }}><BookOpen size={40} style={{ color:'var(--muted)', opacity:0.4 }}/></div>
                       }
                     </div>
                     <div style={{ flex:1, minWidth:240, paddingTop:4 }}>
-                      <h1 style={{ fontFamily:"'Exo 2',sans-serif", fontWeight:800, fontSize:'clamp(22px,3vw,30px)', lineHeight:1.2, marginBottom:8 }}>{mangaDetail.title}</h1>
+                      <h1 style={{ fontFamily:"'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight:800, fontSize:'clamp(22px,3vw,30px)', lineHeight:1.2, marginBottom:8 }}>{mangaDetail.title}</h1>
                       {mangaDetail.author && <p style={{ color:'var(--accent)', fontSize:14, marginBottom:14, fontWeight:500 }}>{mangaDetail.author}</p>}
                       <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginBottom:12 }}>
                         {mangaDetail.status && <Badge variant={mangaDetail.status==='ongoing'?'success':'outline'}>{mangaDetail.status}</Badge>}
@@ -3218,7 +3387,7 @@ const App = memo(() => {
                   {/* Chapters */}
                   <div>
                     <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:14, flexWrap:'wrap', gap:10 }}>
-                      <h3 style={{ fontFamily:"'Exo 2',sans-serif", fontWeight:700, fontSize:18, display:'flex', alignItems:'center', gap:8 }}>
+                      <h3 style={{ fontFamily:"'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight:700, fontSize:18, display:'flex', alignItems:'center', gap:8 }}>
                         Chapters <Badge variant="outline" size="sm">{filteredChapters.length}</Badge>
                       </h3>
                       <div style={{ display:'flex', gap:8 }}>
@@ -3238,7 +3407,7 @@ const App = memo(() => {
                       <div style={{ position:'relative', marginBottom:14 }}>
                         <Search size={15} style={{ position:'absolute', left:14, top:'50%', transform:'translateY(-50%)', color:'var(--muted)', pointerEvents:'none'}}/>
                         <input placeholder="Search chapters..." value={chapSearch} onChange={e=>setChapSearch(e.target.value)}
-                          style={{ width:'100%', background:'var(--card)', border:'1.5px solid var(--border)', borderRadius:12, padding:'11px 14px 11px 40px', color:'var(--text)', fontSize:13, outline:'none', fontFamily:'Inter,sans-serif' }}
+                          style={{ width:'100%', background:'var(--card)', border:'1.5px solid var(--border)', borderRadius:12, padding:'11px 14px 11px 40px', color:'var(--text)', fontSize:13, outline:'none', fontFamily:'system-ui,-apple-system,Segoe UI,sans-serif' }}
                           onFocus={e=>e.target.style.borderColor='var(--accent)'} onBlur={e=>e.target.style.borderColor='var(--border)'}/>
                       </div>
                     )}
@@ -3315,7 +3484,7 @@ const App = memo(() => {
                         {src.icon ? <img src={src.icon} style={{ width:'100%', height:'100%', objectFit:'contain', padding:10 }} onError={e=>e.target.style.display='none'} alt="" loading="lazy"/> : <Globe size={26} style={{ color:'var(--muted)' }}/>}
                       </div>
                       <div>
-                        <p style={{ fontFamily:"'Exo 2',sans-serif", fontWeight:700, fontSize:15, color:'var(--text)', marginBottom:6 }}>{src.name}</p>
+                        <p style={{ fontFamily:"'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight:700, fontSize:15, color:'var(--text)', marginBottom:6 }}>{src.name}</p>
                         {src.lang && <Badge variant="outline" size="sm">{src.lang}</Badge>}
                       </div>
                     </button>
@@ -3413,7 +3582,8 @@ const App = memo(() => {
 
         {tab === 'library' && (
           <div className="page-transition">
-            <div style={{ display:'flex', gap:8, marginBottom:20, overflowX:'auto', paddingBottom:4 }}>
+            {/* Category pills */}
+            <div style={{ display:'flex', gap:8, marginBottom:16, overflowX:'auto', paddingBottom:4 }}>
               <button onClick={() => setActiveCategory('all')} style={{ padding:'9px 18px', borderRadius:20, border:'none', background:activeCategory==='all'?'var(--accent)':'var(--card)', color:activeCategory==='all'?'#fff':'var(--text-dim)', fontWeight:600, fontSize:13, cursor:'pointer', whiteSpace:'nowrap', boxShadow:activeCategory==='all'?'0 4px 16px rgba(249,115,22,0.3)':'none', transition:'all 0.2s' }}>All ({library.length})</button>
               {CATEGORIES.map(cat => {
                 const count = library.filter(m => mangaCategories[m.id] === cat.id).length;
@@ -3421,24 +3591,67 @@ const App = memo(() => {
               })}
             </div>
 
-            <div style={{ display:'flex', justifyContent:'flex-end', gap:8, marginBottom:18 }}>
-              {['grid','list','compact'].map(m => (
-                <Btn key={m} variant={libraryView===m?'default':'ghost'} size="icon" onClick={() => setLibraryView(m)}>
-                  {m==='grid'?<LayoutGrid size={17}/>:m==='list'?<List size={17}/>:<Columns size={17}/>}
-                </Btn>
-              ))}
+            {/* Search + view toggle row */}
+            <div style={{ display:'flex', gap:10, alignItems:'center', marginBottom:18 }}>
+              <div style={{ position:'relative', flex:1 }}>
+                <Search size={15} style={{ position:'absolute', left:14, top:'50%', transform:'translateY(-50%)', color:'var(--muted)', pointerEvents:'none' }}/>
+                <input
+                  placeholder="Search library by title or author..."
+                  value={librarySearch}
+                  onChange={e => setLibrarySearch(e.target.value)}
+                  style={{ width:'100%', background:'var(--card)', border:'1.5px solid var(--border)', borderRadius:12, padding:'10px 36px 10px 40px', color:'var(--text)', fontSize:13, outline:'none', transition:'border-color 0.2s' }}
+                  onFocus={e => e.target.style.borderColor='var(--accent)'}
+                  onBlur={e => e.target.style.borderColor='var(--border)'}
+                />
+                {librarySearch && (
+                  <button onClick={() => setLibrarySearch('')} style={{ position:'absolute', right:10, top:'50%', transform:'translateY(-50%)', background:'none', border:'none', cursor:'pointer', color:'var(--muted)', padding:4, borderRadius:6 }}><X size={14}/></button>
+                )}
+              </div>
+              <div style={{ display:'flex', gap:4 }}>
+                {[['grid',<LayoutGrid size={17}/>],['list',<List size={17}/>],['compact',<Columns size={17}/>]].map(([m, icon]) => (
+                  <Btn key={m} variant={libraryView===m?'default':'ghost'} size="icon" onClick={() => setLibraryView(m)}>{icon}</Btn>
+                ))}
+              </div>
             </div>
 
             {filteredLibrary.length === 0 ? (
-              <EmptyState icon={Library} title={activeCategory==='all'?"Your library is empty":`No manga in ${CATEGORIES.find(c=>c.id===activeCategory)?.name}`} sub={activeCategory==='all'?"Add manga from Browse to start":"Move manga to this category from context menu"} action={activeCategory==='all'&&<Btn onClick={() => switchTab('browse')}>Browse Manga <ArrowRight size={16}/></Btn>}/>
+              librarySearch
+                ? <EmptyState icon={Search} title={`No results for "${librarySearch}"`} sub="Try a different search term" compact action={<Btn variant="outline" size="sm" onClick={() => setLibrarySearch('')}><X size={14}/> Clear</Btn>}/>
+                : <EmptyState icon={Library} title={activeCategory==='all'?"Your library is empty":`No manga in ${CATEGORIES.find(c=>c.id===activeCategory)?.name}`} sub={activeCategory==='all'?"Add manga from Browse to start":"Move manga to this category from context menu"} action={activeCategory==='all'&&<Btn onClick={() => switchTab('browse')}>Browse Manga <ArrowRight size={16}/></Btn>}/>
             ) : libraryView === 'list' ? (
               <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
                 {filteredLibrary.map((m, i) => (
                   <MangaListCard key={m.id} manga={m} onClick={openManga} index={i} category={mangaCategories[m.id]} progress={progress[m.id]?Math.round((parseInt(progress[m.id].chapterNum)||(m.totalChapters||100))/Math.max(m.totalChapters||1,1)*100):0} onContextMenu={handleMangaContextMenu}/>
                 ))}
               </div>
+            ) : libraryView === 'compact' ? (
+              /* Compact = dense table-like rows with less whitespace */
+              <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+                {filteredLibrary.map((m, i) => {
+                  const cat = CATEGORIES.find(c => c.id === mangaCategories[m.id]);
+                  const prog = progress[m.id];
+                  return (
+                    <div key={m.id} onClick={() => openManga(m)} onContextMenu={e => handleMangaContextMenu(e, m)}
+                      style={{ display:'flex', alignItems:'center', gap:10, padding:'7px 12px', borderRadius:9, background:'var(--card)', border:'1px solid var(--border)', cursor:'pointer', transition:'all 0.15s' }}
+                      onMouseEnter={e => { e.currentTarget.style.borderColor='var(--border-hover)'; e.currentTarget.style.background='var(--card-hover)'; }}
+                      onMouseLeave={e => { e.currentTarget.style.borderColor='var(--border)'; e.currentTarget.style.background='var(--card)'; }}
+                    >
+                      <div style={{ width:32, height:44, borderRadius:6, overflow:'hidden', flexShrink:0, background:'var(--card2)', border:'1px solid var(--border)' }}>
+                        {m.cover ? <img src={proxyImg(m.cover)} style={{ width:'100%', height:'100%', objectFit:'cover' }} loading="lazy" alt=""/> : <BookOpen size={14} style={{ color:'var(--muted)', opacity:.4, margin:'auto', display:'block', marginTop:14 }}/>}
+                      </div>
+                      {cat && <div style={{ width:3, height:32, borderRadius:2, background:cat.color, flexShrink:0 }}/>}
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <p style={{ fontWeight:600, fontSize:13, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{m.title}</p>
+                        {m.author && <p style={{ fontSize:11, color:'var(--muted)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{m.author}</p>}
+                      </div>
+                      {prog && <span style={{ fontSize:11, color:'var(--muted)', flexShrink:0 }}>Ch.{prog.chapterNum}</span>}
+                      <ChevronRight size={14} style={{ color:'var(--muted)', flexShrink:0 }}/>
+                    </div>
+                  );
+                })}
+              </div>
             ) : (
-              <div style={{ display:'grid', gridTemplateColumns:libraryView==='compact'?'repeat(auto-fill,minmax(100px,1fr))':'repeat(auto-fill,minmax(140px,1fr))', gap:18 }}>
+              <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))', gap:18 }}>
                 {filteredLibrary.map((m, i) => <MangaCard key={m.id} manga={m} onClick={openManga} index={i} category={mangaCategories[m.id]} progress={progress[m.id]?Math.round((parseInt(progress[m.id].chapterNum)||(m.totalChapters||100))/Math.max(m.totalChapters||1,1)*100):0} onContextMenu={handleMangaContextMenu}/>)}
               </div>
             )}
@@ -3505,13 +3718,13 @@ const RootInner = () => {
 };
 
 const Root = () => (
-  <>
+  <ErrorBoundary>
     <ToastProvider>
       <DataProvider>
         <RootInner/>
       </DataProvider>
     </ToastProvider>
-  </>
+  </ErrorBoundary>
 );
 
 export default Root;
