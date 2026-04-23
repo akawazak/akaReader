@@ -184,6 +184,25 @@ async function ensureJre() {
 
 async function ensureJar() {
   if (fs.existsSync(jarPath)) return;
+
+  // Check if we have a bundled JAR in the backend directory
+  try {
+    if (fs.existsSync(backendDir)) {
+      const files = fs.readdirSync(backendDir);
+      const bundledJar = files.find(f => f.startsWith('Suwayomi-Server') && f.endsWith('.jar'));
+      if (bundledJar) {
+        const bundledPath = path.join(backendDir, bundledJar);
+        console.log('[jar] Found bundled JAR:', bundledJar);
+        sendStatus('installing-bundled-suwayomi');
+        fs.copyFileSync(bundledPath, jarPath);
+        console.log('[jar] Bundled JAR copied to', jarPath);
+        return;
+      }
+    }
+  } catch (e) {
+    console.warn('[jar] Failed to check for bundled JAR:', e.message);
+  }
+
   sendStatus('downloading-suwayomi');
   const { url, version } = await getLatestJarUrl();
   console.log('[jar] Latest:', version);
@@ -549,8 +568,9 @@ app.whenReady().then(async () => {
       await ensureJar();
 
       if (await isServiceRunning()) {
-        console.log('[startup] Service already running');
+        console.log('[startup] Service already running, waiting for it to be ready...');
         serviceMode = true;
+        await waitForSuwayomi(90000);
       } else {
         await startSuwayomi();
       }

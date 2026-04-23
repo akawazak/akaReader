@@ -1,50 +1,187 @@
-import React, { memo, useState, useRef, useEffect, useCallback } from 'react';
-import { ChevronLeft, ChevronRight, Activity, SkipBack, SkipForward, Sun, Pause, Play, Settings2, X } from 'lucide-react';
+import React, { memo, useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { ChevronLeft, ChevronRight, Activity, SkipBack, SkipForward, Sun, Pause, Play, Settings2, X, ZoomIn, ZoomOut, AlignJustify, BookOpen, Columns, ChevronDown, Monitor } from 'lucide-react';
 import { useData } from '../../contexts/DataContext';
 import { Spin } from '../ui/Spin';
 import { proxyImg } from '../../utils/helpers';
 import { THEMES } from '../../constants';
 import { Btn } from '../ui/Btn';
 
-const Droplet = ({size}) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"></path></svg>;
-const Contrast = ({size}) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 18a6 6 0 0 0 0-12v12z"></path></svg>;
+const Droplet = ({ size }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"></path></svg>;
+const Contrast = ({ size }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 18a6 6 0 0 0 0-12v12z"></path></svg>;
 
+// ─── Reading Receipt ───────────────────────────────────────────────────────────
 const ReadingReceipt = memo(({ chapter, pagesRead, timeSeconds, mangaTitle, hasNext, onNext, onBack }) => (
   <div style={{ position: 'fixed', inset: 0, zIndex: 400, background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(30px) saturate(1.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-     <div className="anim-scaleIn" style={{ width: '90%', maxWidth: 400, background: 'var(--card)', padding: '40px 32px', borderRadius: 32, textAlign: 'center', border: '1px solid rgba(255,255,255,0.08)', boxShadow: '0 24px 64px rgba(0,0,0,0.6)' }}>
-        <div style={{ width: 64, height: 64, background: 'rgba(34,197,94,0.1)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px', color: '#4ade80' }}>
-            <Activity size={32} />
+    <div className="anim-scaleIn" style={{ width: '90%', maxWidth: 400, background: 'var(--card)', padding: '40px 32px', borderRadius: 32, textAlign: 'center', border: '1px solid rgba(255,255,255,0.08)', boxShadow: '0 24px 64px rgba(0,0,0,0.6)' }}>
+      <div style={{ width: 64, height: 64, background: 'rgba(34,197,94,0.1)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px', color: '#4ade80' }}>
+        <Activity size={32} />
+      </div>
+      <h2 style={{ fontSize: 24, fontWeight: 800, marginBottom: 8, color: 'var(--text)' }}>Chapter {chapter?.number} Finished</h2>
+      <p style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 24 }}>{mangaTitle}</p>
+      <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginBottom: 32 }}>
+        <div style={{ background: 'var(--card2)', padding: '12px 20px', borderRadius: 16, border: '1px solid var(--border)' }}>
+          <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text)' }}>{pagesRead}</div>
+          <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1 }}>Pages</div>
         </div>
-        <h2 style={{ fontSize: 24, fontWeight: 800, marginBottom: 8, color: 'var(--text)' }}>Chapter {chapter?.number} Finished</h2>
-        <p style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 24 }}>{mangaTitle}</p>
-        
-        <div style={{ display: 'flex', gap: 12, justifyContent: 'center', marginBottom: 32 }}>
-            <div style={{ background: 'var(--card2)', padding: '12px 20px', borderRadius: 16, border: '1px solid var(--border)' }}>
-                <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text)' }}>{pagesRead}</div>
-                <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1 }}>Pages</div>
-            </div>
-            <div style={{ background: 'var(--card2)', padding: '12px 20px', borderRadius: 16, border: '1px solid var(--border)' }}>
-                <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text)' }}>
-                    {Math.floor(timeSeconds/60)}<span style={{fontSize:14,color:'var(--muted)'}}>m</span> {timeSeconds%60}<span style={{fontSize:14,color:'var(--muted)'}}>s</span>
-                </div>
-                <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1 }}>Time</div>
-            </div>
+        <div style={{ background: 'var(--card2)', padding: '12px 20px', borderRadius: 16, border: '1px solid var(--border)' }}>
+          <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text)' }}>
+            {Math.floor(timeSeconds / 60)}<span style={{ fontSize: 14, color: 'var(--muted)' }}>m</span> {timeSeconds % 60}<span style={{ fontSize: 14, color: 'var(--muted)' }}>s</span>
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: 1 }}>Time</div>
         </div>
-
-        <div style={{ display: 'flex', gap: 12, flexDirection: 'column' }}>
-           {hasNext && <Btn size="lg" variant="default" onClick={onNext} icon={ChevronRight}>Next Chapter</Btn>}
-           <Btn size="lg" variant={hasNext ? 'secondary' : 'default'} onClick={onBack}>Back to Library</Btn>
-        </div>
-     </div>
+      </div>
+      <div style={{ display: 'flex', gap: 12, flexDirection: 'column' }}>
+        {hasNext && <Btn size="lg" variant="default" onClick={onNext} icon={ChevronRight}>Next Chapter</Btn>}
+        <Btn size="lg" variant={hasNext ? 'secondary' : 'default'} onClick={onBack}>Back to Library</Btn>
+      </div>
+    </div>
   </div>
 ));
 
-export const Reader = memo(({ pages, currentChapter, mangaTitle, onBack, onNextChapter, onPrevChapter, hasNext, hasPrev, onPageChange, initialPage = 0, mangaId }) => {
+// ─── Shared sub-components ────────────────────────────────────────────────────
+
+/** A labelled slider row */
+const SliderRow = ({ icon: Icon, label, kbd, min, max, step = 1, val, onChange, fmt }) => (
+  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        {Icon && <Icon size={14} style={{ color: 'rgba(255,255,255,0.45)' }} />}
+        <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(255,255,255,0.6)', letterSpacing: '.01em' }}>{label}</span>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        {kbd && <kbd style={{ fontSize: 10, padding: '2px 6px', borderRadius: 5, background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.12)', color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>{kbd}</kbd>}
+        <span style={{ fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,0.75)', fontFamily: 'monospace', minWidth: 42, textAlign: 'right' }}>{fmt(val)}</span>
+      </div>
+    </div>
+    <input
+      type="range" min={min} max={max} step={step} value={val}
+      onClick={e => e.stopPropagation()}
+      onPointerDown={e => e.stopPropagation()}
+      onTouchStart={e => e.stopPropagation()}
+      onInput={e => onChange(+e.target.value)}
+      onChange={e => onChange(+e.target.value)}
+      style={{ width: '100%', cursor: 'ew-resize', accentColor: 'var(--r-accent,#f97316)', height: 3, margin: 0 }}
+    />
+  </div>
+);
+
+/** A pill-style segmented control */
+const SegControl = ({ val, onChange, opts }) => (
+  <div style={{ display: 'flex', gap: 3, background: 'rgba(255,255,255,0.05)', borderRadius: 10, padding: 3 }}>
+    {opts.map(([v, label, icon]) => (
+      <button key={v} onClick={() => onChange(v)} style={{
+        flex: 1, padding: '8px 4px', borderRadius: 8, border: 'none', cursor: 'pointer',
+        background: val === v ? 'rgba(255,255,255,0.13)' : 'transparent',
+        color: val === v ? '#fff' : 'rgba(255,255,255,0.35)',
+        fontSize: 11, fontWeight: 700, transition: 'all .15s',
+        boxShadow: val === v ? '0 1px 4px rgba(0,0,0,.4)' : '',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, lineHeight: 1,
+      }}>
+        {icon && <span style={{ fontSize: 16 }}>{icon}</span>}
+        {label}
+      </button>
+    ))}
+  </div>
+);
+
+/** A clickable mode card */
+const ModeCard = ({ active, accent, onClick, icon, label, sub }) => (
+  <button onClick={onClick} style={{
+    flex: 1, padding: '14px 10px', borderRadius: 14,
+    border: `1.5px solid ${active ? accent : 'rgba(255,255,255,0.07)'}`,
+    background: active ? `${accent}18` : 'rgba(255,255,255,0.025)',
+    color: active ? '#fff' : 'rgba(255,255,255,0.45)',
+    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+    cursor: 'pointer', transition: 'all .18s', minWidth: 0,
+  }}>
+    <span style={{ fontSize: 22 }}>{icon}</span>
+    <div>
+      <div style={{ fontSize: 12, fontWeight: 700 }}>{label}</div>
+      {sub && <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.3)', marginTop: 2 }}>{sub}</div>}
+    </div>
+  </button>
+);
+
+/** A toggle switch */
+const Toggle = ({ val, onChange, label, sub, kbd }) => (
+  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+    <div>
+      <div style={{ fontSize: 13, fontWeight: 600, color: val ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.5)' }}>{label}</div>
+      {sub && <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginTop: 2 }}>{sub}</div>}
+    </div>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      {kbd && <kbd style={{ fontSize: 10, padding: '2px 6px', borderRadius: 5, background: 'rgba(255,255,255,0.07)', border: '1px solid rgba(255,255,255,0.12)', color: 'rgba(255,255,255,0.35)', fontFamily: 'monospace' }}>{kbd}</kbd>}
+      <button onClick={() => onChange(!val)} style={{
+        width: 40, height: 22, borderRadius: 99, border: 'none', cursor: 'pointer',
+        background: val ? 'var(--r-accent,#f97316)' : 'rgba(255,255,255,0.12)',
+        position: 'relative', transition: 'background .2s', flexShrink: 0,
+      }}>
+        <span style={{
+          position: 'absolute', top: 3, left: val ? 21 : 3,
+          width: 16, height: 16, borderRadius: '50%', background: '#fff',
+          transition: 'left .2s', boxShadow: '0 1px 4px rgba(0,0,0,.3)',
+        }} />
+      </button>
+    </div>
+  </div>
+);
+
+/** Section divider with title */
+const Section = ({ title, children, last = false }) => (
+  <div style={{ marginBottom: last ? 0 : 28 }}>
+    <p style={{ fontSize: 10, letterSpacing: '.12em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.28)', marginBottom: 14, fontWeight: 800 }}>{title}</p>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {children}
+    </div>
+  </div>
+);
+
+// ─── Ref helper: always access latest value without re-subscribing ───────────
+function useLatest(value) {
+  const ref = useRef(value);
+  useEffect(() => { ref.current = value; }, [value]);
+  return ref;
+}
+
+// ─── Main Reader ───────────────────────────────────────────────────────────────
+export const Reader = memo(({ pages: initialPages, currentChapter: initialChapter, mangaTitle, onBack, onNextChapter, onPrevChapter, fetchNextChapter, hasNext, hasPrev, onPageChange, initialPage = 0, mangaId }) => {
   const data = useData();
   const { updateProgress, addReadingTime, settings, updateSetting } = data || {};
 
+  const [loadedChapters, setLoadedChapters] = useState([]);
+  const [isFetchingNext, setIsFetchingNext] = useState(false);
+  const [localHasNext, setLocalHasNext] = useState(hasNext);
+
+  useEffect(() => {
+    setLoadedChapters([{ chapter: initialChapter, pages: initialPages }]);
+    setLocalHasNext(hasNext);
+  }, [initialChapter?.id, initialPages, hasNext]);
+
+  const allPages = useMemo(() => {
+    let indexOffset = 0;
+    return loadedChapters.flatMap(c => {
+      const chapterPages = c.pages.map((url, i) => ({
+        url,
+        chapter: c.chapter,
+        localIndex: i,
+        total: c.pages.length,
+        globalIndex: indexOffset + i
+      }));
+      indexOffset += c.pages.length;
+      return chapterPages;
+    });
+  }, [loadedChapters]);
+
+  const pages = useMemo(() => allPages.map(p => p.url), [allPages]);
+
   const [mode, setMode] = useState(settings?.readerMode || 'scroll');
-  const [page, setPage] = useState(Math.min(initialPage, Math.max(0, pages.length - 1)));
+  const [page, setPage] = useState(0);
+
+  useEffect(() => {
+    if (initialPage > 0 && initialPage < pages.length && loadedChapters.length === 1) {
+      setPage(initialPage);
+    }
+  }, [initialPage, pages.length, loadedChapters.length]);
   const [theme, setTheme] = useState(settings?.readerTheme || 'dark');
   const [fitMode, setFitMode] = useState(settings?.fitMode || 'original');
   const [direction, setDirection] = useState(settings?.readerDirection || 'rtl');
@@ -54,13 +191,12 @@ export const Reader = memo(({ pages, currentChapter, mangaTitle, onBack, onNextC
   const [saturation, setSaturation] = useState(settings?.readerSaturation || 100);
   const [zoom, setZoom] = useState(settings?.readerZoom || 1);
   const [pageGap, setPageGap] = useState(settings?.readerGap || 0);
-  
+
   const [autoScroll, setAutoScroll] = useState(false);
   const [scrollSpeed, setScrollSpeed] = useState(settings?.scrollSpeed || 1);
 
   const [uiVisible, setUiVisible] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
-  const [quickSettingsOpen, setQuickSettingsOpen] = useState(false);
   const [showReceipt, setShowReceipt] = useState(false);
   const [touchStart, setTouchStart] = useState(null);
 
@@ -68,76 +204,156 @@ export const Reader = memo(({ pages, currentChapter, mangaTitle, onBack, onNextC
   const uiTimer = useRef(null);
   const sessionStart = useRef(Date.now());
   const T = THEMES[theme] || THEMES.dark;
+  const accent = T.accent || '#f97316';
 
-  useEffect(() => { updateSetting?.('readerMode', mode); }, [mode]);
-  useEffect(() => { updateSetting?.('readerTheme', theme); }, [theme]);
-  useEffect(() => { updateSetting?.('fitMode', fitMode); }, [fitMode]);
-  useEffect(() => { updateSetting?.('readerDirection', direction); }, [direction]);
-  useEffect(() => { updateSetting?.('readerDouble', doublePage); }, [doublePage]);
-  useEffect(() => { updateSetting?.('brightness', brightness); }, [brightness]);
-  useEffect(() => { updateSetting?.('readerContrast', contrast); }, [contrast]);
-  useEffect(() => { updateSetting?.('readerSaturation', saturation); }, [saturation]);
-  useEffect(() => { updateSetting?.('readerGap', pageGap); }, [pageGap]);
-  useEffect(() => { updateSetting?.('scrollSpeed', scrollSpeed); }, [scrollSpeed]);
-  useEffect(() => { updateSetting?.('readerZoom', zoom); }, [zoom]);
+  const allPagesRef = useLatest(allPages);
+  const modeRef = useLatest(mode);
+  const zoomRef = useLatest(zoom);
+  const panelOpenRef = useLatest(panelOpen);
+  const directionRef = useLatest(direction);
+  const doublePageRef = useLatest(doublePage);
+  const pageRef = useLatest(page);
 
+  // ─ UI visibility (stable — panelOpen checked via ref) ─
+  const nudgeUI = useCallback(() => {
+    setUiVisible(true);
+    clearTimeout(uiTimer.current);
+    uiTimer.current = setTimeout(() => {
+      if (!panelOpenRef.current) setUiVisible(false);
+    }, 3500);
+  }, [panelOpenRef]);
+
+  useEffect(() => { nudgeUI(); return () => clearTimeout(uiTimer.current); }, [mode, nudgeUI]);
+
+  const jumpToPage = useCallback((p, smooth = true) => {
+    const np = Math.max(0, Math.min(allPagesRef.current.length - 1, p));
+    setPage(np);
+    if (modeRef.current !== 'paged' && containerRef.current) {
+      const target = containerRef.current.querySelector(`[data-page="${np}"]`);
+      if (target) {
+        containerRef.current.scrollTo({
+          top: target.offsetTop - (settings?.readerMode === 'scroll' ? 52 : 0),
+          behavior: smooth ? 'smooth' : 'auto'
+        });
+      }
+    }
+    nudgeUI();
+  }, [settings?.readerMode, allPagesRef, modeRef, nudgeUI]);
+
+  const chapterRange = useMemo(() => {
+    const cur = allPages[page];
+    if (!cur) return { start: 0, end: 0, total: 0 };
+    let start = -1, end = -1;
+    for (let i = 0; i < allPages.length; i++) {
+      if (allPages[i].chapter.id === cur.chapter.id) {
+        if (start === -1) start = i;
+        end = i;
+      }
+    }
+    return { start, end, total: cur.total };
+  }, [allPages, page]);
+
+  // ── Stable refs for values that change often ──
+  const showReceiptRef = useLatest(showReceipt);
+  const autoScrollRef = useLatest(autoScroll);
+  const scrollSpeedRef = useLatest(scrollSpeed);
+  const pagesLenRef = useLatest(pages.length);
+  const hasNextRef = useLatest(hasNext);
+  const hasPrevRef = useLatest(hasPrev);
+
+  // ─ Persist settings (debounced 400ms so dragging sliders doesn't spam storage) ─
+  useEffect(() => {
+    if (!updateSetting) return;
+    const t = setTimeout(() => {
+      updateSetting('readerMode', mode);
+      updateSetting('readerTheme', theme);
+      updateSetting('fitMode', fitMode);
+      updateSetting('readerDirection', direction);
+      updateSetting('readerDouble', doublePage);
+      updateSetting('brightness', brightness);
+      updateSetting('readerContrast', contrast);
+      updateSetting('readerSaturation', saturation);
+      updateSetting('readerGap', pageGap);
+      updateSetting('scrollSpeed', scrollSpeed);
+      updateSetting('readerZoom', zoom);
+    }, 400);
+    return () => clearTimeout(t);
+  }, [mode, theme, fitMode, direction, doublePage, brightness, contrast, saturation, pageGap, scrollSpeed, zoom, updateSetting]);
+
+  // ─ Session time tracking ─
   useEffect(() => {
     sessionStart.current = Date.now();
     return () => {
       const sec = Math.round((Date.now() - sessionStart.current) / 1000);
       if (mangaId && addReadingTime && sec > 5) addReadingTime(mangaId, sec);
     };
-  }, [mangaId, currentChapter?.id]);
+  }, [mangaId, initialChapter?.id, addReadingTime]);
 
+  // ─ Auto-scroll (stable — speed changes via ref, not effect re-run) ─
   useEffect(() => {
     if (!autoScroll || mode === 'paged') return;
-    let req;
-    const loop = () => {
-      if (containerRef.current) containerRef.current.scrollTop += scrollSpeed;
-      req = requestAnimationFrame(loop);
+    let raf;
+    let last = 0;
+    const loop = (now) => {
+      if (!last) last = now;
+      const delta = now - last;
+      last = now;
+      const px = (scrollSpeedRef.current * delta) / 16.67;
+      if (containerRef.current) containerRef.current.scrollTop += px;
+      raf = requestAnimationFrame(loop);
     };
-    req = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(req);
-  }, [autoScroll, scrollSpeed, mode]);
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [autoScroll, mode, scrollSpeedRef]);
 
+  // ─ Restore scroll position ─
   useEffect(() => {
     if (!containerRef.current || mode === 'paged') return;
-    const key = `aka:sc:${mangaId}:${currentChapter?.id}`;
+    const key = `aka:sc:${mangaId}:${initialChapter?.id}`;
     const saved = +localStorage.getItem(key) || 0;
     if (saved > 20) setTimeout(() => { if (containerRef.current) containerRef.current.scrollTop = saved; }, 150);
-  }, [currentChapter?.id, mode]);
+  }, [initialChapter?.id, mode, mangaId]);
 
   useEffect(() => {
     const el = containerRef.current;
     if (!el || mode === 'paged') return;
-    const key = `aka:sc:${mangaId}:${currentChapter?.id}`;
+    const key = `aka:sc:${mangaId}:${initialChapter?.id}`;
     const fn = () => localStorage.setItem(key, String(el.scrollTop));
     el.addEventListener('scroll', fn, { passive: true });
     return () => el.removeEventListener('scroll', fn);
-  }, [mode, mangaId, currentChapter?.id]);
+  }, [mode, mangaId, initialChapter?.id]);
 
-  const nudgeUI = useCallback(() => {
-    setUiVisible(true);
-    clearTimeout(uiTimer.current);
-    uiTimer.current = setTimeout(() => { 
-        if (!panelOpen && !quickSettingsOpen) setUiVisible(false); 
-    }, 3500);
-  }, [panelOpen, quickSettingsOpen]);
-
-  useEffect(() => {
-    nudgeUI();
-    return () => clearTimeout(uiTimer.current);
-  }, [mode, nudgeUI]);
-
+  // ─ Page navigation (functional update — no stale closures) ─
   const go = useCallback((delta) => {
-    const np = Math.max(0, Math.min(pages.length - 1, page + delta));
-    if (np === page) return;
-    setPage(np);
-    onPageChange?.(np);
-    updateProgress?.(mangaId, currentChapter?.id, currentChapter?.number, np);
-    nudgeUI();
-  }, [page, pages.length, onPageChange, updateProgress, mangaId, currentChapter, nudgeUI]);
+    const isDouble = modeRef.current === 'paged' && doublePageRef.current;
+    const step = isDouble ? delta * 2 : delta;
+    jumpToPage(pageRef.current + step);
+    const np = Math.max(0, Math.min(allPagesRef.current.length - 1, pageRef.current + step));
+    const pInfo = allPagesRef.current[np];
+    if (pInfo) {
+      onPageChange?.(pInfo.localIndex);
+      updateProgress?.(mangaId, pInfo.chapter.id, pInfo.chapter.number, pInfo.localIndex);
+    }
+  }, [jumpToPage, onPageChange, updateProgress, mangaId, pageRef, allPagesRef, modeRef, doublePageRef]);
 
+  // ─ Infinite Scroll Auto-Fetch ─
+  useEffect(() => {
+    if (isFetchingNext || !fetchNextChapter || !localHasNext || allPages.length === 0) return;
+    if (page >= allPages.length - 3) {
+      const lastChap = loadedChapters[loadedChapters.length - 1].chapter;
+      setIsFetchingNext(true);
+      fetchNextChapter(lastChap.id).then(res => {
+        if (res && res.pages.length > 0) {
+          setLoadedChapters(prev => [...prev, res]);
+        } else {
+          setLocalHasNext(false);
+        }
+        setIsFetchingNext(false);
+      });
+    }
+  }, [page, allPages.length, isFetchingNext, fetchNextChapter, localHasNext, loadedChapters]);
+
+  // ─ Scroll-mode page tracking ─
   useEffect(() => {
     if (mode === 'paged') return;
     const obs = new IntersectionObserver(entries => {
@@ -145,412 +361,459 @@ export const Reader = memo(({ pages, currentChapter, mangaTitle, onBack, onNextC
       entries.forEach(e => { if (e.intersectionRatio > br) { br = e.intersectionRatio; best = e; } });
       if (best) {
         const idx = +best.target.dataset.page;
-        if (!isNaN(idx)) { setPage(idx); onPageChange?.(idx); updateProgress?.(mangaId, currentChapter?.id, currentChapter?.number, idx); }
+        if (!isNaN(idx)) {
+          setPage(idx);
+          const pInfo = allPagesRef.current[idx];
+          if (pInfo) {
+            onPageChange?.(pInfo.localIndex);
+            updateProgress?.(mangaId, pInfo.chapter.id, pInfo.chapter.number, pInfo.localIndex);
+          }
+        }
       }
     }, { threshold: 0.5, rootMargin: '-10% 0px' });
     document.querySelectorAll('[data-page]').forEach(el => obs.observe(el));
     return () => obs.disconnect();
-  }, [mode, pages.length, mangaId, currentChapter, onPageChange, updateProgress]);
+  }, [mode, mangaId, onPageChange, updateProgress, allPagesRef]);
 
+  // ─ Keyboard shortcuts (registered ONCE — uses refs for live values) ─
   useEffect(() => {
-    const h = e => {
+    const handleKeyDown = (e) => {
       if (e.target.tagName === 'INPUT') return;
       const k = e.key;
-      if (k === 'Escape') { e.preventDefault(); if (panelOpen) setPanelOpen(false); else if (quickSettingsOpen) setQuickSettingsOpen(false); else if (showReceipt) setShowReceipt(false); else onBack(); return; }
-      if (k === 'ArrowRight' || k === 'd') { if (mode === 'paged') direction === 'rtl' ? go(-1) : go(1); }
-      else if (k === 'ArrowLeft' || k === 'a') { if (mode === 'paged') direction === 'rtl' ? go(1) : go(-1); }
-      else if (k === 'ArrowDown') { if (mode === 'paged') go(1); }
-      else if (k === 'ArrowUp') { if (mode === 'paged') go(-1); }
-      else if (k === 'PageDown') { e.preventDefault(); go(1); }
-      else if (k === 'PageUp') { e.preventDefault(); go(-1); }
-      else if (k === 'End') { e.preventDefault(); setPage(pages.length - 1); onPageChange?.(pages.length - 1); }
-      else if (k === 'Home') { e.preventDefault(); setPage(0); onPageChange?.(0); }
-      else if (k === 'n' || (k === 'ArrowRight' && e.ctrlKey)) { if (hasNext) { e.preventDefault(); onNextChapter(); } }
-      else if (k === 'p' || (k === 'ArrowLeft' && e.ctrlKey)) { if (hasPrev) { e.preventDefault(); onPrevChapter(); } }
-      else if ((k === '+' || k === '=') && !e.ctrlKey) setZoom(z => Math.min(3, +(z + .25).toFixed(2)));
-      else if (k === '-' && !e.ctrlKey) setZoom(z => Math.max(.5, +(z - .25).toFixed(2)));
-      else if (k === '0') setZoom(1);
-      else if (k === 'm') setMode(m => ({ scroll: 'paged', paged: 'webtoon', webtoon: 'scroll' }[m] || 'scroll'));
-      else if (k === 'r') setDirection(d => d === 'rtl' ? 'ltr' : 'rtl');
-      else if (k === ' ') { e.preventDefault(); if (mode !== 'paged') setAutoScroll(prev => !prev); }
+
+      if (k === 'Escape') {
+        e.preventDefault();
+        if (panelOpenRef.current) { setPanelOpen(false); return; }
+        if (showReceiptRef.current) { setShowReceipt(false); return; }
+        onBack?.();
+        return;
+      }
+
+      const currentMode = modeRef.current;
+      const currentDir = directionRef.current;
+      const currentZoom = zoomRef.current;
+      const len = pagesLenRef.current;
+
+      if (k === 'ArrowRight' || k === 'd') {
+        if (currentMode === 'paged') currentDir === 'rtl' ? go(-1) : go(1);
+      } else if (k === 'ArrowLeft' || k === 'a') {
+        if (currentMode === 'paged') currentDir === 'rtl' ? go(1) : go(-1);
+      } else if (k === 'ArrowDown') {
+        if (currentMode === 'paged') go(1);
+      } else if (k === 'ArrowUp') {
+        if (currentMode === 'paged') go(-1);
+      } else if (k === 'PageDown') {
+        e.preventDefault(); go(1);
+      } else if (k === 'PageUp') {
+        e.preventDefault(); go(-1);
+      } else if (k === 'End') {
+        e.preventDefault(); setPage(len - 1); onPageChange?.(len - 1);
+      } else if (k === 'Home') {
+        e.preventDefault(); setPage(0); onPageChange?.(0);
+      } else if (k === 'n' || (k === 'ArrowRight' && e.ctrlKey)) {
+        if (hasNextRef.current) { e.preventDefault(); onNextChapter?.(); }
+      } else if (k === 'p' || (k === 'ArrowLeft' && e.ctrlKey)) {
+        if (hasPrevRef.current) { e.preventDefault(); onPrevChapter?.(); }
+      } else if ((k === '+' || k === '=') && !e.ctrlKey) {
+        setZoom(z => Math.min(3, +(z + 0.25).toFixed(2)));
+      } else if (k === '-' && !e.ctrlKey) {
+        setZoom(z => Math.max(0.5, +(z - 0.25).toFixed(2)));
+      } else if (k === '0') {
+        setZoom(1);
+      } else if (k === 'm') {
+        setMode(m => ({ scroll: 'paged', paged: 'webtoon', webtoon: 'scroll' }[m] || 'scroll'));
+      } else if (k === 'r') {
+        setDirection(d => d === 'rtl' ? 'ltr' : 'rtl');
+      } else if (k === ' ') {
+        e.preventDefault();
+        if (currentMode !== 'paged') setAutoScroll(s => !s);
+      } else if (k === 's') {
+        e.preventDefault(); setPanelOpen(p => !p);
+      }
+
       nudgeUI();
     };
-    window.addEventListener('keydown', h);
-    return () => window.removeEventListener('keydown', h);
-  }, [mode, go, onBack, onNextChapter, onPrevChapter, hasNext, hasPrev, page, pages.length, onPageChange, panelOpen, showReceipt, direction, nudgeUI, quickSettingsOpen]);
 
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [go, onBack, onNextChapter, onPrevChapter, onPageChange, nudgeUI]);
+
+  // ─ Trackpad / mouse wheel paging for desktop (paged mode only) ─
+  useEffect(() => {
+    if (mode !== 'paged') return;
+    let acc = 0;
+    let timeout;
+    const handleWheel = (e) => {
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+      acc += e.deltaY;
+      clearTimeout(timeout);
+      timeout = setTimeout(() => { acc = 0; }, 120);
+      if (Math.abs(acc) > 50) {
+        go(acc > 0 ? 1 : -1);
+        acc = 0;
+      }
+    };
+    window.addEventListener('wheel', handleWheel, { passive: true });
+    return () => window.removeEventListener('wheel', handleWheel);
+  }, [mode, go]);
+
+  // ─ Pause auto-scroll when window loses focus ─
+  useEffect(() => {
+    const handleVis = () => { if (document.hidden) setAutoScroll(false); };
+    document.addEventListener('visibilitychange', handleVis);
+    return () => document.removeEventListener('visibilitychange', handleVis);
+  }, []);
+
+  // ─ Tap handling ─
   const handleTap = useCallback(e => {
-    if (panelOpen) { setPanelOpen(false); return; }
-    if (quickSettingsOpen) { setQuickSettingsOpen(false); return; }
-    if (zoom > 1.05) { nudgeUI(); return; }
-    
+    if (panelOpenRef.current) { setPanelOpen(false); return; }
+    if (zoomRef.current > 1.05) { nudgeUI(); return; }
     const x = e.clientX / window.innerWidth;
     const y = e.clientY / window.innerHeight;
-    
-    // Middle chunk opens UI
-    if (x > 0.3 && x < 0.7 && y > 0.3 && y < 0.7) {
-        setUiVisible(u => !u);
-        return;
-    }
-
-    if (mode === 'paged') {
-        if (direction === 'rtl') {
-            if (x < .4) go(-1);
-            else if (x > .6) go(1);
-        } else {
-            if (x < .4) go(1);
-            else if (x > .6) go(-1);
-        }
-    } else {
-        setUiVisible(u => !u);
-    }
-  }, [mode, go, zoom, nudgeUI, panelOpen, quickSettingsOpen, direction]);
+    if (x > 0.3 && x < 0.7 && y > 0.3 && y < 0.7) { setUiVisible(u => !u); return; }
+    if (modeRef.current === 'paged') {
+      if (directionRef.current === 'rtl') { if (x < .4) go(-1); else if (x > .6) go(1); }
+      else { if (x < .4) go(1); else if (x > .6) go(-1); }
+    } else { setUiVisible(u => !u); }
+  }, [go, nudgeUI, panelOpenRef, zoomRef, modeRef, directionRef]);
 
   const pct = pages.length > 1 ? (page / (pages.length - 1)) * 100 : 0;
-  const minsLeft = Math.max(1, Math.ceil((pages.length - page - 1) * 0.3));
   const imgFilter = `brightness(${brightness}%) contrast(${contrast}%) saturate(${saturation}%)`;
+  const isWebtoon = mode === 'webtoon';
 
   const getScrollStyle = (wt, fm, zm) => {
     const b = { display: 'block', userSelect: 'none', filter: imgFilter };
     if (wt) return { ...b, width: `${zm * 100}%`, maxWidth: `${860 * zm}px`, margin: '0 auto' };
     if (fm === 'width') return { ...b, width: `${zm * 100}vw`, height: 'auto' };
-    if (fm === 'original') return { ...b, transform: zm !== 1 ? `scale(${zm})` : 'none', transformOrigin: 'top center', width: 'auto', height: 'auto' };
+    if (fm === 'original') return { ...b, zoom: zm !== 1 ? zm : undefined, transform: 'none', width: 'auto', height: 'auto' };
     return { ...b, height: `${zm * 88}vh`, width: 'auto', maxWidth: '100%' };
   };
 
-  const Seg = ({ val, onChange, opts }) => (
-    <div style={{ display: 'flex', gap: 2, background: 'rgba(255,255,255,0.06)', borderRadius: 10, padding: 3 }}>
-      {opts.map(([v, l]) => (
-        <button key={v} onClick={() => onChange(v)} style={{
-          flex: 1, padding: '8px 6px', borderRadius: 8, border: 'none', cursor: 'pointer',
-          background: val === v ? 'rgba(255,255,255,0.16)' : 'transparent',
-          color: val === v ? '#fff' : 'rgba(255,255,255,0.38)',
-          fontSize: 12, fontWeight: 700, transition: 'all .13s',
-          boxShadow: val === v ? '0 1px 6px rgba(0,0,0,.5)' : '',
-        }}>{l}</button>
-      ))}
-    </div>
-  );
-
-  const Sl = ({ icon: Icon, min, max, step = 1, val, onChange, fmt, compact = false }) => (
-    <div style={{ display: 'flex', alignItems: 'center', gap: compact ? 8 : 14 }}>
-      {Icon && <Icon size={compact ? 14 : 16} style={{ color: 'rgba(255,255,255,0.5)', flexShrink: 0 }} />}
-      <input type="range" min={min} max={max} step={step} value={val}
-        onClick={e => e.stopPropagation()}
-        onPointerDown={e => e.stopPropagation()}
-        onTouchStart={e => e.stopPropagation()}
-        onInput={e => onChange(+e.target.value)}
-        onChange={e => onChange(+e.target.value)}
-        style={{ flex: 1, cursor: 'ew-resize', accentColor: T.accent, height: compact ? 2 : 4 }} />
-      <span style={{
-        fontFamily: 'monospace', fontSize: compact ? 11 : 13, fontWeight: 'bold', color: 'rgba(255,255,255,0.6)',
-        minWidth: 36, textAlign: 'right'
-      }}>{fmt(val)}</span>
-    </div>
-  );
-
-  const PanelSection = ({ title, children }) => (
-    <div style={{ marginBottom: 24 }}>
-      <p style={{
-        fontSize: 11, letterSpacing: '.14em', textTransform: 'uppercase',
-        color: 'rgba(255,255,255,0.4)', marginBottom: 12, fontWeight: 800
-      }}>{title}</p>
-      {children}
-    </div>
-  );
-
   if (pages.length === 0) return (
-    <div style={{
-      position: 'fixed', inset: 0, background: T.bg,
-      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16
-    }}>
+    <div style={{ position: 'fixed', inset: 0, background: T.bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
       <Spin size={40} />
     </div>
   );
 
-  const isWebtoon = mode === 'webtoon';
-
   return (
-    <div style={{ position: 'fixed', inset: 0, background: T.bg, overflow: 'hidden' }}
-      onMouseMove={mode === 'paged' ? nudgeUI : undefined}>
+    <div
+      style={{ position: 'fixed', inset: 0, background: T.bg, overflow: 'hidden', '--r-accent': accent }}
+      onMouseMove={nudgeUI}
+    >
+      {/* ── Progress Aura ── */}
+      <div style={{ position: 'fixed', top: 0, left: 0, right: 0, height: 120, background: `radial-gradient(ellipse at top, ${accent}12 0%, transparent 70%)`, pointerEvents: 'none', zIndex: 1, opacity: uiVisible ? 1 : 0, transition: 'opacity 0.4s' }} />
 
+      {/* Reading Receipt */}
       {showReceipt && (
         <ReadingReceipt
-          chapter={currentChapter}
+          chapter={allPages[page]?.chapter}
           pagesRead={pages.length}
           timeSeconds={Math.round((Date.now() - sessionStart.current) / 1000)}
           mangaTitle={mangaTitle}
-          hasNext={hasNext}
+          hasNext={localHasNext}
           onNext={() => { setShowReceipt(false); onNextChapter(); }}
           onBack={() => { setShowReceipt(false); onBack(); }}
         />
       )}
 
-      {/* Progress Bar Top */}
-      <div style={{ position: 'fixed', top: 0, left: 0, right: 0, height: 2, zIndex: 300, pointerEvents: 'none' }}>
-        <div style={{
-          height: '100%', width: `${pct}%`, transition: 'width .2s ease',
-          background: `linear-gradient(90deg,${T.accent},${T.accent}88)`,
-          boxShadow: `0 0 8px ${T.accent}60`
-        }} />
-      </div>
-
-      {/* Top App Bar */}
+      {/* ── Top Bar ── */}
       <div style={{
-        position: 'fixed', top: 0, left: 0, right: 0, zIndex: 200,
-        padding: '14px 16px 14px',
-        background: 'linear-gradient(to bottom,rgba(0,0,0,.86) 0%,rgba(0,0,0,.3) 75%,transparent 100%)',
-        display: 'flex', alignItems: 'center', gap: 12,
+        position: 'fixed', top: 0, left: 0, right: 0, zIndex: 300,
+        background: 'rgba(7,8,15,0.85)', backdropFilter: 'blur(20px) saturate(1.8)',
+        borderBottom: '1px solid rgba(255,255,255,0.06)',
+        height: 54, padding: '0 16px', display: 'flex', alignItems: 'center', gap: 12,
+        transition: 'transform 0.4s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s',
+        transform: uiVisible ? 'translateY(0)' : 'translateY(-100%)',
         opacity: uiVisible ? 1 : 0,
-        transform: uiVisible ? 'none' : 'translateY(-16px)',
-        transition: 'opacity .25s ease, transform .25s ease',
-        pointerEvents: uiVisible ? 'all' : 'none',
+        boxShadow: '0 4px 30px rgba(0,0,0,0.3)'
       }}>
-        <button onClick={onBack} style={{
-          display: 'flex', alignItems: 'center', gap: 6,
-          padding: '7px 14px 7px 10px', borderRadius: 99,
-          background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(16px)',
-          border: '1px solid rgba(255,255,255,0.12)',
-          color: 'rgba(255,255,255,0.85)', fontSize: 13, fontWeight: 600,
-          cursor: 'pointer', transition: 'all .15s', flexShrink: 0,
-        }}
-          onMouseEnter={e => { e.currentTarget.style.background = 'rgba(0,0,0,0.7)'; e.currentTarget.style.color = '#fff'; }}
-          onMouseLeave={e => { e.currentTarget.style.background = 'rgba(0,0,0,0.5)'; e.currentTarget.style.color = 'rgba(255,255,255,0.85)'; }}>
-          <ChevronLeft size={15} />Back
+        <button onClick={onBack} style={{ width: 36, height: 36, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.07)', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}>
+          <ChevronLeft size={18} />
         </button>
 
         <div style={{ flex: 1, minWidth: 0, textAlign: 'center' }}>
-          <p style={{
-            fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 13,
-            color: 'rgba(255,255,255,0.9)', overflow: 'hidden', textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap', lineHeight: 1.2
-          }}>
-            {mangaTitle}
-          </p>
-          <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
-            Ch.{currentChapter?.number}
+          <p style={{ fontWeight: 800, fontSize: 13, color: 'rgba(255,255,255,0.95)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', letterSpacing: -0.2, margin: 0 }}>{mangaTitle}</p>
+          <p style={{ fontSize: 11, color: accent, fontWeight: 700, marginTop: 1, opacity: 0.9, margin: 0 }}>
+            Chapter {allPages[page]?.chapter.number} <span style={{ color: 'rgba(255,255,255,0.15)', margin: '0 4px' }}>|</span> Page {(allPages[page]?.localIndex || 0) + 1} of {allPages[page]?.total || 0}
           </p>
         </div>
 
-        <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-          <button onClick={() => setShowReceipt(true)} title="Reading Stats"
-            style={{ width: 34, height: 34, borderRadius: 99, border: 'none', background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(16px)', color: 'rgba(255,255,255,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', transition: 'all .15s' }}>
-            <Activity size={13} />
-          </button>
-          <button onClick={onPrevChapter} disabled={!hasPrev} title="Previous Chapter"
-            style={{ width: 34, height: 34, borderRadius: 99, border: 'none', background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(16px)', color: hasPrev ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: hasPrev ? 'pointer' : 'default', transition: 'all .15s' }}>
-            <SkipBack size={13} />
-          </button>
-          <button onClick={onNextChapter} disabled={!hasNext} title="Next Chapter"
-            style={{ width: 34, height: 34, borderRadius: 99, border: 'none', background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(16px)', color: hasNext ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: hasNext ? 'pointer' : 'default', transition: 'all .15s' }}>
-            <SkipForward size={13} />
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button onClick={() => setShowReceipt(true)} style={{ width: 36, height: 36, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.07)', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }} title="Reading Stats">
+            <Activity size={16} />
           </button>
         </div>
       </div>
 
-      {/* FLOATING PAGE INDICATOR & MINIMAL QUICK SETTINGS (Visible when UI hidden) */}
+      {/* ── Bottom Floating Controls ── */}
       <div style={{
-          position: 'fixed', bottom: 20, right: 20, zIndex: 150,
-          display: 'flex', alignItems: 'center', gap: 10,
-          padding: '8px 16px', borderRadius: 99,
-          background: 'rgba(10,12,18,0.75)', backdropFilter: 'blur(16px) saturate(1.8)',
-          border: '1px solid rgba(255,255,255,0.08)', boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
-          opacity: uiVisible ? 0 : 1, transform: uiVisible ? 'translateY(16px) scale(0.95)' : 'none',
-          transition: 'all 0.3s cubic-bezier(0.16,1,0.3,1)', pointerEvents: uiVisible ? 'none' : 'auto'
-      }}>
-          <span style={{ color: 'rgba(255,255,255,0.85)', fontSize: 13, fontWeight: 700, fontFamily: 'monospace' }}>
-            {page + 1} <span style={{ color: 'rgba(255,255,255,0.3)' }}>/ {pages.length}</span>
-          </span>
-          <div style={{ width: 1, height: 14, background: 'rgba(255,255,255,0.1)' }} />
-          <button onClick={() => setQuickSettingsOpen(p => !p)} style={{ background: 'transparent', border: 'none', color: quickSettingsOpen ? 'var(--accent)' : 'rgba(255,255,255,0.6)', cursor: 'pointer', display: 'flex', transition: 'color 0.2s' }}>
-            <Settings2 size={16} />
-          </button>
-      </div>
-
-      {/* QUICK SETTINGS POPUP */}
-      {quickSettingsOpen && !uiVisible && (
-          <div className="anim-fadeInUp" onClick={e => e.stopPropagation()} onPointerDown={e => e.stopPropagation()} style={{
-              position: 'fixed', bottom: 64, right: 20, zIndex: 151,
-              background: 'rgba(12,14,22,0.95)', backdropFilter: 'blur(24px)',
-              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 20,
-              padding: 20, width: 280, boxShadow: '0 24px 64px rgba(0,0,0,0.6)',
-              display: 'flex', flexDirection: 'column', gap: 16
-          }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.5)', textTransform: 'uppercase', letterSpacing: 1 }}>Quick Adjust</span>
-                  <button onClick={() => setPanelOpen(true)} style={{ background: 'transparent', border: 'none', color: 'var(--accent)', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>All Settings</button>
-              </div>
-              <Sl icon={Sun} min={40} max={150} val={brightness} onChange={setBrightness} fmt={v => `${v}%`} compact />
-              <Sl icon={() => <span style={{fontSize:12,fontWeight:'bold',color:'rgba(255,255,255,0.5)'}}>🔍</span>} min={0.5} max={3} step={0.1} val={zoom} onChange={setZoom} fmt={v => `${v}x`} compact />
-               {mode !== 'paged' && (
-                 <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 4 }}>
-                     <button onClick={() => setAutoScroll(s => !s)} style={{ background: autoScroll ? 'var(--accent)' : 'rgba(255,255,255,0.1)', color: autoScroll ? '#fff' : 'rgba(255,255,255,0.7)', border: 'none', padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
-                         {autoScroll ? <Pause size={12}/> : <Play size={12}/>} Auto-scroll
-                     </button>
-                     <div style={{ flex: 1 }}>
-                         <Sl min={0.5} max={5} step={0.5} val={scrollSpeed} onChange={setScrollSpeed} fmt={v => `${v}x`} compact />
-                     </div>
-                 </div>
-              )}
-              {mode === 'paged' && (
-                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: 'rgba(255,255,255,0.04)', padding: '6px 12px', borderRadius: 8 }}>
-                    <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.7)', fontWeight: 600 }}>Image Fit</span>
-                    <div style={{ display: 'flex', gap: 4 }}>
-                        {[{id:'height', label:'H'}, {id:'width', label:'W'}, {id:'original', label:'1:1'}].map(f => (
-                           <button key={f.id} onClick={() => setFitMode(f.id)} style={{ padding: '4px 10px', borderRadius: 6, background: fitMode === f.id ? 'var(--accent)' : 'transparent', border: 'none', color: fitMode === f.id ? '#fff' : 'rgba(255,255,255,0.5)', fontSize: 11, fontWeight: 700, cursor: 'pointer' }}>{f.label}</button>
-                        ))}
-                    </div>
-                 </div>
-              )}
-          </div>
-      )}
-
-      {/* Main Bottom Bar */}
-      <div style={{
-        position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 200,
-        padding: '12px 16px 16px',
-        background: 'linear-gradient(to top,rgba(0,0,0,.88) 0%,rgba(0,0,0,.4) 70%,transparent 100%)',
+        position: 'fixed', bottom: 24, left: '50%', transform: `translateX(-50%) ${uiVisible ? 'translateY(0)' : 'translateY(40px)'}`,
+        width: 'calc(100% - 48px)', maxWidth: 840, zIndex: 300,
+        background: 'rgba(15,16,25,0.85)', backdropFilter: 'blur(32px) saturate(2)',
+        border: '1px solid rgba(255,255,255,0.1)', borderRadius: 24, padding: '16px 24px',
+        transition: 'all 0.45s cubic-bezier(0.16, 1, 0.3, 1)',
         opacity: uiVisible ? 1 : 0,
-        transform: uiVisible ? 'none' : 'translateY(16px)',
-        transition: 'opacity .25s ease, transform .25s ease',
-        pointerEvents: uiVisible ? 'all' : 'none',
+        boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
+        display: 'flex', flexDirection: 'column', gap: 16
       }}>
-        {mode === 'paged' && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, maxWidth: 800, margin: '0 auto 12px' }}>
-            <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', fontWeight: 'bold', minWidth: 26, fontFamily: 'monospace' }}>{page + 1}</span>
-            <input type="range" min={0} max={pages.length - 1} value={page}
-              onClick={e => e.stopPropagation()}
-              onPointerDown={e => e.stopPropagation()} onTouchStart={e => e.stopPropagation()}
-              onInput={e => { const p = +e.target.value; setPage(p); onPageChange?.(p); updateProgress?.(mangaId, currentChapter?.id, currentChapter?.number, p); }}
-              onChange={e => { const p = +e.target.value; setPage(p); onPageChange?.(p); updateProgress?.(mangaId, currentChapter?.id, currentChapter?.number, p); }}
-              style={{ flex: 1, accentColor: T.accent, cursor: 'ew-resize' }} />
-            <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', fontWeight: 'bold', minWidth: 26, textAlign: 'right', fontFamily: 'monospace' }}>{pages.length}</span>
-          </div>
-        )}
+        {/* Scrubber (Focused on current chapter) */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <button
+            onClick={() => { jumpToPage(chapterRange.start - 1); }}
+            disabled={chapterRange.start === 0}
+            style={{ width: 34, height: 34, borderRadius: 12, border: 'none', background: 'rgba(255,255,255,0.05)', color: chapterRange.start > 0 ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.15)', cursor: chapterRange.start > 0 ? 'pointer' : 'default', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+            title="Previous Chapter"
+          >
+            <SkipBack size={14} />
+          </button>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, maxWidth: 800, margin: '0 auto' }}>
-          <div style={{ flex: 1 }} />
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            <button onClick={() => setPanelOpen(p => !p)}
-              title="Full Settings"
+          <span style={{ fontSize: 12, fontWeight: 800, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace', minWidth: 28, textAlign: 'center' }}>
+            {(allPages[page]?.localIndex || 0) + 1}
+          </span>
+
+          <div style={{ flex: 1, position: 'relative', height: 24, display: 'flex', alignItems: 'center' }}>
+            <input type="range"
+              min={chapterRange.start}
+              max={chapterRange.end}
+              value={page}
+              onInput={e => jumpToPage(+e.target.value, false)}
               style={{
-                width: 38, height: 38, borderRadius: 12,
-                background: panelOpen ? T.accent : 'rgba(255,255,255,0.08)',
-                backdropFilter: 'blur(20px)',
-                border: `1px solid ${panelOpen ? T.accent : 'rgba(255,255,255,0.1)'}`,
-                color: panelOpen ? '#000' : 'rgba(255,255,255,0.8)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                cursor: 'pointer', transition: 'all .15s'
-              }}>
-              <Settings2 size={18} />
+                width: '100%',
+                accentColor: accent,
+                height: 4,
+                cursor: 'pointer',
+                background: 'rgba(255,255,255,0.1)',
+                borderRadius: 2
+              }}
+            />
+          </div>
+
+          <span style={{ fontSize: 12, fontWeight: 800, color: 'rgba(255,255,255,0.4)', fontFamily: 'monospace', minWidth: 28, textAlign: 'center' }}>
+            {chapterRange.total}
+          </span>
+
+          <button
+            onClick={() => { jumpToPage(chapterRange.end + 1); }}
+            disabled={!localHasNext && page === pages.length - 1}
+            style={{ width: 34, height: 34, borderRadius: 12, border: 'none', background: 'rgba(255,255,255,0.05)', color: (localHasNext || page < pages.length - 1) ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.15)', cursor: (localHasNext || page < pages.length - 1) ? 'pointer' : 'default', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+            title="Next Chapter"
+          >
+            <SkipForward size={14} />
+          </button>
+        </div>
+
+        {/* Toolbar */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <ToolbarBtn active={mode === 'scroll'} accent={accent} onClick={() => setMode('scroll')} icon={<Columns size={15} />} label="Scroll" />
+            <ToolbarBtn active={mode === 'paged'} accent={accent} onClick={() => setMode('paged')} icon={<BookOpen size={15} />} label="Paged" />
+            <ToolbarBtn active={mode === 'webtoon'} accent={accent} onClick={() => setMode('webtoon')} icon={<AlignJustify size={15} />} label="Strip" />
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button onClick={() => setAutoScroll(a => !a)} style={{
+              width: 40, height: 40, borderRadius: 14, border: 'none',
+              background: autoScroll ? `${accent}20` : 'rgba(255,255,255,0.06)',
+              color: autoScroll ? accent : 'rgba(255,255,255,0.6)',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              transition: 'all 0.2s',
+              boxShadow: autoScroll ? `0 0 15px ${accent}30` : 'none'
+            }}>
+              {autoScroll ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
+            </button>
+
+            <div style={{ width: 1, height: 24, background: 'rgba(255,255,255,0.1)', margin: '0 4px' }} />
+
+            <button onClick={() => setPanelOpen(true)} style={{
+              height: 40, padding: '0 16px', borderRadius: 14, border: 'none',
+              background: 'rgba(255,255,255,0.06)', color: '#fff',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8,
+              fontSize: 12, fontWeight: 700, transition: 'all 0.2s'
+            }}>
+              <Settings2 size={16} /> Settings
             </button>
           </div>
         </div>
       </div>
 
+      {/* ── Settings Drawer ── */}
       {panelOpen && (
-        <div style={{
-          position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 300,
-          background: 'rgba(12,14,20,0.95)', backdropFilter: 'blur(40px)',
-          borderTop: '1px solid rgba(255,255,255,0.08)',
-          borderRadius: '32px 32px 0 0',
-          boxShadow: '0 -24px 80px rgba(0,0,0,.6)',
-          animation: 'fadeInUp .25s cubic-bezier(0.16,1,0.3,1) both',
-        }}>
-          <div style={{ padding: '16px 20px 0', display: 'flex', justifyContent: 'center', position: 'relative' }}>
-            <div style={{ width: 40, height: 5, borderRadius: 99, background: 'rgba(255,255,255,0.15)', margin: '0 auto' }} />
-            <button onClick={() => setPanelOpen(false)} style={{ position: 'absolute', right: 20, top: 16, width: 32, height: 32, borderRadius: 16, border: 'none', background: 'rgba(255,255,255,0.05)', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><X size={16} /></button>
-          </div>
-
-          <div style={{
-            padding: '24px 28px 40px', display: 'flex', flexDirection: 'column',
-            gap: 32, maxWidth: 640, margin: '0 auto', maxHeight: '75vh', overflowY: 'auto'
-          }}>
-              <PanelSection title="Reading Mode">
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
-                  {[{id: 'scroll', label: 'Scroll', icon: '↕️'}, {id: 'paged', label: 'Paged', icon: '📖'}, {id: 'webtoon', label: 'Strip', icon: '📜'}].map(m => (
-                    <button key={m.id} onClick={() => setMode(m.id)} style={{
-                      padding: '16px 10px', borderRadius: 20, border: `1.5px solid ${mode === m.id ? T.accent : 'rgba(255,255,255,0.04)'}`,
-                      background: mode === m.id ? `${T.accent}15` : 'rgba(255,255,255,0.02)', color: mode === m.id ? '#fff' : 'rgba(255,255,255,0.5)',
-                      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, cursor: 'pointer', transition: 'all 0.2s', boxShadow: mode === m.id ? `0 8px 24px ${T.accent}30` : 'none'
-                    }}>
-                      <span style={{ fontSize: 24, padding: 4 }}>{m.icon}</span>
-                      <span style={{ fontSize: 13, fontWeight: 700 }}>{m.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </PanelSection>
-
-              {mode === 'paged' && (
-                <PanelSection title="Reading Direction">
-                  <Seg val={direction} onChange={setDirection} opts={[['rtl', '← RTL (Japanese)'], ['ltr', 'LTR → (Manhwa)']]} />
-                </PanelSection>
-              )}
-
-              {mode !== 'webtoon' && (
-                <PanelSection title="Image Fit">
-                  <Seg val={fitMode} onChange={setFitMode} opts={[['height', 'Fit Height'], ['width', 'Fit Width'], ['original', '1:1 Scale']]} />
-                </PanelSection>
-              )}
-
-              <PanelSection title="Image Adjustments">
-                {pages[page] && (
-                  <div style={{ position: 'relative', height: 120, borderRadius: 16, overflow: 'hidden', marginBottom: 20, border: '1px solid rgba(255,255,255,0.08)' }}>
-                      <img src={proxyImg(pages[page])} style={{ width: '100%', height: '100%', objectFit: 'cover', filter: imgFilter }} alt="preview" />
-                  </div>
-                )}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
-                  <Sl icon={Sun} min={40} max={160} val={brightness} onChange={setBrightness} fmt={v => `${v}%`} />
-                  <Sl icon={Contrast} min={60} max={160} val={contrast} onChange={setContrast} fmt={v => `${v}%`} />
-                  <Sl icon={() => <span style={{fontSize:16,fontWeight:'bold',color:'rgba(255,255,255,0.5)'}}>🔍</span>} min={0.5} max={3} step={0.1} val={zoom} onChange={setZoom} fmt={v => `${v}x`} />
-                </div>
-              </PanelSection>
-
-              <PanelSection title="Background Themes">
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 12 }}>
-                  {Object.entries(THEMES).map(([key, t]) => (
-                    <button key={key} onClick={() => setTheme(key)}
-                      style={{ padding: '14px 6px', borderRadius: 16, cursor: 'pointer', background: t.bg, border: `1.5px solid ${theme === key ? t.accent : 'rgba(255,255,255,0.04)'}`, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, transform: theme === key ? 'scale(1.05)' : 'scale(1)', boxShadow: theme === key ? `0 8px 24px ${t.accent}40` : '' }}>
-                      <div style={{ width: 24, height: 24, borderRadius: '50%', background: t.accent }} />
-                    </button>
-                  ))}
-                </div>
-              </PanelSection>
-          </div>
-        </div>
+        <div
+          onClick={() => setPanelOpen(false)}
+          style={{ position: 'fixed', inset: 0, zIndex: 400, background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(8px)', transition: 'all 0.3s' }}
+        />
       )}
+      <div style={{
+        position: 'fixed', top: 0, right: 0, bottom: 0, width: 340, zIndex: 500,
+        background: 'rgba(10,11,18,0.98)', backdropFilter: 'blur(40px)',
+        borderLeft: '1px solid rgba(255,255,255,0.08)',
+        transform: panelOpen ? 'translateX(0)' : 'translateX(100%)',
+        transition: 'transform 0.45s cubic-bezier(0.16, 1, 0.3, 1)',
+        display: 'flex', flexDirection: 'column', boxShadow: '-20px 0 60px rgba(0,0,0,0.6)'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '20px 24px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+          <div>
+            <h3 style={{ fontSize: 16, fontWeight: 800, color: '#fff', margin: 0 }}>Reader Settings</h3>
+            <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', margin: '4px 0 0' }}>Configure your reading experience</p>
+          </div>
+          <button onClick={() => setPanelOpen(false)} style={{ width: 32, height: 32, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.07)', color: 'rgba(255,255,255,0.5)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <X size={18} />
+          </button>
+        </div>
 
+        <div style={{ flex: 1, overflowY: 'auto', padding: 24, display: 'flex', flexDirection: 'column', gap: 32, scrollbarWidth: 'none' }}>
+          <Section title="Reading Mode">
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+              <ModeCard active={mode === 'scroll'} accent={accent} onClick={() => setMode('scroll')} icon="↕️" label="Scroll" />
+              <ModeCard active={mode === 'paged'} accent={accent} onClick={() => setMode('paged')} icon="📖" label="Paged" />
+              <ModeCard active={mode === 'webtoon'} accent={accent} onClick={() => setMode('webtoon')} icon="📜" label="Strip" />
+            </div>
+          </Section>
+
+          {mode === 'paged' && (
+            <Section title="Paged Layout">
+              <Toggle val={doublePage} onChange={setDoublePage} label="Double Page Spread" sub="Show two pages side-by-side" />
+              <div style={{ marginTop: 12 }}>
+                <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginBottom: 8, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1 }}>Direction</p>
+                <SegControl val={direction} onChange={setDirection} opts={[['rtl', 'Right-to-Left'], ['ltr', 'Left-to-Right']]} />
+              </div>
+            </Section>
+          )}
+
+          <Section title="Image & Display">
+            <SliderRow icon={Sun} label="Brightness" min={40} max={160} val={brightness} onChange={setBrightness} fmt={v => `${v}%`} />
+            <SliderRow icon={Contrast} label="Contrast" min={60} max={160} val={contrast} onChange={setContrast} fmt={v => `${v}%`} />
+            <SliderRow icon={Droplet} label="Saturation" min={0} max={200} val={saturation} onChange={setSaturation} fmt={v => `${v}%`} />
+            <SliderRow icon={ZoomIn} label="Zoom" min={0.5} max={3} step={0.1} val={zoom} onChange={setZoom} fmt={v => `${v}x`} />
+            <SliderRow icon={AlignJustify} label="Page Gap" min={0} max={100} val={pageGap} onChange={setPageGap} fmt={v => `${v}px`} />
+          </Section>
+
+          <Section title="Reader Theme" last>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10 }}>
+              {Object.entries(THEMES).map(([key, t]) => (
+                <button key={key} onClick={() => setTheme(key)} style={{ aspectRatio: 1, borderRadius: 12, background: t.bg, border: `2px solid ${theme === key ? accent : 'rgba(255,255,255,0.08)'}`, cursor: 'pointer', transition: 'all 0.2s', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <div style={{ width: 12, height: 12, borderRadius: '50%', background: t.accent, boxShadow: theme === key ? `0 0 10px ${t.accent}80` : 'none' }} />
+                </button>
+              ))}
+            </div>
+          </Section>
+        </div>
+      </div>
+
+      {/* ── Viewport ── */}
       {mode === 'paged' ? (
-        <div onClick={handleTap} onTouchStart={e => setTouchStart(e.touches[0].clientX)} onTouchEnd={e => { if (touchStart != null && zoom <= 1.05) { const d = touchStart - e.changedTouches[0].clientX; if (Math.abs(d) > 48) direction === 'rtl' ? go(d > 0 ? 1 : -1) : go(d > 0 ? -1 : 1); } setTouchStart(null); }}
-          style={{ height: '100vh', width: '100vw', overflow: zoom > 1.05 ? 'auto' : 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: zoom > 1.05 ? 'grab' : 'default' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: direction === 'rtl' ? 'row-reverse' : 'row', gap: doublePage ? 2 : 0, minWidth: zoom > 1.05 ? `${zoom * 100}vw` : '100vw', minHeight: zoom > 1.05 ? `${zoom * 100}vh` : '100vh', padding: uiVisible ? '52px 0 72px' : '4px 0' }}>
+        <div
+          onClick={handleTap}
+          onTouchStart={e => setTouchStart(e.touches[0].clientX)}
+          onTouchEnd={e => {
+            if (touchStart != null && zoom <= 1.05) {
+              const d = touchStart - e.changedTouches[0].clientX;
+              if (Math.abs(d) > 48) direction === 'rtl' ? go(d > 0 ? 1 : -1) : go(d > 0 ? -1 : 1);
+            }
+            setTouchStart(null);
+          }}
+          style={{ height: '100vh', width: '100vw', overflow: zoom > 1.05 ? 'auto' : 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: zoom > 1.05 ? 'grab' : 'default' }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: direction === 'rtl' ? 'row-reverse' : 'row', gap: doublePage ? 2 : 0, minWidth: zoom > 1.05 ? `${zoom * 100}vw` : '100vw', minHeight: zoom > 1.05 ? `${zoom * 100}vh` : '100vh', padding: uiVisible ? '54px 0 100px' : '4px 0' }}>
             {doublePage && pages[direction === 'rtl' ? page + 1 : page - 1] && (
-              <img src={proxyImg(pages[direction === 'rtl' ? page + 1 : page - 1])} draggable={false} alt="" style={{ display: 'block', userSelect: 'none', flexShrink: 0, filter: imgFilter, opacity: .88, maxWidth: '50vw', maxHeight: uiVisible ? 'calc(100vh - 124px)' : '100vh', height: fitMode === 'height' ? (uiVisible ? 'calc(100vh - 124px)' : '100vh') : 'auto', width: 'auto', objectFit: 'contain', animation: 'fadeIn .14s ease both' }} />
+              <img src={proxyImg(pages[direction === 'rtl' ? page + 1 : page - 1])} draggable={false} alt="" style={{ display: 'block', userSelect: 'none', flexShrink: 0, filter: imgFilter, opacity: .88, maxWidth: '50vw', maxHeight: uiVisible ? 'calc(100vh - 154px)' : '100vh', height: fitMode === 'height' ? (uiVisible ? 'calc(100vh - 154px)' : '100vh') : 'auto', width: 'auto', objectFit: 'contain', animation: 'fadeIn .14s ease both' }} />
             )}
-            <img src={proxyImg(pages[page])} draggable={false} alt={`Page ${page + 1}`} style={{ display: 'block', userSelect: 'none', flexShrink: 0, filter: imgFilter, animation: 'fadeIn .14s ease both', ...(zoom <= 1 ? { maxWidth: doublePage ? '50vw' : '100vw', maxHeight: uiVisible ? 'calc(100vh - 124px)' : '100vh', width: fitMode === 'width' ? (doublePage ? '50vw' : '100vw') : 'auto', height: fitMode === 'height' ? (uiVisible ? 'calc(100vh - 124px)' : '100vh') : 'auto', objectFit: 'contain', } : { maxWidth: 'none', maxHeight: 'none', width: fitMode === 'width' ? `${zoom * (doublePage ? 50 : 100)}vw` : 'auto', height: fitMode === 'height' ? `${zoom * 100}vh` : 'auto', transform: fitMode === 'original' ? `scale(${zoom})` : 'none', transformOrigin: 'center center', }) }} />
+            <img src={proxyImg(pages[page])} draggable={false} alt={`Page ${page + 1}`}
+              style={{ display: 'block', userSelect: 'none', flexShrink: 0, filter: imgFilter, animation: 'fadeIn .14s ease both', ...(zoom <= 1 ? { maxWidth: doublePage ? '50vw' : '100vw', maxHeight: uiVisible ? 'calc(100vh - 154px)' : '100vh', width: fitMode === 'width' ? (doublePage ? '50vw' : '100vw') : 'auto', height: fitMode === 'height' ? (uiVisible ? 'calc(100vh - 154px)' : '100vh') : 'auto', objectFit: 'contain' } : { maxWidth: 'none', maxHeight: 'none', width: fitMode === 'width' ? `${zoom * (doublePage ? 50 : 100)}vw` : 'auto', height: fitMode === 'height' ? `${zoom * 100}vh` : 'auto', zoom: fitMode === 'original' && zoom !== 1 ? zoom : undefined }) }}
+            />
           </div>
         </div>
       ) : (
-        <div ref={containerRef} onClick={handleTap} onTouchStart={e => setTouchStart(e.touches[0].clientX)} onTouchEnd={e => { if (touchStart != null) { const d = touchStart - e.changedTouches[0].clientX; if (Math.abs(d) > 60) go(d > 0 ? 1 : -1); } setTouchStart(null); }}
-          style={{ height: '100vh', overflowY: 'auto', overflowX: isWebtoon ? 'hidden' : 'auto', paddingTop: uiVisible ? 52 : 0, scrollbarWidth: 'none', msOverflowStyle: 'none', transition: 'padding .2s ease' }}>
-          {pages.map((url, i) => (
-            <div key={i} data-page={i} style={{ display: 'flex', justifyContent: 'center', width: '100%', marginBottom: isWebtoon ? pageGap : Math.max(4, pageGap) }}>
-              <img src={proxyImg(url)} alt={`Page ${i + 1}`} draggable={false} style={{ ...getScrollStyle(isWebtoon, fitMode, zoom) }} loading={i < 3 ? 'eager' : 'lazy'} />
-            </div>
+        <div
+          ref={containerRef}
+          onClick={handleTap}
+          onTouchStart={e => setTouchStart(e.touches[0].clientX)}
+          onTouchEnd={e => { if (touchStart != null) { const d = touchStart - e.changedTouches[0].clientX; if (Math.abs(d) > 60) go(d > 0 ? 1 : -1); } setTouchStart(null); }}
+          style={{ height: '100vh', overflowY: 'auto', overflowX: isWebtoon ? 'hidden' : 'auto', paddingTop: uiVisible ? 54 : 0, scrollbarWidth: 'none', msOverflowStyle: 'none', transition: 'padding .2s ease' }}
+        >
+          {allPages.map((p, i) => (
+            <React.Fragment key={`${p.chapter.id}-${i}`}>
+              {p.localIndex === 0 && i !== 0 && (
+                <div style={{
+                  margin: '140px 0 100px',
+                  padding: '80px 20px',
+                  textAlign: 'center',
+                  background: 'linear-gradient(to bottom, transparent, rgba(255,255,255,0.03) 50%, transparent)',
+                  borderTop: '1px solid rgba(255,255,255,0.04)',
+                  borderBottom: '1px solid rgba(255,255,255,0.04)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  gap: 16
+                }}>
+                  <div style={{
+                    padding: '4px 12px',
+                    borderRadius: 6,
+                    background: `${accent}15`,
+                    color: accent,
+                    fontSize: 10,
+                    fontWeight: 900,
+                    letterSpacing: 2,
+                    textTransform: 'uppercase',
+                    border: `1px solid ${accent}30`
+                  }}>
+                    End of Chapter
+                  </div>
+                  <h3 style={{ fontSize: 32, fontWeight: 900, color: '#fff', margin: 0, letterSpacing: -1, opacity: 0.95 }}>
+                    Chapter {p.chapter.number}
+                  </h3>
+                  <div style={{ width: 40, height: 2, background: accent, borderRadius: 1, opacity: 0.5 }} />
+                </div>
+              )}
+              <div data-page={i} style={{ display: 'flex', justifyContent: 'center', width: '100%', marginBottom: pageGap }}>
+                <img src={proxyImg(p.url)} alt={`Page ${i + 1}`} draggable={false} style={{ ...getScrollStyle(isWebtoon, fitMode, zoom) }} loading={i < page + 5 ? 'eager' : 'lazy'} />
+              </div>
+            </React.Fragment>
           ))}
-          {hasNext && (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '60px 24px 80px', gap: 16 }}>
-              <button onClick={onNextChapter} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '14px 32px', borderRadius: 99, background: `linear-gradient(135deg,${T.accent},${T.accent}cc)`, color: '#fff', fontWeight: 800, fontSize: 15, border: 'none', cursor: 'pointer', boxShadow: `0 12px 32px ${T.accent}50`, transition: 'all .2s' }}>
-                Next Chapter <ChevronRight size={18} />
+          {isFetchingNext && <div style={{ padding: '60px 0', display: 'flex', justifyContent: 'center' }}><Spin size={34} /></div>}
+          {localHasNext && !isFetchingNext && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '80px 24px 120px', gap: 16 }}>
+              <button onClick={() => {
+                setIsFetchingNext(true);
+                const lastChap = loadedChapters[loadedChapters.length - 1].chapter;
+                fetchNextChapter(lastChap.id).then(res => {
+                  if (res && res.pages.length > 0) setLoadedChapters(prev => [...prev, res]);
+                  else setLocalHasNext(false);
+                  setIsFetchingNext(false);
+                });
+              }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '16px 40px', borderRadius: 99, background: `linear-gradient(135deg,${accent},${accent}cc)`, color: '#fff', fontWeight: 800, fontSize: 16, border: 'none', cursor: 'pointer', boxShadow: `0 15px 40px ${accent}40`, transition: 'all 0.3s ease' }}>
+                Load Next Chapter <ChevronDown size={20} />
               </button>
             </div>
           )}
-          <div style={{ height: 120 }} />
+          {!localHasNext && (
+            <div style={{ padding: '100px 0', textAlign: 'center', color: 'rgba(255,255,255,0.3)', fontWeight: 600, letterSpacing: 1 }}>
+              END OF CHAPTERS
+            </div>
+          )}
+          <div style={{ height: 160 }} />
         </div>
       )}
-
-      {panelOpen && <div onClick={() => setPanelOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 295, cursor: 'pointer' }} />}
-      {quickSettingsOpen && !uiVisible && <div onClick={() => setQuickSettingsOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 150, cursor: 'pointer' }} />}
     </div>
   );
 });
+
+// ─── Small toolbar button ──────────────────────────────────────────────────────
+const ToolbarBtn = ({ active, accent, onClick, label, icon, kbd, title }) => (
+  <button
+    onClick={onClick}
+    title={title || `${label}${kbd ? ` (${kbd})` : ''}`}
+    style={{
+      display: 'flex', alignItems: 'center', gap: 6,
+      padding: '7px 12px', borderRadius: 9,
+      border: `1px solid ${active ? accent : 'rgba(255,255,255,0.09)'}`,
+      background: active ? `${accent}20` : 'rgba(255,255,255,0.06)',
+      color: active ? accent : 'rgba(255,255,255,0.65)',
+      fontSize: 12, fontWeight: 700, cursor: 'pointer', transition: 'all .15s',
+    }}
+  >
+    <span style={{ display: 'flex', alignItems: 'center', fontSize: typeof icon === 'string' ? 14 : undefined }}>{icon}</span>
+    {label}
+  </button>
+);

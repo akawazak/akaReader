@@ -2680,7 +2680,8 @@ const ServiceErrorModal = memo(({ onRestart }) => {
 });
 
 // ==================== STARTUP SCREEN ====================
-const StartupScreen = memo(() => {
+const StartupScreen = memo(({ onProceed, onRetry }) => {
+  const [hasFailed, setHasFailed] = useState(false);
   const [phase, setPhase] = useState(0);
   const [statusMsg, setStatusMsg] = useState('Starting services...');
   const [barW, setBarW] = useState(0);
@@ -2740,6 +2741,11 @@ const StartupScreen = memo(() => {
       if (mapped) {
         setStatusMsg(mapped.msg);
         if (mapped.bar !== null) setBarW(mapped.bar);
+        if (status.includes('failed') || status === 'crashed') {
+          setHasFailed(true);
+        } else {
+          setHasFailed(false);
+        }
       }
     });
   }, []);
@@ -2880,6 +2886,23 @@ const StartupScreen = memo(() => {
               {statusMsg}
             </p>
           </div>
+
+          {hasFailed && (
+            <div className="anim-fadeInUp" style={{ display: 'flex', gap: 12, marginTop: 24, justifyContent: 'center' }}>
+              <button 
+                onClick={onProceed}
+                style={{ padding: '8px 16px', borderRadius: 8, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#cbd5e1', fontSize: 13, cursor: 'pointer', transition: 'all 0.2s' }}
+              >
+                Proceed Offline
+              </button>
+              <button 
+                onClick={onRetry}
+                style={{ padding: '8px 16px', borderRadius: 8, background: 'linear-gradient(135deg,#f97316,#ea580c)', border: 'none', color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer', boxShadow: '0 4px 12px rgba(249,115,22,0.3)', transition: 'all 0.2s' }}
+              >
+                Retry Connection
+              </button>
+            </div>
+          )}
         </div>
 
       </div>
@@ -3901,179 +3924,7 @@ const ShareCardModal = memo(({ library, history, progress, readChapters, setting
 // ==================== MAIN APP ====================
 
 
-const OldHomeTab = memo(({ history, library, progress, sources, updates, onSelect, onContinue, onSwitchTab }) => {
-  const [heroLoaded, setHeroLoaded] = useState(false);
-  const hero = useMemo(() => history.find(m => progress[m.id]) || history[0] || null, [history, progress]);
-  const continueReading = useMemo(() => history.filter(m => progress[m.id]).slice(0, 15), [history, progress]);
-  const recentLib = useMemo(() => [...library].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0)).slice(0, 20), [library]);
-  const heroProgress = hero && progress[hero.id] ? progress[hero.id] : null;
-  const sourceCount = Object.keys(sources).length;
 
-  if (!hero && library.length === 0) return (
-    <div className="anim-fadeIn" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '60vh', gap: 24, padding: '60px 40px', textAlign: 'center' }}>
-      <div style={{ width: 96, height: 96, borderRadius: 28, background: 'linear-gradient(135deg,rgba(249,115,22,.14),rgba(249,115,22,.04))', border: '1.5px solid rgba(249,115,22,.18)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><BookOpen size={40} style={{ color: 'rgba(249,115,22,.7)' }} /></div>
-      <div><h2 style={{ fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: 26, marginBottom: 10 }}>Welcome to akaReader</h2><p style={{ color: 'var(--muted-fg)', fontSize: 15, lineHeight: 1.9, maxWidth: 400 }}>{sourceCount === 0 ? 'Start by installing extensions, then browse sources to find manga you love.' : `You have ${sourceCount} source${sourceCount !== 1 ? 's' : ''} ready. Start browsing.`}</p></div>
-      <div style={{ display: 'flex', gap: 12 }}>{sourceCount === 0 && <Btn onClick={() => onSwitchTab('extensions')} icon={Puzzle}>Install Extensions</Btn>}<Btn variant={sourceCount ? 'default' : 'outline'} onClick={() => onSwitchTab('browse')} icon={BookOpen}>Browse Manga</Btn></div>
-    </div>
-  );
-
-  return (
-    <div className="anim-fadeIn" style={{ paddingBottom: 80 }}>
-      {hero && (
-        <div style={{ position: 'relative', height: 600, overflow: 'hidden', marginBottom: 20, marginTop: -42, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
-          {hero.cover && (
-            <>
-              <img src={proxyImg(hero.cover)} alt="" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', filter: 'blur(50px) brightness(0.2) saturate(2)', transform: 'scale(1.2)', pointerEvents: 'none' }} />
-              <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(circle at 75% 30%, rgba(249,115,22,0.15), transparent 60%)', mixBlendMode: 'screen' }} />
-            </>
-          )}
-          <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(90deg, var(--bg) 0%, rgba(5,5,8,0.7) 50%, transparent 100%)' }} />
-          <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(0deg, var(--bg) 0%, transparent 60%)' }} />
-
-          <div style={{ position: 'relative', zIndex: 10, display: 'flex', alignItems: 'flex-end', padding: '0 48px 48px', gap: 48, maxWidth: 1400, margin: '0 auto', width: '100%' }}>
-
-            {/* Cover Image */}
-            <div className="anim-fadeInUp" style={{ flexShrink: 0 }}>
-              <div className="hover-lift" style={{ width: 200, height: 300, borderRadius: 20, overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)', boxShadow: '0 40px 80px rgba(0,0,0,0.8), 0 0 40px rgba(249,115,22,0.2)', background: 'var(--card)', position: 'relative' }}>
-                <div style={{ position: 'absolute', inset: 0, background: 'linear-gradient(135deg, rgba(255,255,255,0.1) 0%, transparent 50%)', zIndex: 2, pointerEvents: 'none' }} />
-                {hero.cover ? (
-                  <img src={proxyImg(hero.cover)} alt={hero.title} onLoad={() => setHeroLoaded(true)} style={{ width: '100%', height: '100%', objectFit: 'cover', opacity: heroLoaded ? 1 : 0, transition: 'opacity 0.8s cubic-bezier(0.16,1,0.3,1)' }} />
-                ) : (
-                  <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><BookOpen size={48} style={{ color: 'var(--muted)', opacity: 0.5 }} /></div>
-                )}
-              </div>
-            </div>
-
-            {/* Info */}
-            <div className="anim-fadeInUp" style={{ flex: 1, paddingBottom: 10, animationDelay: '80ms' }}>
-              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 14px', borderRadius: 20, background: 'rgba(249,115,22,0.15)', border: '1px solid rgba(249,115,22,0.3)', backdropFilter: 'blur(10px)', marginBottom: 20 }}>
-                <Sparkles size={14} style={{ color: 'var(--accent)' }} />
-                <span style={{ fontSize: 11, letterSpacing: '0.15em', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase' }}>{heroProgress ? 'Jump Back In' : 'Featured Read'}</span>
-              </div>
-
-              <h1 style={{ fontFamily: 'var(--font-display)', fontWeight: 900, fontSize: 'clamp(32px, 5vw, 56px)', lineHeight: 1.05, marginBottom: 16, letterSpacing: '-0.03em', textShadow: '0 4px 24px rgba(0,0,0,0.5)' }}>
-                {hero.title}
-              </h1>
-
-              {hero.author && (
-                <p style={{ fontSize: 16, color: 'rgba(255,255,255,0.7)', fontWeight: 500, marginBottom: 24, display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <Pen size={16} style={{ color: 'var(--muted)' }} /> {hero.author}
-                </p>
-              )}
-
-              {heroProgress && (
-                <div style={{ maxWidth: 400, marginBottom: 28, background: 'rgba(0,0,0,0.4)', padding: '12px 16px', borderRadius: 16, border: '1px solid rgba(255,255,255,0.05)', backdropFilter: 'blur(12px)' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                    <span style={{ fontSize: 13, color: 'var(--text)', fontWeight: 600 }}>Chapter {heroProgress.chapterNum}</span>
-                    <span style={{ fontSize: 11, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 4 }}><Clock size={12} /> {timeAgo(heroProgress.lastRead)}</span>
-                  </div>
-                  <div style={{ height: 6, background: 'rgba(255,255,255,0.08)', borderRadius: 3, overflow: 'hidden' }}>
-                    <div style={{ width: `${Math.min((heroProgress.chapterNum / 100) * 100, 100)}%`, height: '100%', background: 'linear-gradient(90deg, var(--accent), #fbd38d)', borderRadius: 3, boxShadow: '0 0 10px rgba(249,115,22,0.5)' }} />
-                  </div>
-                </div>
-              )}
-
-              <div style={{ display: 'flex', gap: 12 }}>
-                <Btn size="lg" icon={Play} onClick={() => onContinue ? onContinue(hero) : onSelect(hero)} style={{ background: 'var(--accent)', color: '#000', borderRadius: 14, padding: '0 28px', fontSize: 15, fontWeight: 800, boxShadow: '0 8px 24px rgba(249,115,22,0.35)', transition: 'all 0.2s', border: '1px solid rgba(255,255,255,0.2)' }}>
-                  {heroProgress ? 'Continue Reading' : 'Start Reading'}
-                </Btn>
-                <Btn size="lg" variant="outline" icon={BookOpen} onClick={() => onSelect(hero)} style={{ borderRadius: 14, backdropFilter: 'blur(12px)', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.15)', color: 'var(--text)' }}>
-                  Details
-                </Btn>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <div style={{ maxWidth: 1400, margin: '0 auto', padding: '0 48px' }}>
-
-        {updates.length > 0 && (
-          <div className="anim-slideD hover-lift" onClick={() => onSwitchTab('updates')} style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '16px 24px', borderRadius: 16, marginBottom: 40, background: 'linear-gradient(135deg, rgba(249,115,22,0.15), rgba(249,115,22,0.02))', border: '1px solid rgba(249,115,22,0.2)', cursor: 'pointer', backdropFilter: 'blur(10px)', boxShadow: '0 8px 32px rgba(0,0,0,0.2)' }}>
-            <div style={{ width: 44, height: 44, borderRadius: 12, background: 'linear-gradient(135deg, var(--accent), #ea580c)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 12px rgba(249,115,22,0.4)' }}>
-              <BellRing size={20} style={{ color: '#fff' }} />
-            </div>
-            <div style={{ flex: 1 }}>
-              <h3 style={{ fontSize: 15, fontWeight: 800, color: 'var(--accent)', marginBottom: 2 }}>New Chapters Available</h3>
-              <p style={{ fontSize: 13, color: 'var(--text-dim)' }}>{updates.length} manga in your library have new releases.</p>
-            </div>
-            <ChevronRight size={20} style={{ color: 'var(--accent)', opacity: 0.7 }} />
-          </div>
-        )}
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 16, marginBottom: 48 }}>
-          {[
-            { label: 'Browse Sources', icon: Globe, id: 'browse', sub: `Explore ${sourceCount} directories`, color: '#3b82f6' },
-            { label: 'Smart Discover', icon: Sparkles, id: 'recommendations', sub: 'Find based on your mood', color: '#a855f7' },
-            { label: 'Downloads', icon: Download, id: 'downloads', sub: 'Manage offline reading', color: '#10b981' }
-          ].map(({ label, icon: Icon, id, sub, color }) => (
-            <button key={id} onClick={() => onSwitchTab(id)} className="hover-lift" style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '20px 24px', borderRadius: 20, cursor: 'pointer', background: 'var(--card)', border: '1px solid var(--border)', textAlign: 'left', position: 'relative', overflow: 'hidden' }}
-              onMouseEnter={e => { e.currentTarget.style.borderColor = color; e.currentTarget.style.background = 'var(--card-hover)'; }}
-              onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.background = 'var(--card)'; }}>
-              <div style={{ position: 'absolute', top: 0, right: 0, width: 100, height: 100, background: `radial-gradient(circle at top right, ${color}20, transparent 70%)`, pointerEvents: 'none' }} />
-              <div style={{ width: 48, height: 48, borderRadius: 14, background: `${color}15`, border: `1px solid ${color}30`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                <Icon size={22} style={{ color }} />
-              </div>
-              <div style={{ zIndex: 1 }}>
-                <p style={{ fontWeight: 800, fontSize: 15, color: 'var(--text)', marginBottom: 4 }}>{label}</p>
-                <p style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 500 }}>{sub}</p>
-              </div>
-              <ChevronRight size={18} style={{ color: 'var(--muted)', marginLeft: 'auto', zIndex: 1 }} />
-            </button>
-          ))}
-        </div>
-
-        {continueReading.length > 0 && <HeroRow title="Jump Back In" icon={Clock} items={continueReading} progress={progress} onSelect={onSelect} showTime />}
-
-        {recentLib.length > 0 && (
-          <div style={{ marginTop: 20 }}>
-            <HeroRow title="Recently Added to Library" icon={Library} items={recentLib} progress={progress} onSelect={onSelect} showTime />
-          </div>
-        )}
-      </div>
-    </div>
-  );
-});
-
-const HeroRow = memo(({ title, icon: Icon, items, progress, onSelect, showTime }) => {
-  const scrollRef = useRef(null);
-  const scroll = d => {
-    if (scrollRef.current) {
-      const w = scrollRef.current.clientWidth;
-      scrollRef.current.scrollBy({ left: d * (w * 0.75), behavior: 'smooth' });
-    }
-  };
-  return (
-    <div style={{ marginBottom: 48 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
-        {Icon && (
-          <div style={{ width: 32, height: 32, borderRadius: 10, background: 'rgba(249,115,22,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <Icon size={16} style={{ color: 'var(--accent)' }} />
-          </div>
-        )}
-        <h2 style={{ fontFamily: 'var(--font-display)', fontWeight: 800, fontSize: 20, flex: 1, letterSpacing: '-0.01em' }}>{title}</h2>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {[-1, 1].map(d => (
-            <button key={d} onClick={() => scroll(d)} style={{ width: 32, height: 32, borderRadius: 10, background: 'var(--card)', border: '1px solid var(--border)', cursor: 'pointer', color: 'var(--muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}
-              onMouseEnter={e => { e.currentTarget.style.background = 'var(--card2)'; e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--accent)'; }}
-              onMouseLeave={e => { e.currentTarget.style.background = 'var(--card)'; e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--muted)'; }}>
-              {d < 0 ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
-            </button>
-          ))}
-        </div>
-      </div>
-      <div style={{ margin: '0 -20px', padding: '0 20px', overflowX: 'auto', scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
-        <div ref={scrollRef} style={{ display: 'flex', gap: 16, overflowX: 'auto', paddingBottom: 16, scrollbarWidth: 'none', msOverflowStyle: 'none', scrollSnapType: 'x mandatory' }}>
-          {items.map((m, i) => (
-            <div key={m.id} style={{ width: 160, minWidth: 160, flexShrink: 0, scrollSnapAlign: 'start' }}>
-              <MangaCard manga={m} onClick={onSelect} index={i} eager badge={showTime && m.lastRead ? timeAgo(m.lastRead) : null} category={m.categoryId} progress={(progress[m.id]?.chapterNum / (m.totalChapters || null)) * 100 || 0} />
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-});
 
 const StatsStrip = memo(({ library, history, progress, readChapters }) => {
   const totalRead = useMemo(() => Object.values(readChapters).reduce((a, v) => a + (v?.length || 0), 0), [readChapters]);
@@ -4440,6 +4291,22 @@ const App = memo(() => {
     }
   }, [activeSource, mangaDetail, fetchJSON, updateProgress, markChapterRead, toast]);
 
+  const fetchNextChapter = useCallback(async (afterChapterId) => {
+    const idx = chapRef.current.findIndex(c => c.id === afterChapterId);
+    const n = chapRef.current[idx - 1];
+    if (!n) return null;
+    const srcId = activeSource?.id;
+    if (!srcId) return null;
+    try {
+      const imgs = await fetchJSON(`/source/${srcId}/chapter/${n.id}`);
+      markChapterRead(mangaDetail?.id, n.id, true);
+      return { chapter: n, pages: Array.isArray(imgs) ? imgs : [] };
+    } catch (e) {
+      toast('Failed to load next chapter automatically', 'error');
+      return null;
+    }
+  }, [activeSource, fetchJSON, markChapterRead, mangaDetail?.id, toast]);
+
   const chIdx = chapRef.current.findIndex(c => c.id === currentChapter?.id);
   const hasNextCh = chIdx > 0;
   const hasPrevCh = chIdx >= 0 && chIdx < chapRef.current.length - 1;
@@ -4682,9 +4549,16 @@ const App = memo(() => {
     { id: 'settings', label: 'Settings', Icon: Settings },
   ], [installedExts, library.length, history.length, updates.length, downloadQueue]);
 
-  if (backendOnline === null) return (
-    <StartupScreen />
-  );
+  const [forceProceed, setForceProceed] = useState(false);
+
+  if (!forceProceed && (backendOnline === null || (!suwayomiReady && !showErrorModal))) {
+    return (
+      <StartupScreen 
+        onProceed={() => setForceProceed(true)} 
+        onRetry={() => { window.electronAPI?.restartServices?.(); checkHealth(); }} 
+      />
+    );
+  }
 
   if (view === 'reader') {
     if (pagesLoading) return (
@@ -4699,10 +4573,12 @@ const App = memo(() => {
         onBack={goBack}
         onNextChapter={() => { const n = chapRef.current[chIdx - 1]; if (n) openChapter(n); }}
         onPrevChapter={() => { const p = chapRef.current[chIdx + 1]; if (p) openChapter(p); }}
+        fetchNextChapter={fetchNextChapter}
         hasNext={hasNextCh} hasPrev={hasPrevCh}
         onPageChange={setReaderPage}
         initialPage={progress[mangaDetail?.id]?.page || 0}
         mangaId={mangaDetail?.id}
+        mangaCover={mangaDetail?.cover}
       />
     );
   }
@@ -4714,7 +4590,7 @@ const App = memo(() => {
       {showShareCard && <ShareCardModal library={library} history={history} progress={progress} readChapters={readChapters} settings={settings} onClose={() => setShowShareCard(false)} />}
       {showErrorModal && <ServiceErrorModal onRestart={() => { setShowErrorModal(false); checkHealth(); }} />}
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
-      {backendOnline && !suwayomiReady && !showErrorModal && (
+      {backendOnline && !suwayomiReady && !showErrorModal && forceProceed && (
         <div className="anim-slideDown" style={{ position: 'fixed', top: 38, left: 0, right: 0, zIndex: 800, background: 'rgba(15,15,24,0.96)', backdropFilter: 'blur(12px)', borderBottom: '1px solid rgba(249,115,22,0.25)', padding: '9px 20px', display: 'flex', alignItems: 'center', gap: 10 }}>
           <div className="anim-spin" style={{ width: 13, height: 13, border: '2px solid rgba(249,115,22,0.3)', borderTopColor: 'var(--accent)', borderRadius: '50%', flexShrink: 0 }} />
           <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 500 }}>Suwayomi is starting… browse and extensions will load shortly</span>
@@ -4800,7 +4676,7 @@ const App = memo(() => {
           </div>
         )}
 
-        <nav style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3, padding: sidebarCollapsed ? '0 8px' : '0 10px' }}>
+        <nav style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3, padding: sidebarCollapsed ? '0 8px' : '0 10px', overflowY: 'auto', overflowX: 'hidden' }}>
           {NAV.map(({ id, label, Icon, badge }, i) => {
             const active = tab === id;
             return (
@@ -4827,7 +4703,7 @@ const App = memo(() => {
         </nav>
 
         {!sidebarCollapsed && (
-          <div style={{ padding: '0 14px', marginBottom: 14 }}>
+          <div style={{ padding: '0 14px', marginBottom: 14, marginTop: 'auto', flexShrink: 0 }}>
             <div style={{ padding: '14px 14px 12px', background: 'var(--card)', borderRadius: 12, border: '1px solid var(--border)' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -4990,8 +4866,8 @@ const App = memo(() => {
                   </>
                 )}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <div style={{ width: 7, height: 7, borderRadius: '50%', background: backendOnline === true ? '#22c55e' : backendOnline === false ? '#ef4444' : '#f59e0b', boxShadow: `0 0 10px ${backendOnline === true ? '#22c55e' : backendOnline === false ? '#ef4444' : '#f59e0b'}`, animation: backendOnline === null ? 'pulse 1.5s infinite' : 'none' }} />
-                  <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 500 }}>{backendOnline === true ? 'Connected' : backendOnline === false ? 'Disconnected' : 'Checking...'}</span>
+                  <div style={{ width: 7, height: 7, borderRadius: '50%', background: (backendOnline === true && suwayomiReady) ? '#22c55e' : (backendOnline === false || !suwayomiReady) ? '#ef4444' : '#f59e0b', boxShadow: `0 0 10px ${(backendOnline === true && suwayomiReady) ? '#22c55e' : (backendOnline === false || !suwayomiReady) ? '#ef4444' : '#f59e0b'}`, animation: backendOnline === null ? 'pulse 1.5s infinite' : 'none' }} />
+                  <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 500 }}>{(backendOnline === true && suwayomiReady) ? 'Connected' : backendOnline === false ? 'Disconnected' : !suwayomiReady ? 'Suwayomi Offline' : 'Checking...'}</span>
                 </div>
               </div>
             </>

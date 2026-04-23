@@ -6,7 +6,7 @@ export const ContextMenu = memo(({ x, y, items, onClose }) => {
     document.addEventListener('click', h);
     return () => document.removeEventListener('click', h);
   }, [onClose]);
-  
+
   return (
     <div className="anim-fadeIn" style={{ position: 'fixed', left: x, top: y, background: 'rgba(22,22,31,0.98)', backdropFilter: 'blur(20px)', border: '1px solid var(--border)', borderRadius: 12, padding: 6, minWidth: 180, zIndex: 10000, boxShadow: '0 16px 48px rgba(0,0,0,0.4)' }}>
       {items.map((item, i) => (

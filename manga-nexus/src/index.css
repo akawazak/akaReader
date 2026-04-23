@@ -115,6 +115,12 @@ body, #root {
   border-radius: var(--r-md);
 }
 
+.glass-strong {
+  background: rgba(10, 12, 18, 0.85);
+  backdrop-filter: blur(40px) saturate(200%);
+  -webkit-backdrop-filter: blur(40px) saturate(200%);
+}
+
 .text-gradient {
   background: linear-gradient(135deg, var(--accent) 0%, #ff8a00 50%, #ffd000 100%);
   -webkit-background-clip: text; 
