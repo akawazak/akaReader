@@ -1,6 +1,6 @@
 {
   "name": "akareader",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "Manga reader powered by Suwayomi",
   "main": "electron-main.js",
   "author": {
@@ -57,8 +57,16 @@
         "from": "../backend",
         "to": "backend",
         "filter": [
-          "**/*",
-          "!node_modules/.cache/**"
+          "server.js",
+          "package.json",
+          "*.jar",
+          "node_modules/**/*",
+          "!node_modules/.cache/**",
+          "!node_modules/.bin/**",
+          "!node_modules/**/test/**",
+          "!node_modules/**/tests/**",
+          "!node_modules/**/*.md",
+          "!node_modules/**/*.map"
         ]
       }
     ],

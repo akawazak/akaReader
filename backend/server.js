@@ -62,6 +62,8 @@ const app = express();
 if (helmet) app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' }, contentSecurityPolicy: false }));
 if (compression) app.use(compression());
 
+// CORS: always wildcard — this server is local-only (localhost), never exposed to internet.
+// Electron renderer uses file:// or localhost origins so we must allow all origins.
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PATCH'], allowedHeaders: ['Content-Type'] }));
 app.use(express.json({ limit: '10mb' }));
 
@@ -80,7 +82,7 @@ const caches = {
   extensions: new LRUCache(100, 60000),   // 1min
   search:     new LRUCache(200, 300000),  // 5min
   manga:      new LRUCache(100, 600000),  // 10min
-  pages:      new LRUCache(50,  3600000), // 1hr
+  pages:      new LRUCache(50,  1800000), // 30min (reduced from 1hr for freshness)
 };
 
 // ── Logging ────────────────────────────────────────────────────────────────
@@ -188,7 +190,10 @@ const extAction = async (action, pkg) => {
 app.post('/api/extensions/install/:pkgName', async (req, res) => {
   try {
     const pkg = decodeURIComponent(req.params.pkgName);
-    if (!pkg || pkg.length > 200) throw new Error('Invalid package name');
+    // Validate package name: alphanumeric, dots, dashes, underscores only
+    if (!pkg || pkg.length > 200 || !/^[a-zA-Z0-9._-]+$/.test(pkg)) {
+      throw new Error('Invalid package name - only alphanumeric, dots, dashes, underscores allowed');
+    }
     await extAction('install', pkg);
     caches.sources.clear();
     caches.extensions.clear();
@@ -201,7 +206,9 @@ app.post('/api/extensions/install/:pkgName', async (req, res) => {
 app.post('/api/extensions/uninstall/:pkgName', async (req, res) => {
   try {
     const pkg = decodeURIComponent(req.params.pkgName);
-    if (!pkg || pkg.length > 200) throw new Error('Invalid package name');
+    if (!pkg || pkg.length > 200 || !/^[a-zA-Z0-9._-]+$/.test(pkg)) {
+      throw new Error('Invalid package name - only alphanumeric, dots, dashes, underscores allowed');
+    }
     await extAction('uninstall', pkg);
     caches.sources.clear();
     caches.extensions.clear();
@@ -214,7 +221,9 @@ app.post('/api/extensions/uninstall/:pkgName', async (req, res) => {
 app.post('/api/extensions/update/:pkgName', async (req, res) => {
   try {
     const pkg = decodeURIComponent(req.params.pkgName);
-    if (!pkg || pkg.length > 200) throw new Error('Invalid package name');
+    if (!pkg || pkg.length > 200 || !/^[a-zA-Z0-9._-]+$/.test(pkg)) {
+      throw new Error('Invalid package name - only alphanumeric, dots, dashes, underscores allowed');
+    }
     await extAction('update', pkg);
     caches.extensions.clear();
     res.json({ ok: true });

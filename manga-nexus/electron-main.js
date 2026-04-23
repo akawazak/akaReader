@@ -131,8 +131,9 @@ async function getLatestJarUrl() {
           try {
             const release = JSON.parse(data);
             const asset   = (release.assets || []).find(a => a.name.endsWith('.jar'));
-            if (asset) resolve({ url: asset.browser_download_url, version: release.tag_name });
-            else reject(new Error('No JAR in latest release'));
+            if (!asset) throw new Error('No JAR asset found in latest release');
+            if (!asset.name || !asset.browser_download_url) throw new Error('Invalid JAR asset structure');
+            resolve({ url: asset.browser_download_url, version: release.tag_name });
           } catch (e) { reject(e); }
         });
       }
@@ -195,7 +196,15 @@ async function ensureJar() {
         console.log('[jar] Found bundled JAR:', bundledJar);
         sendStatus('installing-bundled-suwayomi');
         fs.copyFileSync(bundledPath, jarPath);
-        console.log('[jar] Bundled JAR copied to', jarPath);
+        
+        // Validate copied JAR exists and has content
+        if (!fs.existsSync(jarPath) || fs.statSync(jarPath).size < 1000) {
+          console.error('[jar] Bundled JAR copy failed or file too small');
+          fs.unlinkSync(jarPath);
+          throw new Error('Bundled JAR copy failed');
+        }
+        
+        console.log('[jar] Bundled JAR copied to', jarPath, '- size:', fs.statSync(jarPath).size, 'bytes');
         return;
       }
     }
@@ -384,11 +393,13 @@ function killServer() {
   try { p.kill(); } catch {}
 }
 
+const SERVER_PORT = process.env.PORT || '3001';
+
 function waitForServer(retries = 30, delayMs = 300) {
   return new Promise(resolve => {
     let attempts = 0;
     const check = () => {
-      const req = http.get('http://localhost:3001/api/health', res => { resolve(res.statusCode === 200); });
+      const req = http.get(`http://localhost:${SERVER_PORT}/api/health`, res => { resolve(res.statusCode === 200); });
       req.on('error', () => {
         attempts++;
         if (attempts >= retries) return resolve(false);
