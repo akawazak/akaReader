@@ -427,6 +427,7 @@ ipcMain.handle('check-service',     ()    => isServiceRunning());
 ipcMain.handle('install-service',   async () => { await installWindowsService(); return true; });
 ipcMain.handle('uninstall-service', async () => { await uninstallWindowsService(); return true; });
 ipcMain.handle('open-data-dir',     ()    => shell.openPath(userData));
+ipcMain.handle('get-version',       ()    => app.getVersion());
 ipcMain.handle('get-java-path',     ()    => findJava());
 ipcMain.handle('get-jar-path',      ()    => jarPath);
 

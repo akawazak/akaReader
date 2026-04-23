@@ -147,12 +147,18 @@ app.get('/api/img', async (req, res) => {
 });
 
 app.get('/api/health', async (_, res) => {
+  // The server itself is healthy as long as it's responding.
+  // Suwayomi may still be starting up — callers check the `suwayomi` flag
+  // rather than treating a false suwayomi as a hard failure.
+  let suwayomi = false;
   try {
-    await gql('query { aboutServer { version } }');
-    res.json({ ok: true, timestamp: Date.now() });
-  } catch (e) {
-    res.status(503).json({ ok: false, error: e.message });
-  }
+    await Promise.race([
+      gql('query { aboutServer { version } }'),
+      new Promise((_, r) => setTimeout(() => r(new Error('timeout')), 2000))
+    ]);
+    suwayomi = true;
+  } catch { /* still starting */ }
+  res.json({ ok: true, suwayomi, timestamp: Date.now() });
 });
 
 // ── Extensions ─────────────────────────────────────────────────────────────
