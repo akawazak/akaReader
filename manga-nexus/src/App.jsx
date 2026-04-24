@@ -1620,11 +1620,12 @@ const RepoAddRow = memo(({ onAdd }) => {
 // ==================== SETTINGS PAGE ====================
 
 const SettingsPage = memo(() => {
-  const { settings, updateSetting, backendOnline, checkHealth, library, history, progress, readingTime, sources, extensions, fetchSources, fetchExtensions } = useData();
+  const { settings, updateSetting, backendOnline, checkHealth, library, history, progress, readingTime, sources, extensions, fetchSources, fetchExtensions, suwayomiReady } = useData();
   const toast = useToast();
   const [confirmClear, setConfirmClear] = useState(null);
   const [serviceStatus, setServiceStatus] = useState(null); 
   const [serviceWorking, setServiceWorking] = useState(false);
+  const [runtimeInfo, setRuntimeInfo] = useState({ javaPath: '', jarPath: '', configPath: '' });
 
   useEffect(() => {
     window.electronAPI?.getCloseToTray?.().then(val => {
@@ -1636,6 +1637,20 @@ const SettingsPage = memo(() => {
     if (window.electronAPI?.checkService) {
       window.electronAPI.checkService().then(running => setServiceStatus(running ? 'running' : 'stopped')).catch(() => setServiceStatus('stopped'));
     }
+  }, []);
+
+  useEffect(() => {
+    Promise.all([
+      Promise.resolve(window.electronAPI?.getJavaPath?.()).catch(() => ''),
+      Promise.resolve(window.electronAPI?.getJarPath?.()).catch(() => ''),
+      Promise.resolve(window.electronAPI?.getSuwayomiConfigPath?.()).catch(() => ''),
+    ]).then(([javaPath, jarPath, configPath]) => {
+      setRuntimeInfo({
+        javaPath: javaPath || '',
+        jarPath: jarPath || '',
+        configPath: configPath || '',
+      });
+    }).catch(() => {});
   }, []);
 
   const totalReadingMins = Object.values(readingTime).reduce((a, b) => a + b, 0);
@@ -1761,6 +1776,29 @@ const SettingsPage = memo(() => {
             </div>
             <Btn variant="outline" size="sm" onClick={() => { checkHealth(); fetchSources(); fetchExtensions(); toast('Refreshing...', 'info'); }}><RefreshCw size={14} /> Refresh</Btn>
           </div>
+        </Row>
+        <Row label="Suwayomi Runtime" sub="The embedded server akaReader manages in the background">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <div style={{ width: 8, height: 8, borderRadius: '50%', background: suwayomiReady ? '#22c55e' : backendOnline === true ? '#f59e0b' : '#ef4444', boxShadow: `0 0 10px ${suwayomiReady ? '#22c55e' : backendOnline === true ? '#f59e0b' : '#ef4444'}` }} />
+            <span style={{ fontSize: 13, fontWeight: 600, color: suwayomiReady ? '#4ade80' : backendOnline === true ? '#facc15' : '#f87171' }}>
+              {suwayomiReady ? 'Ready' : backendOnline === true ? 'Starting in background' : 'Unavailable'}
+            </span>
+          </div>
+        </Row>
+        <Row label="Java Runtime" sub={runtimeInfo.javaPath || 'Resolving Java runtime...'}>
+          <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'monospace', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {runtimeInfo.javaPath ? (runtimeInfo.javaPath.toLowerCase().includes('\\appdata\\roaming\\akareader\\jre\\') ? 'Managed JRE' : 'System Java') : 'Pending'}
+          </span>
+        </Row>
+        <Row label="Embedded Server" sub={runtimeInfo.jarPath || 'Resolving embedded server path...'}>
+          <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'monospace', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            Bundled Suwayomi JAR
+          </span>
+        </Row>
+        <Row label="Suwayomi Config" sub={runtimeInfo.configPath || 'Config path will appear after startup'}>
+          <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'monospace', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            Browser auto-open disabled
+          </span>
         </Row>
       </Section>
 
@@ -2692,10 +2730,14 @@ const StartupScreen = memo(({ onProceed, onRetry }) => {
   }, []);
 
   const STATUS_MAP = {
+    'using-system-java': { msg: 'Using installed Java runtime...', bar: 10 },
     'downloading-jre': { msg: 'Downloading Java runtime (first launch only)...', bar: null },
     'extracting-jre': { msg: 'Extracting Java runtime...', bar: 15 },
+    'installing-bundled-jre': { msg: 'Preparing bundled Java runtime...', bar: 15 },
     'downloading-suwayomi': { msg: 'Downloading Suwayomi server (first launch only)...', bar: null },
+    'installing-bundled-suwayomi': { msg: 'Preparing bundled Suwayomi server...', bar: 35 },
     'suwayomi-starting': { msg: 'Starting Suwayomi server...', bar: 45 },
+    'configuring-suwayomi': { msg: 'Applying background-server settings...', bar: 48 },
     'starting-suwayomi': { msg: 'Starting Suwayomi — this can take 20–30 seconds...', bar: 50 },
     'suwayomi-ready': { msg: 'Suwayomi ready!', bar: 95 },
     'online': { msg: 'Ready!', bar: 100 },
@@ -2742,6 +2784,14 @@ const StartupScreen = memo(({ onProceed, onRetry }) => {
           setStatusMsg(`${label}... ${pct}%`);
           return;
         }
+      }
+      if (status.startsWith('suwayomi-failed:')) {
+        const detail = status.slice('suwayomi-failed:'.length).trim();
+        setDownloadPct(null);
+        setStatusMsg(detail ? `Suwayomi failed: ${detail}` : 'Suwayomi failed to start. Check Java is installed.');
+        setBarW(30);
+        setHasFailed(true);
+        return;
       }
       setDownloadPct(null);
       const mapped = STATUS_MAP[status];

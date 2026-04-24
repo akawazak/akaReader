@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openDataDir: () => ipcRenderer.invoke('open-data-dir'),
   getJarPath:  () => ipcRenderer.invoke('get-jar-path'),
   getJavaPath: () => ipcRenderer.invoke('get-java-path'),
+  getSuwayomiConfigPath: () => ipcRenderer.invoke('get-suwayomi-config-path'),
 
   // App version (reads from package.json via Electron — always accurate)
   getVersion:  () => ipcRenderer.invoke('get-version'),

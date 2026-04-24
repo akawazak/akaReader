@@ -48,6 +48,7 @@ const jreDir          = path.join(userData, 'jre');
 const javaExe         = path.join(jreDir, 'bin', 'java.exe');
 const nssmExe         = path.join(userData, 'nssm.exe');
 const suwayomiPidFile = path.join(userData, 'suwayomi.pid');
+const suwayomiConfigPath = path.join(userData, 'suwayomi-data', 'server.conf');
 
 fs.mkdirSync(userExtDir, { recursive: true });
 fs.mkdirSync(path.join(userData, 'suwayomi-data'), { recursive: true });
@@ -171,8 +172,60 @@ function findJava() {
   return 'java';
 }
 
+function hasUsableJava(javaPath = findJava()) {
+  try {
+    const result = cp.spawnSync(javaPath, ['-version'], {
+      windowsHide: true,
+      timeout: 10000,
+      encoding: 'utf8',
+    });
+    return !result.error && result.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+function ensureSuwayomiConfig(dataRoot) {
+  fs.mkdirSync(dataRoot, { recursive: true });
+
+  const configPath = path.join(dataRoot, 'server.conf');
+  const managedStart = '# akaReader managed settings';
+  const managedEnd = '# /akaReader managed settings';
+  const managedBlock = [
+    managedStart,
+    'server.initialOpenInBrowserEnabled = false',
+    'server.systemTrayEnabled = false',
+    managedEnd,
+    '',
+  ].join('\n');
+
+  let existing = '';
+  try {
+    existing = fs.readFileSync(configPath, 'utf8');
+  } catch {}
+
+  const blockPattern = new RegExp(
+    `${managedStart.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${managedEnd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`,
+    'm'
+  );
+
+  const next = existing.match(blockPattern)
+    ? existing.replace(blockPattern, managedBlock)
+    : `${existing.trimEnd()}${existing.trim() ? '\n\n' : ''}${managedBlock}`;
+
+  if (next !== existing) {
+    fs.writeFileSync(configPath, next, 'utf8');
+  }
+
+  return configPath;
+}
+
 async function ensureJre() {
-  if (fs.existsSync(javaExe)) return;
+  if (hasUsableJava()) {
+    console.log('[jre] Using existing Java runtime:', findJava());
+    sendStatus('using-system-java');
+    return;
+  }
 
   // Check if we have a bundled JRE in the backend directory
   const bundledJre = path.join(backendDir, 'jre');
@@ -347,6 +400,8 @@ async function startSuwayomi() {
 
   const java     = findJava();
   const dataRoot = path.join(userData, 'suwayomi-data');
+  sendStatus('configuring-suwayomi');
+  ensureSuwayomiConfig(dataRoot);
   sendStatus('starting-suwayomi');
   console.log('[suwayomi] Launching…');
 
@@ -383,7 +438,7 @@ async function startSuwayomi() {
     return true;
   } catch (e) {
     console.error('[suwayomi] Failed:', e.message);
-    sendStatus('suwayomi-failed');
+    sendStatus('suwayomi-failed:' + e.message);
     return false;
   }
 }
@@ -412,7 +467,7 @@ function killServer() {
   try { p.kill(); } catch {}
 }
 
-const SERVER_PORT = process.env.PORT || '3001';
+const SERVER_PORT = '3001';
 
 function waitForServer(retries = 30, delayMs = 300) {
   return new Promise(resolve => {
@@ -479,6 +534,7 @@ ipcMain.handle('open-data-dir',     ()    => shell.openPath(userData));
 ipcMain.handle('get-version',       ()    => app.getVersion());
 ipcMain.handle('get-java-path',     ()    => findJava());
 ipcMain.handle('get-jar-path',      ()    => jarPath);
+ipcMain.handle('get-suwayomi-config-path', () => suwayomiConfigPath);
 
 // ── Tray ──────────────────────────────────────────────────────────────────────
 function createTray() {
