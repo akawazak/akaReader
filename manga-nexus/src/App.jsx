@@ -2723,7 +2723,14 @@ const StartupScreen = memo(({ onProceed, onRetry }) => {
   }, [phase]);
 
   useEffect(() => {
-    if (!window.electronAPI?.onServicesStatus) return;
+    // Fail-safe: if we're still here after 20 seconds, show the failure options anyway
+    const failSafe = setTimeout(() => {
+      setHasFailed(true);
+      setStatusMsg('Startup is taking longer than expected. You can retry or continue offline.');
+    }, 20000);
+
+    if (!window.electronAPI?.onServicesStatus) return () => clearTimeout(failSafe);
+    
     window.electronAPI.onServicesStatus((status) => {
       if (status.includes(':') && !status.startsWith('update-available')) {
         const [code, val] = status.split(':');
@@ -2743,12 +2750,14 @@ const StartupScreen = memo(({ onProceed, onRetry }) => {
         if (mapped.bar !== null) setBarW(mapped.bar);
         if (status.includes('failed') || status === 'crashed') {
           setHasFailed(true);
-        } else {
+        } else if (status === 'suwayomi-ready' || status === 'online') {
+          clearTimeout(failSafe);
           setHasFailed(false);
         }
       }
     });
-  }, []);
+    return () => clearTimeout(failSafe);
+  }, [phase]);
 
   return (
     <div style={{
