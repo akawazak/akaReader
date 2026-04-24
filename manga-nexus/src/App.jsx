@@ -499,7 +499,16 @@ const DataProvider = memo(({ children }) => {
       const data = await fetchJSON('/sources');
       if (!Array.isArray(data)) return;
       const map = {};
-      data.forEach(s => { map[String(s.id)] = { id: String(s.id), name: s.displayName || s.name, lang: s.lang, icon: proxyImg(s.icon || s.iconUrl || null) }; });
+      data.forEach(s => {
+        map[String(s.id)] = {
+          id: String(s.id),
+          name: s.displayName || s.name,
+          displayName: s.displayName || s.name,
+          baseName: s.name || s.displayName || 'Source',
+          lang: s.lang,
+          icon: proxyImg(s.icon || s.iconUrl || null),
+        };
+      });
       if (JSON.stringify(map) !== JSON.stringify(sourcesRef.current)) { sourcesRef.current = map; setSources(map); }
     } catch { }
   }, [fetchJSON]);
@@ -574,6 +583,36 @@ const DataProvider = memo(({ children }) => {
     setHistory(prev => prev.filter(m => m.id !== mangaId));
   }, []);
 
+  const removeMangaCompletely = useCallback((mangaId) => {
+    const key = String(mangaId);
+    setLibrary(prev => prev.filter(m => String(m.id) !== key));
+    setHistory(prev => prev.filter(m => String(m.id) !== key));
+    setProgress(prev => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    setMangaCategories(prev => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    setReadChapters(prev => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    setReadingTime(prev => {
+      if (!(key in prev)) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }, []);
+
   const updateProgress = useCallback((mangaId, chapterId, chapterNum, page) => {
     if (!mangaId) return;
     setProgress(p => ({ ...p, [mangaId]: { chapterId, chapterNum, page, lastRead: Date.now() } }));
@@ -644,16 +683,33 @@ const DataProvider = memo(({ children }) => {
     return () => { clearInterval(fastPoll); clearInterval(slowPoll); };
   }, [checkHealth, fetchSources, fetchExtensions]);
 
+  useEffect(() => {
+    if (!suwayomiReady) return;
+    const validSourceIds = new Set(Object.keys(sources));
+    if (!validSourceIds.size) return;
+
+    const brokenIds = new Set(
+      [...library, ...history]
+        .filter(item => item?.sourceId && !validSourceIds.has(String(item.sourceId)))
+        .map(item => String(item.id))
+    );
+
+    if (!brokenIds.size) return;
+
+    brokenIds.forEach(id => removeMangaCompletely(id));
+    toastRef.current?.(`Cleaned ${brokenIds.size} broken manga entr${brokenIds.size === 1 ? 'y' : 'ies'}`, 'warning');
+  }, [suwayomiReady, sources, library, history, removeMangaCompletely]);
+
   const value = useMemo(() => ({
     backendOnline, sources, extensions, library, history, progress,
     mangaCategories, installing, readingTime, settings, updates, checkingUpdates,
     readChapters, suwayomiReady, setSuwayomiReady,
     fetchJSON, checkHealth, fetchSources, fetchExtensions,
     installExt, uninstallExt, updateExt,
-    toggleLibrary, setCategory, addToHistory, removeFromHistory,
+    toggleLibrary, setCategory, addToHistory, removeFromHistory, removeMangaCompletely,
     updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates,
     inLibrary: (id) => library.some(m => m.id === id)
-  }), [backendOnline, sources, extensions, library, history, progress, mangaCategories, installing, readingTime, settings, updates, checkingUpdates, readChapters, suwayomiReady, setSuwayomiReady, fetchJSON, checkHealth, fetchSources, fetchExtensions, installExt, uninstallExt, updateExt, toggleLibrary, setCategory, addToHistory, removeFromHistory, updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates]);
+  }), [backendOnline, sources, extensions, library, history, progress, mangaCategories, installing, readingTime, settings, updates, checkingUpdates, readChapters, suwayomiReady, setSuwayomiReady, fetchJSON, checkHealth, fetchSources, fetchExtensions, installExt, uninstallExt, updateExt, toggleLibrary, setCategory, addToHistory, removeFromHistory, removeMangaCompletely, updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates]);
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 });
@@ -1626,6 +1682,14 @@ const SettingsPage = memo(() => {
   const [serviceStatus, setServiceStatus] = useState(null); 
   const [serviceWorking, setServiceWorking] = useState(false);
   const [runtimeInfo, setRuntimeInfo] = useState({ javaPath: '', jarPath: '', configPath: '' });
+  const installedExtCount = useMemo(() => {
+    const seen = new Set();
+    extensions.forEach(ext => {
+      if (!ext?.isInstalled) return;
+      seen.add(ext.pkgName || `${ext.name}:${ext.lang}`);
+    });
+    return seen.size;
+  }, [extensions]);
 
   useEffect(() => {
     window.electronAPI?.getCloseToTray?.().then(val => {
@@ -1696,7 +1760,7 @@ const SettingsPage = memo(() => {
             { label: 'Chapters Read', value: totalChapters, icon: '📖' },
             { label: 'Reading Time', value: `${Math.floor(totalReadingMins / 3600)}h ${Math.floor((totalReadingMins % 3600) / 60)}m`, icon: '⏱' },
             { label: 'Sources', value: Object.keys(sources).length, icon: '🌐' },
-            { label: 'Extensions', value: extensions.filter(e => e.isInstalled).length, icon: '🧩' },
+            { label: 'Extensions', value: installedExtCount, icon: '🧩' },
           ].map(s => (
             <div key={s.label} style={{ padding: '18px 16px', background: 'var(--card)', borderRadius: 14, border: '1px solid var(--border)', textAlign: 'center' }}>
               <div style={{ fontSize: 28, marginBottom: 8 }}>{s.icon}</div>
@@ -2337,6 +2401,20 @@ async function deleteChapterBlobs(mangaId, chapterId) {
     const tx = db.transaction('chapters', 'readwrite');
     tx.objectStore('chapters').delete(`${mangaId}__${chapterId}`);
   } catch { }
+}
+
+async function deleteAllChapterBlobsForManga(mangaId) {
+  const keys = await listDownloadedKeys();
+  const prefix = `${mangaId}__`;
+  await Promise.all(
+    keys
+      .map(String)
+      .filter(key => key.startsWith(prefix))
+      .map(key => {
+        const [, chapterId] = key.split('__');
+        return deleteChapterBlobs(mangaId, chapterId);
+      })
+  );
 }
 
 async function listDownloadedKeys() {
@@ -4033,7 +4111,7 @@ const App = memo(() => {
     readChapters, markChapterRead,
     fetchJSON, checkHealth, fetchSources, fetchExtensions,
     installExt, uninstallExt, updateExt, toggleLibrary, setCategory,
-    addToHistory, removeFromHistory, updateProgress, inLibrary,
+    addToHistory, removeFromHistory, removeMangaCompletely, updateProgress, inLibrary,
     checkForUpdates, addReadingTime, updateSetting,
     suwayomiReady, setSuwayomiReady,
   } = data;
@@ -4061,11 +4139,13 @@ const App = memo(() => {
         if (status === 'crashed' || status === 'offline') {
           setShowErrorModal(true);
         } else if (status === 'online') {
+          setForceProceed(true);
           setShowErrorModal(false);
           checkHealth().then(() => { fetchSources(); fetchExtensions(); });
         } else if (status === 'suwayomi-starting') {
           setSuwayomiReady(false);
         } else if (status === 'suwayomi-ready') {
+          setForceProceed(true);
           setSuwayomiReady(true);
           fetchSources();
           fetchExtensions();
@@ -4216,7 +4296,7 @@ const App = memo(() => {
   const [catchUpManga, setCatchUpManga] = useState(null);
   const [showShareCard, setShowShareCard] = useState(false);
   const [extSearch, setExtSearch] = useState('');
-  const [extLang, setExtLang] = useState('all');
+  const [extLang, setExtLang] = useState('en');
   const [extTab, setExtTab] = useState('all');
   const [showNsfw, setShowNsfw] = useState(true);
   const [extSort, setExtSort] = useState('name');
@@ -4307,7 +4387,13 @@ const App = memo(() => {
   const openManga = useCallback(async (manga, overrideSourceId) => {
     const sourceId = overrideSourceId || manga.sourceId || activeSource?.id;
     const source = sources[sourceId] || Object.values(sources).find(s => s.id === String(sourceId));
-    if (!source) { toast('Source not available', 'error'); return; }
+    if (!source) {
+      removeMangaCompletely(manga.id);
+      await deleteAllChapterBlobsForManga(manga.id);
+      await refreshDownloads();
+      toast('Removed broken manga entry from local data', 'warning');
+      return;
+    }
 
     setActiveSource(source); setSelectedManga(manga); setMangaDetail(null);
     setMangaError(''); setChapSearch(''); setView('manga'); setMangaLoading(true);
@@ -4318,7 +4404,7 @@ const App = memo(() => {
       setMangaDetail(d); addToHistory(manga, source.id, d);
     } catch (e) { setMangaError(e.message); toast('Failed to load manga', 'error'); }
     finally { setMangaLoading(false); }
-  }, [activeSource, sources, fetchJSON, addToHistory, toast]);
+  }, [activeSource, sources, fetchJSON, addToHistory, removeMangaCompletely, refreshDownloads, toast]);
 
   const openChapter = useCallback(async (chapter, overrideSourceId) => {
     if (chapterAbortRef.current) chapterAbortRef.current.abort();
@@ -4476,8 +4562,24 @@ const App = memo(() => {
     return chs;
   }, [mangaDetail, chapSearch, chapterSort]);
 
+  const normalizedExts = useMemo(() => {
+    const byPkg = new Map();
+    extensions.forEach(ext => {
+      const key = ext.pkgName || `${ext.name}:${ext.lang}`;
+      const current = byPkg.get(key);
+      if (!current) {
+        byPkg.set(key, ext);
+        return;
+      }
+      const currentScore = (current.isInstalled ? 1000 : 0) + (current.hasUpdate ? 100 : 0) + (current.versionCode || 0);
+      const nextScore = (ext.isInstalled ? 1000 : 0) + (ext.hasUpdate ? 100 : 0) + (ext.versionCode || 0);
+      if (nextScore > currentScore) byPkg.set(key, ext);
+    });
+    return [...byPkg.values()];
+  }, [extensions]);
+
   const filteredExts = useMemo(() => {
-    let filtered = extensions.filter(e => {
+    let filtered = normalizedExts.filter(e => {
       if (extTab === 'installed' && !e.isInstalled) return false;
       const matchLang = extLang === 'all' || (e.lang || '').toLowerCase() === extLang;
       const matchName = !extSearch || (e.name || '').toLowerCase().includes(extSearch.toLowerCase());
@@ -4491,7 +4593,7 @@ const App = memo(() => {
       default: filtered.sort((a, b) => (a.name || '').localeCompare(b.name || '')); break;
     }
     return filtered;
-  }, [extensions, extTab, extLang, extSearch, showNsfw, extSort]);
+  }, [normalizedExts, extTab, extLang, extSearch, showNsfw, extSort]);
 
   const filteredLibrary = useMemo(() => {
     let list = activeCategory === 'all' ? library : library.filter(m => mangaCategories[m.id] === activeCategory);
@@ -4515,7 +4617,38 @@ const App = memo(() => {
     return list;
   }, [library, activeCategory, mangaCategories, librarySearch, librarySort, progress]);
   const installedSources = useMemo(() => Object.values(sources), [sources]);
-  const installedExts = useMemo(() => extensions.filter(e => e.isInstalled), [extensions]);
+  const groupedInstalledSources = useMemo(() => {
+    const groups = new Map();
+    installedSources.forEach(source => {
+      const key = (source.baseName || source.name || 'source').toLowerCase();
+      const group = groups.get(key) || { baseName: source.baseName || source.name, variants: [] };
+      group.variants.push(source);
+      groups.set(key, group);
+    });
+
+    const pickPreferred = (variants) => [...variants].sort((a, b) => {
+      const score = (src) => {
+        if (src.lang === 'en') return 0;
+        if (src.lang === 'all') return 1;
+        if (src.lang === 'localsourcelang') return 99;
+        return 10;
+      };
+      return score(a) - score(b) || (a.name || '').localeCompare(b.name || '');
+    })[0];
+
+    return [...groups.values()]
+      .map(group => {
+        const preferred = pickPreferred(group.variants);
+        return {
+          ...preferred,
+          name: group.variants.length > 1 ? group.baseName : preferred.name,
+          variantCount: group.variants.length,
+          variantLangs: group.variants.map(v => v.lang).filter(Boolean),
+        };
+      })
+      .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  }, [installedSources]);
+  const installedExts = useMemo(() => normalizedExts.filter(e => e.isInstalled), [normalizedExts]);
 
   const goBack = useCallback(() => {
     if (view === 'reader') setView('manga');
@@ -4609,6 +4742,12 @@ const App = memo(() => {
   ], [installedExts, library.length, history.length, updates.length, downloadQueue]);
 
   const [forceProceed, setForceProceed] = useState(false);
+
+  useEffect(() => {
+    if (backendOnline !== null || showErrorModal || forceProceed) return;
+    const timer = setTimeout(() => setForceProceed(true), 650);
+    return () => clearTimeout(timer);
+  }, [backendOnline, showErrorModal, forceProceed]);
 
   if (!forceProceed && backendOnline === null && !showErrorModal) {
     return (
@@ -4893,8 +5032,8 @@ const App = memo(() => {
                 </h1>
                 <p style={{ color: 'var(--muted)', fontSize: 12 }}>
                   {tab === 'browse' && view === 'source' ? `${results.length} results${activeFilterCount > 0 ? ` • ${activeFilterCount} filter${activeFilterCount > 1 ? 's' : ''} active` : ''}` :
-                    tab === 'home' ? '' : tab === 'browse' ? `${installedSources.length} sources available` :
-                      tab === 'extensions' ? `${installedExts.length} installed • ${extensions.length} total` :
+                    tab === 'home' ? '' : tab === 'browse' ? `${groupedInstalledSources.length} source group${groupedInstalledSources.length === 1 ? '' : 's'} available` :
+                      tab === 'extensions' ? `${installedExts.length} installed • ${normalizedExts.length} total` :
                         tab === 'library' ? `${filteredLibrary.length} manga` :
                           tab === 'history' ? `${history.length} entries` :
                             tab === 'updates' ? `${updates.length} updates` :
@@ -5155,11 +5294,11 @@ const App = memo(() => {
             {tab === 'browse' && (
               <div className="page-transition">
                 {view === 'tabs' ? (
-                  installedSources.length === 0 ? (
+                  groupedInstalledSources.length === 0 ? (
                     <EmptyState icon={Globe} title="No sources installed" sub="Install extensions to start browsing" action={<Btn onClick={() => switchTab('extensions')}>Browse Extensions <ArrowRight size={16} /></Btn>} />
                   ) : (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(170px,1fr))', gap: 18 }}>
-                      {installedSources.map((src, i) => (
+                      {groupedInstalledSources.map((src, i) => (
                         <button key={src.id} className={`card-hover anim-fadeInUp delay-${Math.min(i, 10)}`} onClick={() => enterSource(src)} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '24px 16px', background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 20, cursor: 'pointer', gap: 14, textAlign: 'center', position: 'relative', overflow: 'hidden' }}
                           onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border-hover)'; }}
                           onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; }}>
@@ -5168,7 +5307,9 @@ const App = memo(() => {
                           </div>
                           <div>
                             <p style={{ fontFamily: "'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight: 700, fontSize: 15, color: 'var(--text)', marginBottom: 6 }}>{src.name}</p>
-                            {src.lang && <Badge variant="outline" size="sm">{src.lang}</Badge>}
+                            {src.variantCount > 1
+                              ? <Badge variant="outline" size="sm">{`${src.variantCount} langs • ${src.lang}`}</Badge>
+                              : src.lang && <Badge variant="outline" size="sm">{src.lang}</Badge>}
                           </div>
                         </button>
                       ))}
