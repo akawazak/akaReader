@@ -116,7 +116,52 @@ const fmtNum = n => {
   return isNaN(f) ? null : String(f % 1 === 0 ? f : parseFloat(f.toFixed(1)));
 };
 
+const fmtDate = value => {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString();
+};
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+const syncExtensions = async () => {
+  await gql('mutation { fetchExtensions(input: {}) { clientMutationId } }', {}, 0);
+};
+
+const queryExtensions = async () => {
+  const data = await gql(`
+    query {
+      extensions {
+        nodes {
+          pkgName
+          apkName
+          name
+          lang
+          isInstalled
+          isNsfw
+          hasUpdate
+          iconUrl
+          versionName
+          versionCode
+        }
+      }
+    }
+  `);
+  return data.extensions?.nodes || [];
+};
+
+const mapRestExtension = (ext) => ({
+  pkgName: ext.pkgName,
+  apkName: ext.apkName,
+  name: ext.name,
+  lang: ext.lang,
+  isInstalled: !!ext.installed,
+  isNsfw: !!ext.isNsfw,
+  hasUpdate: !!ext.hasUpdate,
+  iconUrl: ext.iconUrl,
+  versionName: ext.versionName,
+  versionCode: ext.versionCode,
+});
 
 // ── Health ─────────────────────────────────────────────────────────────────
 // ── Image Proxy ────────────────────────────────────────────────────────────
@@ -168,10 +213,18 @@ app.get('/api/extensions', async (_, res) => {
   try {
     const cached = caches.extensions.get('all');
     if (cached) return res.json(cached);
-    const data = await gql(`
-      query { extensions { nodes { pkgName name lang isInstalled isNsfw hasUpdate iconUrl versionName versionCode } } }
-    `);
-    const result = data.extensions?.nodes || [];
+
+    let result = await queryExtensions();
+    if (!result.length) {
+      await syncExtensions();
+      result = await queryExtensions();
+    }
+
+    if (!result.length) {
+      const fallback = await http.get(`${SUWAYOMI}/api/v1/extension/list`, { timeout: 120000 });
+      result = Array.isArray(fallback.data) ? fallback.data.map(mapRestExtension) : [];
+    }
+
     caches.extensions.set('all', result);
     res.json(result);
   } catch (e) {
@@ -180,11 +233,39 @@ app.get('/api/extensions', async (_, res) => {
 });
 
 const extAction = async (action, pkg) => {
-  const url = `${SUWAYOMI}/api/v1/extension/${action}/${encodeURIComponent(pkg)}`;
+  const patchField = ({
+    install: 'install',
+    uninstall: 'uninstall',
+    update: 'update',
+  })[action];
+
+  if (!patchField) throw new Error(`Unsupported extension action: ${action}`);
+
   console.log(`[ext:${action}] ${pkg}`);
-  const r = await http.get(url, { timeout: 120000 });
-  if (r.status >= 400) throw new Error(`Suwayomi HTTP ${r.status}`);
-  return r.data;
+
+  const mutate = () => gql(`
+    mutation UpdateExtension($id: String!) {
+      updateExtension(input: { id: $id, patch: { ${patchField}: true } }) {
+        extension {
+          pkgName
+          isInstalled
+          hasUpdate
+        }
+      }
+    }
+  `, { id: pkg }, 0);
+
+  let data = await mutate();
+  if (!data.updateExtension?.extension && action === 'install') {
+    await syncExtensions();
+    data = await mutate();
+  }
+
+  if (!data.updateExtension?.extension) {
+    throw new Error(`Suwayomi could not ${action} extension ${pkg}`);
+  }
+
+  return data.updateExtension.extension;
 };
 
 app.post('/api/extensions/install/:pkgName', async (req, res) => {
@@ -291,20 +372,23 @@ app.get('/api/source/:sourceId/manga/:mangaId', async (req, res) => {
     const cached = caches.manga.get(cacheKey);
     if (cached) return res.json(cached);
 
-    // Fetch manga info
+    // Fetch the remote manga payload first so detail pages don't get stuck
+    // showing sparse cached metadata from Suwayomi's local DB.
     let manga;
     try {
+      const d = await gql(
+        `mutation($id:Int!){ fetchManga(input:{id:$id}){ manga{ id title thumbnailUrl author description status genre } } }`,
+        { id: mangaId }
+      );
+      manga = d.fetchManga?.manga;
+    } catch {}
+
+    if (!manga) {
       const d = await gql(
         `query($id:Int!){ manga(id:$id){ id title thumbnailUrl author description status genre } }`,
         { id: mangaId }
       );
       manga = d.manga;
-    } catch {
-      const d = await gql(
-        `mutation($id:Int!){ fetchManga(input:{id:$id}){ manga{ id title thumbnailUrl author description status genre } } }`,
-        { id: mangaId }
-      );
-      manga = d.fetchManga.manga;
     }
 
     // Fetch chapters
@@ -334,7 +418,7 @@ app.get('/api/source/:sourceId/manga/:mangaId', async (req, res) => {
         id:     String(ch.id),
         number: fmtNum(ch.chapterNumber) ?? ch.name?.match(/[\d.]+/)?.[0] ?? '?',
         title:  ch.name || '',
-        date:   ch.uploadDate ? new Date(ch.uploadDate).toLocaleDateString() : '',
+        date:   fmtDate(ch.uploadDate),
         group:  ch.scanlator || '',
         read:   ch.isRead || false,
       }))

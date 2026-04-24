@@ -4610,7 +4610,7 @@ const App = memo(() => {
 
   const [forceProceed, setForceProceed] = useState(false);
 
-  if (!forceProceed && (backendOnline === null || (!suwayomiReady && !showErrorModal))) {
+  if (!forceProceed && backendOnline === null && !showErrorModal) {
     return (
       <StartupScreen 
         onProceed={() => setForceProceed(true)} 
@@ -4925,8 +4925,8 @@ const App = memo(() => {
                   </>
                 )}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <div style={{ width: 7, height: 7, borderRadius: '50%', background: (backendOnline === true && suwayomiReady) ? '#22c55e' : (backendOnline === false || !suwayomiReady) ? '#ef4444' : '#f59e0b', boxShadow: `0 0 10px ${(backendOnline === true && suwayomiReady) ? '#22c55e' : (backendOnline === false || !suwayomiReady) ? '#ef4444' : '#f59e0b'}`, animation: backendOnline === null ? 'pulse 1.5s infinite' : 'none' }} />
-                  <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 500 }}>{(backendOnline === true && suwayomiReady) ? 'Connected' : backendOnline === false ? 'Disconnected' : !suwayomiReady ? 'Suwayomi Offline' : 'Checking...'}</span>
+                  <div style={{ width: 7, height: 7, borderRadius: '50%', background: (backendOnline === true && suwayomiReady) ? '#22c55e' : backendOnline === false ? '#ef4444' : backendOnline === true ? '#f59e0b' : '#f59e0b', boxShadow: `0 0 10px ${(backendOnline === true && suwayomiReady) ? '#22c55e' : backendOnline === false ? '#ef4444' : '#f59e0b'}`, animation: backendOnline === null ? 'pulse 1.5s infinite' : 'none' }} />
+                  <span style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 500 }}>{(backendOnline === true && suwayomiReady) ? 'Connected' : backendOnline === false ? 'Disconnected' : backendOnline === true ? 'Suwayomi Starting' : 'Checking...'}</span>
                 </div>
               </div>
             </>

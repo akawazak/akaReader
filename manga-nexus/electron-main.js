@@ -49,6 +49,9 @@ const javaExe         = path.join(jreDir, 'bin', 'java.exe');
 const nssmExe         = path.join(userData, 'nssm.exe');
 const suwayomiPidFile = path.join(userData, 'suwayomi.pid');
 const suwayomiConfigPath = path.join(userData, 'suwayomi-data', 'server.conf');
+const defaultExtensionRepos = [
+  'https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.min.json',
+];
 
 fs.mkdirSync(userExtDir, { recursive: true });
 fs.mkdirSync(path.join(userData, 'suwayomi-data'), { recursive: true });
@@ -195,6 +198,7 @@ function ensureSuwayomiConfig(dataRoot) {
     managedStart,
     'server.initialOpenInBrowserEnabled = false',
     'server.systemTrayEnabled = false',
+    `server.extensionRepos = ${JSON.stringify(defaultExtensionRepos)}`,
     managedEnd,
     '',
   ].join('\n');
@@ -321,9 +325,10 @@ async function installWindowsService() {
   await ensureNssm();
   const java     = findJava();
   const dataRoot = path.join(userData, 'suwayomi-data');
+  ensureSuwayomiConfig(dataRoot);
   const cmds = [
     `"${nssmExe}" install AkaReaderSuwayomi "${java}"`,
-    `"${nssmExe}" set AkaReaderSuwayomi AppParameters "-jar \\"${jarPath}\\" --server.port=4567 --dataRoot=\\"${dataRoot}\\""`,
+    `"${nssmExe}" set AkaReaderSuwayomi AppParameters "-Dsuwayomi.tachidesk.config.server.rootDir=\\"${dataRoot}\\" -jar \\"${jarPath}\\" --server.port=4567"`,
     `"${nssmExe}" set AkaReaderSuwayomi AppDirectory "${userData}"`,
     `"${nssmExe}" set AkaReaderSuwayomi Start SERVICE_AUTO_START`,
     `"${nssmExe}" set AkaReaderSuwayomi AppStdout "${path.join(userData, 'suwayomi.log')}"`,
@@ -377,11 +382,26 @@ function waitForSuwayomi(timeoutMs = 90000) {
     const start   = Date.now();
     const attempt = () => {
       if (Date.now() - start > timeoutMs) return reject(new Error('Suwayomi timeout'));
-      http.get('http://localhost:4567/api/v1/settings', res => {
-        res.resume();
-        if (res.statusCode < 500) return resolve(true);
-        setTimeout(attempt, 1500);
-      }).on('error', () => setTimeout(attempt, 1500));
+      const req = http.request('http://localhost:4567/api/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      }, res => {
+        let body = '';
+        res.on('data', chunk => { body += chunk; });
+        res.on('end', () => {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            try {
+              const parsed = JSON.parse(body);
+              if (parsed?.data?.aboutServer?.version) return resolve(true);
+            } catch {}
+          }
+          setTimeout(attempt, 1500);
+        });
+      });
+      req.on('error', () => setTimeout(attempt, 1500));
+      req.setTimeout(3000, () => req.destroy());
+      req.write(JSON.stringify({ query: 'query { aboutServer { version } }' }));
+      req.end();
     };
     attempt();
   });
@@ -406,9 +426,9 @@ async function startSuwayomi() {
   console.log('[suwayomi] Launching…');
 
   suwayomiProc = cp.spawn(java, [
+    `-Dsuwayomi.tachidesk.config.server.rootDir=${dataRoot}`,
     '-Xmx512m', '-jar', jarPath,
     '--server.port=4567',
-    `--dataRoot=${dataRoot}`,
   ], {
     cwd: userData, stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true, detached: false,
