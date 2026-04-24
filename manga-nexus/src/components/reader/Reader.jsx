@@ -9,6 +9,32 @@ import { Btn } from '../ui/Btn';
 const Droplet = ({ size }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"></path></svg>;
 const Contrast = ({ size }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 18a6 6 0 0 0 0-12v12z"></path></svg>;
 
+// ─── Color Utility ────────────────────────────────────────────────────────────
+const getAdaptiveColor = (url) => {
+  return new Promise((resolve) => {
+    if (!url) return resolve('rgb(249, 115, 22)');
+    const img = new Image();
+    img.crossOrigin = 'Anonymous';
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 1; canvas.height = 1;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, 1, 1);
+      const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+      // Ensure vibrancy: if the color is too dark, boost it
+      const hsp = Math.sqrt(0.299 * (r * r) + 0.587 * (g * g) + 0.114 * (b * b));
+      if (hsp < 40) {
+        // Too dark, return a lightened version or the theme default
+        resolve(`rgb(${Math.min(255, r + 60)}, ${Math.min(255, g + 60)}, ${Math.min(255, b + 60)})`);
+      } else {
+        resolve(`rgb(${r}, ${g}, ${b})`);
+      }
+    };
+    img.onerror = () => resolve('rgb(249, 115, 22)');
+    img.src = proxyImg(url);
+  });
+};
+
 // ─── Reading Receipt ───────────────────────────────────────────────────────────
 const ReadingReceipt = memo(({ chapter, pagesRead, timeSeconds, mangaTitle, hasNext, onNext, onBack }) => (
   <div style={{ position: 'fixed', inset: 0, zIndex: 400, background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(30px) saturate(1.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -127,16 +153,21 @@ const Toggle = ({ val, onChange, label, sub, kbd }) => (
 );
 
 /** Section divider with title */
-const Section = ({ title, children, last = false }) => (
-  <div style={{ marginBottom: last ? 0 : 28 }}>
-    <p style={{ fontSize: 10, letterSpacing: '.12em', textTransform: 'uppercase', color: 'rgba(255,255,255,0.28)', marginBottom: 14, fontWeight: 800 }}>{title}</p>
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+
+// ─── Ref helper: always access latest value without re-subscribing ───────────
+const Section = ({ title, children, last }) => (
+  <div style={{ marginBottom: last ? 0 : 32, borderBottom: last ? 'none' : '1px solid rgba(255,255,255,0.05)', paddingBottom: last ? 0 : 28 }}>
+    <h4 style={{ fontSize: 11, fontWeight: 900, color: 'rgba(255,255,255,0.3)', textTransform: 'uppercase', letterSpacing: 1.5, marginBottom: 18, display: 'flex', alignItems: 'center', gap: 10 }}>
+      {title}
+      <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.03)' }} />
+    </h4>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       {children}
     </div>
   </div>
 );
 
-// ─── Ref helper: always access latest value without re-subscribing ───────────
 function useLatest(value) {
   const ref = useRef(value);
   useEffect(() => { ref.current = value; }, [value]);
@@ -144,7 +175,17 @@ function useLatest(value) {
 }
 
 // ─── Main Reader ───────────────────────────────────────────────────────────────
-export const Reader = memo(({ pages: initialPages, currentChapter: initialChapter, mangaTitle, onBack, onNextChapter, onPrevChapter, fetchNextChapter, hasNext, hasPrev, onPageChange, initialPage = 0, mangaId }) => {
+export const Reader = memo(({
+  pages: initialPages, currentChapter: initialChapter, mangaTitle,
+  onBack, onNextChapter, onPrevChapter, fetchNextChapter,
+  hasNext, hasPrev, onPageChange, initialPage = 0, mangaId,
+  mangaCover
+}) => {
+  const [adaptiveColor, setAdaptiveColor] = useState('rgb(249, 115, 22)');
+
+  useEffect(() => {
+    getAdaptiveColor(mangaCover).then(setAdaptiveColor);
+  }, [mangaCover]);
   const data = useData();
   const { updateProgress, addReadingTime, settings, updateSetting } = data || {};
 
@@ -498,11 +539,32 @@ export const Reader = memo(({ pages: initialPages, currentChapter: initialChapte
 
   return (
     <div
-      style={{ position: 'fixed', inset: 0, background: T.bg, overflow: 'hidden', '--r-accent': accent }}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 100,
+        background: T.bg, color: T.text,
+        fontFamily: 'var(--font-body)', overflow: 'hidden',
+        '--r-accent': accent,
+        '--r-aura': adaptiveColor,
+      }}
       onMouseMove={nudgeUI}
     >
+      {/* ── Adaptive Aura Background ── */}
+      <div style={{
+        position: 'absolute', top: '-10%', left: '-10%', width: '120%', height: '120%',
+        background: `radial-gradient(circle at 50% 50%, ${adaptiveColor}18 0%, transparent 65%)`,
+        filter: 'blur(100px)', pointerEvents: 'none', zIndex: 0,
+        animation: 'aura-float 20s ease-in-out infinite alternate',
+        opacity: theme === 'dark' || theme === 'abyss' ? 0.6 : 0.2
+      }} />
+      <style>{`
+        @keyframes aura-float {
+          0% { transform: translate(0,0) scale(1); }
+          50% { transform: translate(2%, 3%) scale(1.1); }
+          100% { transform: translate(-2%, -1%) scale(0.95); }
+        }
+      `}</style>
       {/* ── Progress Aura ── */}
-      <div style={{ position: 'fixed', top: 0, left: 0, right: 0, height: 120, background: `radial-gradient(ellipse at top, ${accent}12 0%, transparent 70%)`, pointerEvents: 'none', zIndex: 1, opacity: uiVisible ? 1 : 0, transition: 'opacity 0.4s' }} />
+      <div style={{ position: 'fixed', top: 0, left: 0, right: 0, height: 120, background: `radial-gradient(ellipse at top, ${adaptiveColor}12 0%, transparent 70%)`, pointerEvents: 'none', zIndex: 1, opacity: uiVisible ? 1 : 0, transition: 'opacity 0.4s' }} />
 
       {/* Reading Receipt */}
       {showReceipt && (
@@ -534,7 +596,7 @@ export const Reader = memo(({ pages: initialPages, currentChapter: initialChapte
 
         <div style={{ flex: 1, minWidth: 0, textAlign: 'center' }}>
           <p style={{ fontWeight: 800, fontSize: 13, color: 'rgba(255,255,255,0.95)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', letterSpacing: -0.2, margin: 0 }}>{mangaTitle}</p>
-          <p style={{ fontSize: 11, color: accent, fontWeight: 700, marginTop: 1, opacity: 0.9, margin: 0 }}>
+          <p style={{ fontSize: 11, color: adaptiveColor, fontWeight: 700, marginTop: 1, opacity: 0.9, margin: 0 }}>
             Chapter {allPages[page]?.chapter.number} <span style={{ color: 'rgba(255,255,255,0.15)', margin: '0 4px' }}>|</span> Page {(allPages[page]?.localIndex || 0) + 1} of {allPages[page]?.total || 0}
           </p>
         </div>
@@ -573,6 +635,25 @@ export const Reader = memo(({ pages: initialPages, currentChapter: initialChapte
           </span>
 
           <div style={{ flex: 1, position: 'relative', height: 24, display: 'flex', alignItems: 'center' }}>
+            {/* Floating indicator */}
+            <div style={{
+              position: 'absolute',
+              left: `${((page - chapterRange.start) / (chapterRange.end - chapterRange.start || 1)) * 100}%`,
+              bottom: '100%',
+              transform: 'translateX(-50%) translateY(-8px)',
+              background: adaptiveColor,
+              color: '#fff',
+              padding: '2px 8px',
+              borderRadius: 6,
+              fontSize: 10,
+              fontWeight: 900,
+              pointerEvents: 'none',
+              opacity: uiVisible ? 1 : 0,
+              transition: 'opacity 0.2s, left 0.1s ease-out',
+              boxShadow: `0 4px 12px ${adaptiveColor}40`
+            }}>
+              {(allPages[page]?.localIndex || 0) + 1}
+            </div>
             <input type="range"
               min={chapterRange.start}
               max={chapterRange.end}
@@ -580,7 +661,7 @@ export const Reader = memo(({ pages: initialPages, currentChapter: initialChapte
               onInput={e => jumpToPage(+e.target.value, false)}
               style={{
                 width: '100%',
-                accentColor: accent,
+                accentColor: adaptiveColor,
                 height: 4,
                 cursor: 'pointer',
                 background: 'rgba(255,255,255,0.1)',
@@ -614,24 +695,19 @@ export const Reader = memo(({ pages: initialPages, currentChapter: initialChapte
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <button onClick={() => setAutoScroll(a => !a)} style={{
               width: 40, height: 40, borderRadius: 14, border: 'none',
-              background: autoScroll ? `${accent}20` : 'rgba(255,255,255,0.06)',
-              color: autoScroll ? accent : 'rgba(255,255,255,0.6)',
+              background: autoScroll ? `${adaptiveColor}20` : 'rgba(255,255,255,0.06)',
+              color: autoScroll ? adaptiveColor : 'rgba(255,255,255,0.6)',
               cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
               transition: 'all 0.2s',
-              boxShadow: autoScroll ? `0 0 15px ${accent}30` : 'none'
+              boxShadow: autoScroll ? `0 0 15px ${adaptiveColor}30` : 'none'
             }}>
               {autoScroll ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
             </button>
 
             <div style={{ width: 1, height: 24, background: 'rgba(255,255,255,0.1)', margin: '0 4px' }} />
 
-            <button onClick={() => setPanelOpen(true)} style={{
-              height: 40, padding: '0 16px', borderRadius: 14, border: 'none',
-              background: 'rgba(255,255,255,0.06)', color: '#fff',
-              cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8,
-              fontSize: 12, fontWeight: 700, transition: 'all 0.2s'
-            }}>
-              <Settings2 size={16} /> Settings
+            <button onClick={() => setPanelOpen(true)} style={{ width: 34, height: 34, borderRadius: 12, border: 'none', background: 'rgba(255,255,255,0.05)', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <Settings2 size={16} />
             </button>
           </div>
         </div>
@@ -639,67 +715,67 @@ export const Reader = memo(({ pages: initialPages, currentChapter: initialChapte
 
       {/* ── Settings Drawer ── */}
       {panelOpen && (
-        <div
-          onClick={() => setPanelOpen(false)}
-          style={{ position: 'fixed', inset: 0, zIndex: 400, background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(8px)', transition: 'all 0.3s' }}
-        />
-      )}
-      <div style={{
-        position: 'fixed', top: 0, right: 0, bottom: 0, width: 340, zIndex: 500,
-        background: 'rgba(10,11,18,0.98)', backdropFilter: 'blur(40px)',
-        borderLeft: '1px solid rgba(255,255,255,0.08)',
-        transform: panelOpen ? 'translateX(0)' : 'translateX(100%)',
-        transition: 'transform 0.45s cubic-bezier(0.16, 1, 0.3, 1)',
-        display: 'flex', flexDirection: 'column', boxShadow: '-20px 0 60px rgba(0,0,0,0.6)'
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '20px 24px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
-          <div>
-            <h3 style={{ fontSize: 16, fontWeight: 800, color: '#fff', margin: 0 }}>Reader Settings</h3>
-            <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', margin: '4px 0 0' }}>Configure your reading experience</p>
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 1000,
+          background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(8px)',
+          animation: 'fadeIn 0.3s ease'
+        }} onClick={() => setPanelOpen(false)}>
+          <div style={{
+            position: 'absolute', right: 0, top: 0, bottom: 0,
+            width: '100%', maxWidth: 360,
+            background: 'rgba(15,16,24,0.92)', backdropFilter: 'blur(40px) saturate(2)',
+            borderLeft: '1px solid rgba(255,255,255,0.08)',
+            padding: '32px 24px', display: 'flex', flexDirection: 'column',
+            overflowY: 'auto', animation: 'slideInRight 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
+            boxShadow: '-20px 0 60px rgba(0,0,0,0.5)'
+          }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 32 }}>
+              <h3 style={{ fontSize: 20, fontWeight: 800, color: '#fff', margin: 0, letterSpacing: -0.5 }}>Reader Settings</h3>
+              <button onClick={() => setPanelOpen(false)} style={{ width: 32, height: 32, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.4)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <X size={16} />
+              </button>
+            </div>
+
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 32, scrollbarWidth: 'none' }}>
+              <Section title="Reading Mode">
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+                  <ModeCard active={mode === 'scroll'} accent={accent} onClick={() => setMode('scroll')} icon="↕️" label="Scroll" />
+                  <ModeCard active={mode === 'paged'} accent={accent} onClick={() => setMode('paged')} icon="📖" label="Paged" />
+                  <ModeCard active={mode === 'webtoon'} accent={accent} onClick={() => setMode('webtoon')} icon="📜" label="Strip" />
+                </div>
+              </Section>
+
+              {mode === 'paged' && (
+                <Section title="Paged Layout">
+                  <Toggle val={doublePage} onChange={setDoublePage} label="Double Page Spread" sub="Show two pages side-by-side" />
+                  <div style={{ marginTop: 12 }}>
+                    <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginBottom: 8, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1 }}>Direction</p>
+                    <SegControl val={direction} onChange={setDirection} opts={[['rtl', 'Right-to-Left'], ['ltr', 'Left-to-Right']]} />
+                  </div>
+                </Section>
+              )}
+
+              <Section title="Image & Display">
+                <SliderRow icon={Sun} label="Brightness" min={40} max={160} val={brightness} onChange={setBrightness} fmt={v => `${v}%`} />
+                <SliderRow icon={Contrast} label="Contrast" min={60} max={160} val={contrast} onChange={setContrast} fmt={v => `${v}%`} />
+                <SliderRow icon={Droplet} label="Saturation" min={0} max={200} val={saturation} onChange={setSaturation} fmt={v => `${v}%`} />
+                <SliderRow icon={ZoomIn} label="Zoom" min={0.5} max={3} step={0.1} val={zoom} onChange={setZoom} fmt={v => `${v}x`} />
+                <SliderRow icon={AlignJustify} label="Page Gap" min={0} max={100} val={pageGap} onChange={setPageGap} fmt={v => `${v}px`} />
+              </Section>
+
+              <Section title="Reader Theme" last>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10 }}>
+                  {Object.entries(THEMES).map(([key, t]) => (
+                    <button key={key} onClick={() => setTheme(key)} style={{ aspectRatio: 1, borderRadius: 12, background: t.bg, border: `2px solid ${theme === key ? accent : 'rgba(255,255,255,0.08)'}`, cursor: 'pointer', transition: 'all 0.2s', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <div style={{ width: 12, height: 12, borderRadius: '50%', background: t.accent, boxShadow: theme === key ? `0 0 10px ${t.accent}80` : 'none' }} />
+                    </button>
+                  ))}
+                </div>
+              </Section>
+            </div>
           </div>
-          <button onClick={() => setPanelOpen(false)} style={{ width: 32, height: 32, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.07)', color: 'rgba(255,255,255,0.5)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <X size={18} />
-          </button>
         </div>
-
-        <div style={{ flex: 1, overflowY: 'auto', padding: 24, display: 'flex', flexDirection: 'column', gap: 32, scrollbarWidth: 'none' }}>
-          <Section title="Reading Mode">
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-              <ModeCard active={mode === 'scroll'} accent={accent} onClick={() => setMode('scroll')} icon="↕️" label="Scroll" />
-              <ModeCard active={mode === 'paged'} accent={accent} onClick={() => setMode('paged')} icon="📖" label="Paged" />
-              <ModeCard active={mode === 'webtoon'} accent={accent} onClick={() => setMode('webtoon')} icon="📜" label="Strip" />
-            </div>
-          </Section>
-
-          {mode === 'paged' && (
-            <Section title="Paged Layout">
-              <Toggle val={doublePage} onChange={setDoublePage} label="Double Page Spread" sub="Show two pages side-by-side" />
-              <div style={{ marginTop: 12 }}>
-                <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', marginBottom: 8, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 1 }}>Direction</p>
-                <SegControl val={direction} onChange={setDirection} opts={[['rtl', 'Right-to-Left'], ['ltr', 'Left-to-Right']]} />
-              </div>
-            </Section>
-          )}
-
-          <Section title="Image & Display">
-            <SliderRow icon={Sun} label="Brightness" min={40} max={160} val={brightness} onChange={setBrightness} fmt={v => `${v}%`} />
-            <SliderRow icon={Contrast} label="Contrast" min={60} max={160} val={contrast} onChange={setContrast} fmt={v => `${v}%`} />
-            <SliderRow icon={Droplet} label="Saturation" min={0} max={200} val={saturation} onChange={setSaturation} fmt={v => `${v}%`} />
-            <SliderRow icon={ZoomIn} label="Zoom" min={0.5} max={3} step={0.1} val={zoom} onChange={setZoom} fmt={v => `${v}x`} />
-            <SliderRow icon={AlignJustify} label="Page Gap" min={0} max={100} val={pageGap} onChange={setPageGap} fmt={v => `${v}px`} />
-          </Section>
-
-          <Section title="Reader Theme" last>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10 }}>
-              {Object.entries(THEMES).map(([key, t]) => (
-                <button key={key} onClick={() => setTheme(key)} style={{ aspectRatio: 1, borderRadius: 12, background: t.bg, border: `2px solid ${theme === key ? accent : 'rgba(255,255,255,0.08)'}`, cursor: 'pointer', transition: 'all 0.2s', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                  <div style={{ width: 12, height: 12, borderRadius: '50%', background: t.accent, boxShadow: theme === key ? `0 0 10px ${t.accent}80` : 'none' }} />
-                </button>
-              ))}
-            </div>
-          </Section>
-        </div>
-      </div>
+      )}
 
       {/* ── Viewport ── */}
       {mode === 'paged' ? (
@@ -739,7 +815,7 @@ export const Reader = memo(({ pages: initialPages, currentChapter: initialChapte
                   margin: '140px 0 100px',
                   padding: '80px 20px',
                   textAlign: 'center',
-                  background: 'linear-gradient(to bottom, transparent, rgba(255,255,255,0.03) 50%, transparent)',
+                  background: `linear-gradient(to bottom, transparent, ${adaptiveColor}15 50%, transparent)`,
                   borderTop: '1px solid rgba(255,255,255,0.04)',
                   borderBottom: '1px solid rgba(255,255,255,0.04)',
                   display: 'flex',
@@ -750,20 +826,21 @@ export const Reader = memo(({ pages: initialPages, currentChapter: initialChapte
                   <div style={{
                     padding: '4px 12px',
                     borderRadius: 6,
-                    background: `${accent}15`,
-                    color: accent,
+                    background: `${adaptiveColor}25`,
+                    color: adaptiveColor,
                     fontSize: 10,
                     fontWeight: 900,
                     letterSpacing: 2,
                     textTransform: 'uppercase',
-                    border: `1px solid ${accent}30`
+                    border: `1px solid ${adaptiveColor}40`,
+                    boxShadow: `0 0 20px ${adaptiveColor}30`
                   }}>
                     End of Chapter
                   </div>
                   <h3 style={{ fontSize: 32, fontWeight: 900, color: '#fff', margin: 0, letterSpacing: -1, opacity: 0.95 }}>
                     Chapter {p.chapter.number}
                   </h3>
-                  <div style={{ width: 40, height: 2, background: accent, borderRadius: 1, opacity: 0.5 }} />
+                  <div style={{ width: 40, height: 2, background: adaptiveColor, borderRadius: 1, opacity: 0.5 }} />
                 </div>
               )}
               <div data-page={i} style={{ display: 'flex', justifyContent: 'center', width: '100%', marginBottom: pageGap }}>

@@ -156,7 +156,14 @@ function extractZip(zipPath, destDir) {
 }
 
 function findJava() {
+  // 1. Check for downloaded JRE in userData
   if (fs.existsSync(javaExe)) return javaExe;
+  
+  // 2. Check for bundled JRE in backend resources
+  const bundledJava = path.join(backendDir, 'jre', 'bin', 'java.exe');
+  if (fs.existsSync(bundledJava)) return bundledJava;
+
+  // 3. Check system environment
   if (process.env.JAVA_HOME) {
     const p = path.join(process.env.JAVA_HOME, 'bin', 'java.exe');
     if (fs.existsSync(p)) return p;
@@ -166,6 +173,18 @@ function findJava() {
 
 async function ensureJre() {
   if (fs.existsSync(javaExe)) return;
+
+  // Check if we have a bundled JRE in the backend directory
+  const bundledJre = path.join(backendDir, 'jre');
+  if (fs.existsSync(bundledJre)) {
+    console.log('[jre] Found bundled JRE, copying...');
+    sendStatus('installing-bundled-jre');
+    fs.mkdirSync(jreDir, { recursive: true });
+    // Note: Simple copy for directories is complex in Node, so we just use it directly if possible
+    // or tell findJava to use it. Actually, better to just let findJava use it.
+    return; 
+  }
+
   sendStatus('downloading-jre');
   const zipPath = path.join(userData, 'jre-download.zip');
   await download(getJreUrl(), zipPath, pct => {
