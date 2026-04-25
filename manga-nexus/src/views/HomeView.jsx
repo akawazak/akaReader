@@ -4,7 +4,7 @@ import { timeAgo, proxyImg } from '../utils/helpers';
 import { Btn } from '../components/ui/Btn';
 import { MangaCard } from '../components/manga/MangaCard';
 
-const HeroRow = memo(({ title, icon: Icon, items, progress, onSelect, showTime }) => {
+const HeroRow = memo(({ title, icon: Icon, items, progress, getMangaKey, onSelect, showTime }) => {
   const scrollRef = useRef(null);
   const scroll = d => {
     if (scrollRef.current) {
@@ -35,7 +35,7 @@ const HeroRow = memo(({ title, icon: Icon, items, progress, onSelect, showTime }
         <div ref={scrollRef} style={{ display: 'flex', gap: 20, overflowX: 'auto', paddingBottom: 16, scrollbarWidth: 'none', msOverflowStyle: 'none', scrollSnapType: 'x mandatory' }}>
           {items.map((m, i) => (
             <div key={m.id} style={{ width: 180, minWidth: 180, flexShrink: 0, scrollSnapAlign: 'start' }}>
-              <MangaCard manga={m} onClick={onSelect} index={i} eager badge={showTime && m.lastRead ? timeAgo(m.lastRead) : null} category={m.categoryId} progress={(progress[m.id]?.chapterNum / (m.totalChapters || null)) * 100 || 0} />
+              <MangaCard manga={m} onClick={onSelect} index={i} eager badge={showTime && m.lastRead ? timeAgo(m.lastRead) : null} category={m.categoryId} progress={(progress[getMangaKey(m.id, m.sourceId)]?.chapterNum / (m.totalChapters || null)) * 100 || 0} />
             </div>
           ))}
         </div>
@@ -44,12 +44,12 @@ const HeroRow = memo(({ title, icon: Icon, items, progress, onSelect, showTime }
   );
 });
 
-export const HomeView = memo(({ history, library, progress, sources, updates, onSelect, onContinue, onSwitchTab }) => {
+export const HomeView = memo(({ history, library, progress, sources, updates, getMangaKey, onSelect, onContinue, onSwitchTab }) => {
   const [heroLoaded, setHeroLoaded] = useState(false);
-  const hero = useMemo(() => history.find(m => progress[m.id]) || history[0] || null, [history, progress]);
-  const continueReading = useMemo(() => history.filter(m => progress[m.id]).slice(0, 15), [history, progress]);
+  const hero = useMemo(() => history.find(m => progress[getMangaKey(m.id, m.sourceId)]) || history[0] || null, [history, progress, getMangaKey]);
+  const continueReading = useMemo(() => history.filter(m => progress[getMangaKey(m.id, m.sourceId)]).slice(0, 15), [history, progress, getMangaKey]);
   const recentLib = useMemo(() => [...library].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0)).slice(0, 20), [library]);
-  const heroProgress = hero && progress[hero.id] ? progress[hero.id] : null;
+  const heroProgress = hero && progress[getMangaKey(hero.id, hero.sourceId)] ? progress[getMangaKey(hero.id, hero.sourceId)] : null;
   const sourceCount = Object.keys(sources).length;
 
   if (!hero && library.length === 0) return (
@@ -196,11 +196,11 @@ export const HomeView = memo(({ history, library, progress, sources, updates, on
           ))}
         </div>
 
-        {continueReading.length > 0 && <HeroRow title="Jump Back In" icon={Clock} items={continueReading} progress={progress} onSelect={onSelect} showTime />}
-
+        {continueReading.length > 0 && <HeroRow title="Jump Back In" icon={Clock} items={continueReading} progress={progress} getMangaKey={getMangaKey} onSelect={onSelect} showTime />}
+        
         {recentLib.length > 0 && (
           <div style={{ marginTop: 24 }}>
-            <HeroRow title="Recently Added to Library" icon={Library} items={recentLib} progress={progress} onSelect={onSelect} showTime />
+            <HeroRow title="Recently Added to Library" icon={Library} items={recentLib} progress={progress} getMangaKey={getMangaKey} onSelect={onSelect} showTime />
           </div>
         )}
       </div>

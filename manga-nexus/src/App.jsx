@@ -12,7 +12,7 @@ import {
   MoreVertical, Share2, ExternalLink, Archive, Star, Flame, Activity,
   ChevronUp, ChevronDown, ZoomIn, ZoomOut, Settings, Sliders, BellRing,
   SlidersHorizontal, Coffee, AlertCircle, RotateCcw, ChevronRightCircle,
-  Pen, Sparkles, Bookmark, Award, StickyNote, Pencil, Pause, Settings2
+  Pen, Sparkles, Bookmark, Award, StickyNote, Pencil, Pause, Settings2, Plus
 } from 'lucide-react';
 
 import { Reader as NewReader } from './components/reader/Reader';
@@ -53,7 +53,7 @@ const proxyImg = (url) => {
     const absolute = url.startsWith('/') ? `${CONFIG.SUWAYOMI}${url}` : url;
     return `${CONFIG.API}/img?url=${encodeURIComponent(absolute)}`;
   }
-  return url; 
+  return url;
 };
 
 const LANGUAGES = [
@@ -71,13 +71,21 @@ const LANGUAGES = [
   { value: 'ru', label: 'Russian' },
 ];
 
-const CATEGORIES = [
-  { id: 'reading', name: 'Reading', color: '#f97316', icon: BookOpen },
-  { id: 'completed', name: 'Completed', color: '#22c55e', icon: Check },
-  { id: 'planning', name: 'Plan to Read', color: '#3b82f6', icon: Calendar },
-  { id: 'dropped', name: 'Dropped', color: '#ef4444', icon: X },
-  { id: 'favorites', name: 'Favorites', color: '#f59e0b', icon: Star },
+const DEFAULT_CATEGORIES = [
+  { id: 'reading', name: 'Reading', color: '#f97316' },
+  { id: 'completed', name: 'Completed', color: '#22c55e' },
+  { id: 'planning', name: 'Plan to Read', color: '#3b82f6' },
+  { id: 'dropped', name: 'Dropped', color: '#ef4444' },
+  { id: 'favorites', name: 'Favorites', color: '#f59e0b' },
 ];
+
+const CATEGORY_ICON_MAP = {
+  reading: BookOpen,
+  completed: Check,
+  planning: Calendar,
+  dropped: X,
+  favorites: Star,
+};
 
 const THEMES = {
   dark: { bg: '#080a0e', card: '#16161f', accent: '#f97316', label: 'Dark', text: 'rgba(255,255,255,0.9)' },
@@ -421,6 +429,14 @@ const ToastProvider = memo(({ children }) => {
 const useToast = () => useContext(ToastContext);
 
 const DataContext = createContext(null);
+const getMangaKey = (id, sourceId) => {
+  if (!id) return null;
+  const sId = String(id);
+  if (sId.includes('__')) return sId; // Already composite
+  if (!sourceId) return sId; // Cannot make composite without sourceId
+  return `${sourceId}__${id}`;
+};
+
 const DataProvider = memo(({ children }) => {
   const [backendOnline, setBackendOnlineRaw] = useState(null);
   const backendOnlineRef = useRef(null);
@@ -446,13 +462,15 @@ const DataProvider = memo(({ children }) => {
       setBackendOnlineRaw(val);
     }
   }, []);
-  
+
   const [sources, setSources] = useState({});
   const [extensions, setExtensions] = useState([]);
   const [library, setLibrary] = useState(() => storage.get('library', []));
   const [history, setHistory] = useState(() => storage.get('history', []));
   const [progress, setProgress] = useState(() => storage.get('progress', {}));
   const [mangaCategories, setMangaCategories] = useState(() => storage.get('mangaCategories', {}));
+  const [categories, setCategories] = useState(() => storage.get('categories', DEFAULT_CATEGORIES));
+  useEffect(() => storage.set('categories', categories), [categories]);
   const [readChapters, setReadChapters] = useState(() => storage.get('readChapters', {}));
   const [installing, setInstalling] = useState(new Set());
   const [readingTime, setReadingTime] = useState(() => storage.get('readingTime', {}));
@@ -463,6 +481,63 @@ const DataProvider = memo(({ children }) => {
   const [updates, setUpdates] = useState([]);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [suwayomiReady, setSuwayomiReady] = useState(false);
+  const [downloadedKeys, setDownloadedKeys] = useState(new Set());
+
+  const refreshDownloads = useCallback(async () => {
+    try {
+      const keys = await listDownloadedKeys();
+      setDownloadedKeys(new Set(keys));
+      window.dispatchEvent(new CustomEvent('downloads-updated'));
+    } catch (e) { console.error('Failed to refresh downloads:', e); }
+  }, []);
+
+  useEffect(() => {
+    refreshDownloads();
+  }, [refreshDownloads]);
+
+  const [downloadQueue, setDownloadQueue] = useState([]);
+  const [overlayHidden, setOverlayHidden] = useState(false);
+  const dlProcessingRef = useRef(false);
+  const dlCancelRef = useRef(false);
+
+  // Migration Effect: Convert old numeric ID keys to composite sourceId__id keys
+  useEffect(() => {
+    const migrationDone = storage.get('keyMigrationV2', false);
+    if (migrationDone) return;
+
+    const idToSource = new Map();
+    library.forEach(m => idToSource.set(String(m.id), String(m.sourceId)));
+    history.forEach(m => idToSource.set(String(m.id), String(m.sourceId)));
+
+    const migrateObj = (obj) => {
+      const next = { ...obj };
+      let changed = false;
+      Object.keys(obj).forEach(key => {
+        if (!key.includes('__') && idToSource.has(key)) {
+          const newKey = `${idToSource.get(key)}__${key}`;
+          next[newKey] = obj[key];
+          delete next[key];
+          changed = true;
+        }
+      });
+      return changed ? next : null;
+    };
+
+    const newProgress = migrateObj(progress);
+    if (newProgress) setProgress(newProgress);
+
+    const newRead = migrateObj(readChapters);
+    if (newRead) setReadChapters(newRead);
+
+    const newCats = migrateObj(mangaCategories);
+    if (newCats) setMangaCategories(newCats);
+
+    const newTime = migrateObj(readingTime);
+    if (newTime) setReadingTime(newTime);
+
+    storage.set('keyMigrationV2', true);
+    console.log('[Migration] Manga keys updated to composite format');
+  }, [library, history]);
 
   const toastRef = useRef(null);
   toastRef.current = useToast();
@@ -477,10 +552,20 @@ const DataProvider = memo(({ children }) => {
   useEffect(() => storage.set('readingTime', readingTime), [readingTime]);
   useEffect(() => storage.set('appSettings', settings), [settings]);
 
-  const fetchJSON = useCallback(async (url, opts = {}) => {
-    const r = await fetch(`${CONFIG.API}${url}`, { ...opts, headers: { 'Content-Type': 'application/json', ...opts.headers } });
-    if (!r.ok) throw new Error(await r.text());
-    return r.json();
+  const fetchJSON = useCallback(async (url, opts = {}, retries = 2) => {
+    let lastErr;
+    for (let i = 0; i <= retries; i++) {
+      try {
+        const r = await fetch(`${CONFIG.API}${url}`, { ...opts, headers: { 'Content-Type': 'application/json', ...opts.headers } });
+        if (!r.ok) throw new Error(await r.text());
+        return await r.json();
+      } catch (e) {
+        lastErr = e;
+        if (opts.signal?.aborted) throw e;
+        if (i < retries) await new Promise(r => setTimeout(r, 500 * (i + 1)));
+      }
+    }
+    throw lastErr;
   }, []);
 
   const checkHealth = useCallback(async () => {
@@ -489,10 +574,10 @@ const DataProvider = memo(({ children }) => {
       setBackendOnline(d.ok);
       if (d.ok && d.suwayomi !== undefined) setSuwayomiReady(d.suwayomi);
     }
-  catch {
-    if (backendOnlineRef.current !== null) setBackendOnline(false);
-  }
-}, [fetchJSON]);
+    catch {
+      if (backendOnlineRef.current !== null) setBackendOnline(false);
+    }
+  }, [fetchJSON]);
 
   const fetchSources = useCallback(async () => {
     try {
@@ -560,16 +645,28 @@ const DataProvider = memo(({ children }) => {
 
   const toggleLibrary = useCallback((manga, sourceId) => {
     setLibrary(prev => {
-      const exists = prev.find(m => m.id === manga.id);
-      if (exists) { toastRef.current?.('Removed from library', 'warning'); return prev.filter(m => m.id !== manga.id); }
+      const exists = prev.find(m => String(m.id) === String(manga.id) && String(m.sourceId) === String(sourceId));
+      if (exists) {
+        toastRef.current?.('Removed from library', 'warning');
+        return prev.filter(m => !(String(m.id) === String(manga.id) && String(m.sourceId) === String(sourceId)));
+      }
       toastRef.current?.('Added to library', 'success');
       return [{ id: manga.id, title: manga.title, cover: manga.cover, sourceId, addedAt: Date.now() }, ...prev];
     });
   }, []);
 
-  const setCategory = useCallback((mangaId, categoryId) => {
-    setMangaCategories(prev => ({ ...prev, [mangaId]: categoryId }));
-    toastRef.current?.(`Moved to ${CATEGORIES.find(c => c.id === categoryId)?.name}`, 'success');
+
+  const addCategory = useCallback((name, color) => {
+    const id = name.toLowerCase().replace(/\s+/g, '_');
+    if (categories.find(c => c.id === id)) return toastRef.current?.('Category already exists', 'error');
+    setCategories(prev => [...prev, { id, name, color: color || '#f97316' }]);
+    toastRef.current?.('Category created', 'success');
+  }, [categories]);
+
+  const removeCategory = useCallback((id) => {
+    if (DEFAULT_CATEGORIES.some(c => c.id === id)) return toastRef.current?.('Cannot delete default categories', 'error');
+    setCategories(prev => prev.filter(c => c.id !== id));
+    toastRef.current?.('Category removed', 'warning');
   }, []);
 
   const addToHistory = useCallback((manga, sourceId, details) => {
@@ -579,67 +676,178 @@ const DataProvider = memo(({ children }) => {
     });
   }, []);
 
-  const removeFromHistory = useCallback((mangaId) => {
-    setHistory(prev => prev.filter(m => m.id !== mangaId));
+  const removeFromHistory = useCallback((mangaId, sourceId) => {
+    setHistory(prev => prev.filter(m => !(String(m.id) === String(mangaId) && String(m.sourceId) === String(sourceId))));
   }, []);
 
-  const removeMangaCompletely = useCallback((mangaId) => {
+  const clearHistory = useCallback(() => {
+    setHistory([]);
+  }, []);
+
+  const removeMangaCompletely = useCallback((mangaId, sourceId) => {
     const key = String(mangaId);
-    setLibrary(prev => prev.filter(m => String(m.id) !== key));
-    setHistory(prev => prev.filter(m => String(m.id) !== key));
+    const srcId = String(sourceId);
+    const mKey = getMangaKey(mangaId, sourceId);
+    setLibrary(prev => prev.filter(m => !(String(m.id) === key && String(m.sourceId) === srcId)));
+    setHistory(prev => prev.filter(m => !(String(m.id) === key && String(m.sourceId) === srcId)));
     setProgress(prev => {
-      if (!(key in prev)) return prev;
       const next = { ...prev };
-      delete next[key];
+      delete next[mKey];
       return next;
     });
     setMangaCategories(prev => {
-      if (!(key in prev)) return prev;
       const next = { ...prev };
-      delete next[key];
+      delete next[mKey];
       return next;
     });
     setReadChapters(prev => {
-      if (!(key in prev)) return prev;
       const next = { ...prev };
-      delete next[key];
+      delete next[mKey];
       return next;
     });
     setReadingTime(prev => {
-      if (!(key in prev)) return prev;
       const next = { ...prev };
-      delete next[key];
+      delete next[mKey];
       return next;
     });
-  }, []);
+    deleteAllChapterBlobsForManga(mKey).then(refreshDownloads);
+  }, [getMangaKey, refreshDownloads]);
 
-  const updateProgress = useCallback((mangaId, chapterId, chapterNum, page) => {
+  const updateProgress = useCallback((mangaId, chapterId, chapterNum, page, sourceId) => {
     if (!mangaId) return;
-    setProgress(p => ({ ...p, [mangaId]: { chapterId, chapterNum, page, lastRead: Date.now() } }));
+    const key = getMangaKey(mangaId, sourceId);
+    setProgress(p => ({ ...p, [key]: { chapterId, chapterNum, page, lastRead: Date.now() } }));
   }, []);
 
-  const markChapterRead = useCallback((mangaId, chapterId, isRead = true) => {
+  const markChapterRead = useCallback((mangaId, chapterId, isRead = true, sourceId) => {
     if (!mangaId || !chapterId) return;
     setReadChapters(prev => {
-      const key = String(mangaId);
+      const key = getMangaKey(mangaId, sourceId);
       const current = new Set(prev[key] || []);
       if (isRead) current.add(String(chapterId));
       else current.delete(String(chapterId));
       return { ...prev, [key]: [...current] };
     });
-  }, []);
 
-  const addReadingTime = useCallback((mangaId, seconds) => {
+    if (isRead && settings?.autoDeleteRead) {
+      deleteChapterBlobs(mangaId, chapterId);
+    }
+  }, [settings?.autoDeleteRead]);
+
+  const addReadingTime = useCallback((mangaId, seconds, sourceId) => {
     if (!mangaId || seconds <= 0) return;
-    setReadingTime(prev => ({ ...prev, [mangaId]: (prev[mangaId] || 0) + seconds }));
+    const key = getMangaKey(mangaId, sourceId);
+    setReadingTime(prev => ({ ...prev, [key]: (prev[key] || 0) + seconds }));
   }, []);
 
   const updateSetting = useCallback((key, value) => {
     setSettingsState(prev => ({ ...prev, [key]: value }));
   }, []);
 
-  const knownTotalsRef = useRef({});
+  const handleMigrate = useCallback(async (oldManga, newItem, newSource) => {
+    try {
+      const newMangaDetail = await fetchJSON(`/source/${newSource.id}/manga/${newItem.id}`);
+      if (!newMangaDetail || newMangaDetail.error) throw new Error('Failed to fetch new manga details');
+
+      const oldId = String(oldManga.id);
+      const newId = String(newItem.id);
+
+      // 1. Progress
+      const oldProg = progress[oldId];
+      if (oldProg) {
+        const newCh = newMangaDetail.chapters.find(c => String(c.number) === String(oldProg.chapterNum));
+        if (newCh) setProgress(prev => ({ ...prev, [newId]: { chapterId: newCh.id, chapterNum: newCh.number, page: oldProg.page, lastRead: Date.now() } }));
+      }
+
+      // 2. Library
+      const libEntry = library.find(m => String(m.id) === oldId && String(m.sourceId) === String(oldManga.sourceId));
+      if (libEntry) {
+        const cat = mangaCategories[oldId];
+        setLibrary(prev => {
+          const filtered = prev.filter(m => String(m.id) !== oldId);
+          return [{ id: newItem.id, title: newItem.title, cover: newItem.cover, sourceId: newSource.id, addedAt: libEntry.addedAt }, ...filtered];
+        });
+        if (cat) setMangaCategories(prev => ({ ...prev, [newId]: cat }));
+      }
+
+      // 3. History
+      setHistory(prev => {
+        const filtered = prev.filter(m => String(m.id) !== oldId);
+        return [{ id: newItem.id, title: newMangaDetail.title, cover: newMangaDetail.cover, sourceId: newSource.id, author: newMangaDetail.author, lastRead: Date.now() }, ...filtered];
+      });
+
+      // 4. Cleanup
+      setMangaCategories(prev => { const n = { ...prev }; delete n[oldId]; return n; });
+      setProgress(prev => { const n = { ...prev }; delete n[oldId]; return n; });
+      setReadChapters(prev => { const n = { ...prev }; delete n[oldId]; return n; });
+
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }, [fetchJSON, progress, library, mangaCategories]);
+
   const updateToastedRef = useRef(false);
+  const queueChaptersForDownload = useCallback((chapters, mangaId, mangaTitle, sourceId) => {
+    const sorted = [...chapters].sort((a, b) => parseFloat(a.number) - parseFloat(b.number));
+    const newItems = sorted.map(ch => ({
+      id: `${mangaId}__${ch.id}__${Date.now()}_${Math.random()}`,
+      mangaId, mangaTitle, chapterId: ch.id, chapterNum: ch.number, sourceId,
+      status: 'pending', progress: 0, pagesLoaded: 0, pagesTotal: 0, error: null
+    }));
+    setDownloadQueue(prev => {
+      const existing = new Set(prev.filter(d => d.status !== 'error' && d.status !== 'cancelled').map(d => d.chapterId));
+      const toAdd = newItems.filter(item => !existing.has(item.chapterId));
+      if (!toAdd.length) { toastRef.current?.('All selected chapters already queued or downloaded', 'warning'); return prev; }
+      return [...prev, ...toAdd];
+    });
+    toastRef.current?.(`Queued ${newItems.length} chapters for download`, 'info');
+  }, []);
+  useEffect(() => {
+    if (dlProcessingRef.current) return;
+    const pending = downloadQueue.find(d => d.status === 'pending');
+    if (!pending) return;
+    dlProcessingRef.current = true;
+    dlCancelRef.current = false;
+
+    setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, status: 'downloading', progress: 0, pagesLoaded: 0, pagesTotal: 0 } : d));
+
+    (async () => {
+      try {
+        const imgs = await fetchJSON(`/source/${pending.sourceId}/chapter/${pending.chapterId}`);
+        const urls = Array.isArray(imgs) ? imgs : [];
+        if (!urls.length) throw new Error('No pages found');
+        setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, pagesTotal: urls.length } : d));
+        let done = 0;
+        const blobs = [];
+        for (const url of urls) {
+          if (dlCancelRef.current) {
+            setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, status: 'cancelled' } : d));
+            return;
+          }
+          const r = await fetch(url);
+          if (!r.ok) throw new Error(`Page failed: ${r.status}`);
+          const blob = await r.blob();
+          blobs.push({ url, blob });
+          done++;
+          const pct = Math.round(done / urls.length * 100);
+          setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, progress: pct, pagesLoaded: done } : d));
+        }
+        await saveChapterBlobs(getMangaKey(pending.mangaId, pending.sourceId), pending.chapterId, blobs);
+        await refreshDownloads();
+        // but for now we'll assume saveChapterBlobs handles the DB.
+        setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, status: 'done', progress: 100 } : d));
+        toastRef.current?.(`Ch. ${pending.chapterNum} of "${pending.mangaTitle}" saved`, 'success');
+      } catch (e) {
+        if (!dlCancelRef.current) {
+          setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, status: 'error', error: e.message } : d));
+        }
+      } finally {
+        dlProcessingRef.current = false;
+      }
+    })();
+  }, [downloadQueue, fetchJSON]);
+
   const checkForUpdates = useCallback(async () => {
     if (library.length === 0) return;
     setCheckingUpdates(true);
@@ -683,33 +891,28 @@ const DataProvider = memo(({ children }) => {
     return () => { clearInterval(fastPoll); clearInterval(slowPoll); };
   }, [checkHealth, fetchSources, fetchExtensions]);
 
-  useEffect(() => {
-    if (!suwayomiReady) return;
-    const validSourceIds = new Set(Object.keys(sources));
-    if (!validSourceIds.size) return;
+  // Removed destructive cleanup effect that deleted manga when sources were temporarily offline
 
-    const brokenIds = new Set(
-      [...library, ...history]
-        .filter(item => item?.sourceId && !validSourceIds.has(String(item.sourceId)))
-        .map(item => String(item.id))
-    );
-
-    if (!brokenIds.size) return;
-
-    brokenIds.forEach(id => removeMangaCompletely(id));
-    toastRef.current?.(`Cleaned ${brokenIds.size} broken manga entr${brokenIds.size === 1 ? 'y' : 'ies'}`, 'warning');
-  }, [suwayomiReady, sources, library, history, removeMangaCompletely]);
+  const setCategory = useCallback((mangaId, categoryId, sourceId) => {
+    const key = getMangaKey(mangaId, sourceId);
+    setMangaCategories(prev => ({ ...prev, [key]: categoryId }));
+    toastRef.current?.(`Moved to ${categories.find(c => c.id === categoryId)?.name || 'category'}`, 'success');
+  }, [categories]);
 
   const value = useMemo(() => ({
     backendOnline, sources, extensions, library, history, progress,
     mangaCategories, installing, readingTime, settings, updates, checkingUpdates,
     readChapters, suwayomiReady, setSuwayomiReady,
+    downloadQueue, setDownloadQueue, overlayHidden, setOverlayHidden, dlCancelRef,
     fetchJSON, checkHealth, fetchSources, fetchExtensions,
     installExt, uninstallExt, updateExt,
-    toggleLibrary, setCategory, addToHistory, removeFromHistory, removeMangaCompletely,
-    updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates,
-    inLibrary: (id) => library.some(m => m.id === id)
-  }), [backendOnline, sources, extensions, library, history, progress, mangaCategories, installing, readingTime, settings, updates, checkingUpdates, readChapters, suwayomiReady, setSuwayomiReady, fetchJSON, checkHealth, fetchSources, fetchExtensions, installExt, uninstallExt, updateExt, toggleLibrary, setCategory, addToHistory, removeFromHistory, removeMangaCompletely, updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates]);
+    toggleLibrary, setCategory, addToHistory, removeFromHistory, clearHistory, removeMangaCompletely,
+    updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates, handleMigrate,
+    queueChaptersForDownload,
+    addCategory, removeCategory, categories,
+    getMangaKey, downloadedKeys, refreshDownloads,
+    inLibrary: (id, sourceId) => library.some(m => String(m.id) === String(id) && (sourceId ? String(m.sourceId) === String(sourceId) : true))
+  }), [backendOnline, sources, extensions, library, history, progress, mangaCategories, installing, readingTime, settings, updates, checkingUpdates, readChapters, suwayomiReady, setSuwayomiReady, downloadQueue, overlayHidden, fetchJSON, checkHealth, fetchSources, fetchExtensions, installExt, uninstallExt, updateExt, toggleLibrary, setCategory, addToHistory, removeFromHistory, removeMangaCompletely, updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates, handleMigrate, addCategory, removeCategory, categories, downloadedKeys, refreshDownloads]);
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 });
@@ -793,14 +996,19 @@ const ContextMenu = memo(({ x, y, items, onClose }) => {
 
 // ==================== MANGA CARD ====================
 
-const MangaCard = memo(({ manga, onClick, index = 0, badge, progress, category, onContextMenu, eager = false }) => {
+const MangaCard = memo(({ manga, onClick, index = 0, badge, progress: manualProgress, category: manualCategory, onContextMenu, eager = false }) => {
   const [loaded, setLoaded] = useState(false);
   const [hovered, setHovered] = useState(false);
   const [imageError, setImageError] = useState(false);
   const [inView, setInView] = useState(eager);
   const cardRef = useRef(null);
 
-  const categoryColor = useMemo(() => CATEGORIES.find(c => c.id === category)?.color, [category]);
+  const { categories, progress, mangaCategories, getMangaKey, downloadedKeys } = useData();
+  const mKey = getMangaKey(manga.id, manga.sourceId);
+
+  const prog = manualProgress !== undefined ? manualProgress : (manga.totalChapters && progress[mKey] ? (parseInt(progress[mKey].chapterNum) / manga.totalChapters) * 100 : 0);
+  const category = manualCategory !== undefined ? manualCategory : mangaCategories[mKey];
+  const categoryColor = useMemo(() => categories.find(c => c.id === category)?.color, [category, categories]);
 
   useEffect(() => {
     if (eager) return;
@@ -810,6 +1018,10 @@ const MangaCard = memo(({ manga, onClick, index = 0, badge, progress, category, 
   }, [eager]);
 
   const handleContextMenu = useCallback((e) => { e.preventDefault(); onContextMenu?.(e, manga); }, [manga, onContextMenu]);
+
+  const hasOfflineCopy = useMemo(() => {
+    return Array.from(downloadedKeys).some(k => k.startsWith(`${mKey}___`));
+  }, [downloadedKeys, mKey]);
 
   return (
     <div
@@ -829,6 +1041,11 @@ const MangaCard = memo(({ manga, onClick, index = 0, badge, progress, category, 
           {badge}
         </div>
       )}
+      {hasOfflineCopy && !badge && (
+        <div style={{ position: 'absolute', top: 8, right: 8, zIndex: 3, background: 'rgba(34,197,94,0.9)', color: '#fff', padding: '4px 8px', borderRadius: 8, fontSize: 9, fontWeight: 800, backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', gap: 4, border: '1px solid rgba(255,255,255,0.1)' }}>
+          <div style={{ width: 4, height: 4, borderRadius: '50%', background: '#fff' }} /> OFFLINE
+        </div>
+      )}
       <div style={{
         aspectRatio: '2/3', borderRadius: 16, overflow: 'hidden', marginBottom: 10,
         border: `1.5px solid ${hovered ? 'var(--border-hover)' : 'var(--border)'}`,
@@ -845,9 +1062,9 @@ const MangaCard = memo(({ manga, onClick, index = 0, badge, progress, category, 
           </div>
         )}
 
-        {progress > 0 && (
+        {prog > 0 && (
           <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 4, background: 'rgba(0,0,0,0.5)', zIndex: 4 }}>
-            <div style={{ width: `${Math.min(progress, 100)}%`, height: '100%', background: 'linear-gradient(90deg,var(--accent),#fb923c)', boxShadow: '0 0 8px rgba(249,115,22,0.6)', transition: 'width 0.5s' }} />
+            <div style={{ width: `${Math.min(prog, 100)}%`, height: '100%', background: 'linear-gradient(90deg,var(--accent),#fb923c)', boxShadow: '0 0 8px rgba(249,115,22,0.6)', transition: 'width 0.5s' }} />
           </div>
         )}
       </div>
@@ -865,7 +1082,8 @@ const MangaCard = memo(({ manga, onClick, index = 0, badge, progress, category, 
 
 const MangaListCard = memo(({ manga, onClick, category, progress: prog, onContextMenu }) => {
   const [imageError, setImageError] = useState(false);
-  const categoryColor = useMemo(() => CATEGORIES.find(c => c.id === category)?.color, [category]);
+  const { categories } = useData();
+  const categoryColor = useMemo(() => categories.find(c => c.id === category)?.color, [category, categories]);
   return (
     <div
       onClick={() => onClick(manga)}
@@ -956,7 +1174,7 @@ const OldReader = memo(({ pages, currentChapter, mangaTitle, onBack, onNextChapt
   const [saturation, setSaturation] = useState(settings?.readerSaturation || 100);
   const [zoom, setZoom] = useState(1);
   const [pageGap, setPageGap] = useState(settings?.readerGap || 0);
-  
+
   // NEW: Auto-scroll
   const [autoScroll, setAutoScroll] = useState(false);
   const [scrollSpeed, setScrollSpeed] = useState(settings?.scrollSpeed || 1);
@@ -1404,122 +1622,122 @@ const OldReader = memo(({ pages, currentChapter, mangaTitle, onBack, onNextChapt
               background: 'rgba(255,255,255,0.15)', margin: '0 auto'
             }} />
             <button onClick={() => setPanelOpen(false)} style={{
-                position: 'absolute', right: 20, top: 12,
-                width: 32, height: 32, borderRadius: 8,
-                border: 'none', background: 'transparent',
-                color: 'rgba(255,255,255,0.5)', cursor: 'pointer',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-              }}><X size={18} /></button>
+              position: 'absolute', right: 20, top: 12,
+              width: 32, height: 32, borderRadius: 8,
+              border: 'none', background: 'transparent',
+              color: 'rgba(255,255,255,0.5)', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}><X size={18} /></button>
           </div>
 
           <div style={{
             padding: '24px 28px 40px', display: 'flex', flexDirection: 'column',
             gap: 28, maxWidth: 600, margin: '0 auto', maxHeight: '70vh', overflowY: 'auto'
           }}>
-              <PanelSection title="Reading Mode">
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
-                  {[
-                    {id: 'scroll', label: 'Scroll', icon: '↕️', desc: 'Standard scroll'},
-                    {id: 'paged', label: 'Paged', icon: '📖', desc: 'Tap to flip'},
-                    {id: 'webtoon', label: 'Strip', icon: '📜', desc: 'No page gaps'}
-                  ].map(m => (
-                    <button key={m.id} onClick={() => setMode(m.id)} style={{
-                      padding: '16px 10px', borderRadius: 14, border: `2px solid ${mode === m.id ? T.accent : 'rgba(255,255,255,0.06)'}`,
-                      background: mode === m.id ? `${T.accent}15` : 'rgba(255,255,255,0.03)',
-                      color: mode === m.id ? '#fff' : 'rgba(255,255,255,0.5)',
-                      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
-                      cursor: 'pointer', transition: 'all 0.2s', boxShadow: mode === m.id ? `0 4px 12px ${T.accent}40` : 'none'
-                    }}>
-                      <span style={{ fontSize: 24 }}>{m.icon}</span>
-                      <span style={{ fontSize: 13, fontWeight: 800 }}>{m.label}</span>
-                      <span style={{ fontSize: 10, opacity: 0.6 }}>{m.desc}</span>
-                    </button>
-                  ))}
-                </div>
-              </PanelSection>
-
-              {mode !== 'paged' && (
-                <PanelSection title="Auto-Scroll">
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-                    <button onClick={() => setAutoScroll(prev => !prev)} style={{
-                      padding: '10px 20px', borderRadius: 12, background: autoScroll ? T.accent : 'rgba(255,255,255,0.08)',
-                      color: autoScroll ? '#000' : '#fff', fontWeight: 'bold', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8
-                    }}>
-                      {autoScroll ? <Pause size={16} /> : <Play size={16} />}
-                      {autoScroll ? 'Stop Auto-scroll' : 'Start Auto-scroll'}
-                    </button>
-                    <div style={{ flex: 1 }}>
-                      <Sl icon={null} min={0.5} max={5} step={0.5} val={scrollSpeed} onChange={setScrollSpeed} fmt={v => `${v}x speed`} />
-                    </div>
-                  </div>
-                </PanelSection>
-              )}
-              
-              {mode === 'paged' && (
-                <PanelSection title="Reading Direction">
-                  <Seg val={direction} onChange={setDirection}
-                    opts={[['rtl', '← RTL (Japanese)'], ['ltr', 'LTR → (Manhwa)']]} />
-                </PanelSection>
-              )}
-
-              {mode !== 'webtoon' && (
-                <PanelSection title="Image Fit">
-                  <Seg val={fitMode} onChange={setFitMode}
-                    opts={[['height', 'Fit Height'], ['width', 'Fit Width'], ['original', '1:1 Scale']]} />
-                </PanelSection>
-              )}
-              {mode !== 'paged' && (
-                <PanelSection title="Page Gap">
-                  <Sl icon={null} min={0} max={48} val={pageGap} onChange={setPageGap} fmt={v => `${v}px`} />
-                </PanelSection>
-              )}
-
-              <PanelSection title="Image Adjustments">
-                {pages[page] && (
-                  <img src={proxyImg(pages[page])} style={{ width: '100%', height: 100, objectFit: 'cover', filter: imgFilter, borderRadius: 12, marginBottom: 16, border: '1px solid rgba(255,255,255,0.1)' }} alt="preview" />
-                )}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-                  <Sl icon={Sun} min={40} max={160} val={brightness} onChange={setBrightness} fmt={v => `${v}%`} />
-                  <Sl icon={Contrast} min={60} max={160} val={contrast} onChange={setContrast} fmt={v => `${v}%`} />
-                  <Sl icon={Droplet} min={0} max={200} val={saturation} onChange={setSaturation} fmt={v => `${v}%`} />
-                </div>
-                {(brightness !== 100 || contrast !== 100 || saturation !== 100) && (
-                  <button onClick={() => { setBrightness(100); setContrast(100); setSaturation(100); }}
-                    style={{
-                      marginTop: 16, padding: '8px 20px', borderRadius: 10,
-                      background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)',
-                      color: 'rgba(255,255,255,0.6)', fontSize: 13, fontWeight: 'bold', cursor: 'pointer',
-                      transition: 'all .15s', display: 'block', width: '100%'
-                    }}>
-                    Reset Adjustments
+            <PanelSection title="Reading Mode">
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+                {[
+                  { id: 'scroll', label: 'Scroll', icon: '↕️', desc: 'Standard scroll' },
+                  { id: 'paged', label: 'Paged', icon: '📖', desc: 'Tap to flip' },
+                  { id: 'webtoon', label: 'Strip', icon: '📜', desc: 'No page gaps' }
+                ].map(m => (
+                  <button key={m.id} onClick={() => setMode(m.id)} style={{
+                    padding: '16px 10px', borderRadius: 14, border: `2px solid ${mode === m.id ? T.accent : 'rgba(255,255,255,0.06)'}`,
+                    background: mode === m.id ? `${T.accent}15` : 'rgba(255,255,255,0.03)',
+                    color: mode === m.id ? '#fff' : 'rgba(255,255,255,0.5)',
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
+                    cursor: 'pointer', transition: 'all 0.2s', boxShadow: mode === m.id ? `0 4px 12px ${T.accent}40` : 'none'
+                  }}>
+                    <span style={{ fontSize: 24 }}>{m.icon}</span>
+                    <span style={{ fontSize: 13, fontWeight: 800 }}>{m.label}</span>
+                    <span style={{ fontSize: 10, opacity: 0.6 }}>{m.desc}</span>
                   </button>
-                )}
-              </PanelSection>
+                ))}
+              </div>
+            </PanelSection>
 
-              <PanelSection title="Background Themes">
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 10 }}>
-                  {Object.entries(THEMES).map(([key, t]) => (
-                    <button key={key} onClick={() => setTheme(key)}
-                      style={{
-                        padding: '14px 6px', borderRadius: 14, cursor: 'pointer',
-                        background: t.bg, border: `2px solid ${theme === key ? t.accent : 'rgba(255,255,255,0.07)'}`,
-                        transition: 'all .15s', display: 'flex', flexDirection: 'column',
-                        alignItems: 'center', gap: 8,
-                        transform: theme === key ? 'scale(1.05)' : 'scale(1)',
-                        boxShadow: theme === key ? `0 0 20px ${t.accent}40,0 0 0 1px ${t.accent}30` : '',
-                      }}>
-                      <div style={{
-                        width: 24, height: 24, borderRadius: '50%',
-                        background: t.accent, boxShadow: `0 0 8px ${t.accent}60`
-                      }} />
-                      <span style={{
-                        fontSize: 11, fontWeight: 800, color: t.text,
-                        textAlign: 'center', lineHeight: 1
-                      }}>{t.label}</span>
-                    </button>
-                  ))}
+            {mode !== 'paged' && (
+              <PanelSection title="Auto-Scroll">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+                  <button onClick={() => setAutoScroll(prev => !prev)} style={{
+                    padding: '10px 20px', borderRadius: 12, background: autoScroll ? T.accent : 'rgba(255,255,255,0.08)',
+                    color: autoScroll ? '#000' : '#fff', fontWeight: 'bold', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8
+                  }}>
+                    {autoScroll ? <Pause size={16} /> : <Play size={16} />}
+                    {autoScroll ? 'Stop Auto-scroll' : 'Start Auto-scroll'}
+                  </button>
+                  <div style={{ flex: 1 }}>
+                    <Sl icon={null} min={0.5} max={5} step={0.5} val={scrollSpeed} onChange={setScrollSpeed} fmt={v => `${v}x speed`} />
+                  </div>
                 </div>
               </PanelSection>
+            )}
+
+            {mode === 'paged' && (
+              <PanelSection title="Reading Direction">
+                <Seg val={direction} onChange={setDirection}
+                  opts={[['rtl', '← RTL (Japanese)'], ['ltr', 'LTR → (Manhwa)']]} />
+              </PanelSection>
+            )}
+
+            {mode !== 'webtoon' && (
+              <PanelSection title="Image Fit">
+                <Seg val={fitMode} onChange={setFitMode}
+                  opts={[['height', 'Fit Height'], ['width', 'Fit Width'], ['original', '1:1 Scale']]} />
+              </PanelSection>
+            )}
+            {mode !== 'paged' && (
+              <PanelSection title="Page Gap">
+                <Sl icon={null} min={0} max={48} val={pageGap} onChange={setPageGap} fmt={v => `${v}px`} />
+              </PanelSection>
+            )}
+
+            <PanelSection title="Image Adjustments">
+              {pages[page] && (
+                <img src={proxyImg(pages[page])} style={{ width: '100%', height: 100, objectFit: 'cover', filter: imgFilter, borderRadius: 12, marginBottom: 16, border: '1px solid rgba(255,255,255,0.1)' }} alt="preview" />
+              )}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                <Sl icon={Sun} min={40} max={160} val={brightness} onChange={setBrightness} fmt={v => `${v}%`} />
+                <Sl icon={Contrast} min={60} max={160} val={contrast} onChange={setContrast} fmt={v => `${v}%`} />
+                <Sl icon={Droplet} min={0} max={200} val={saturation} onChange={setSaturation} fmt={v => `${v}%`} />
+              </div>
+              {(brightness !== 100 || contrast !== 100 || saturation !== 100) && (
+                <button onClick={() => { setBrightness(100); setContrast(100); setSaturation(100); }}
+                  style={{
+                    marginTop: 16, padding: '8px 20px', borderRadius: 10,
+                    background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)',
+                    color: 'rgba(255,255,255,0.6)', fontSize: 13, fontWeight: 'bold', cursor: 'pointer',
+                    transition: 'all .15s', display: 'block', width: '100%'
+                  }}>
+                  Reset Adjustments
+                </button>
+              )}
+            </PanelSection>
+
+            <PanelSection title="Background Themes">
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 10 }}>
+                {Object.entries(THEMES).map(([key, t]) => (
+                  <button key={key} onClick={() => setTheme(key)}
+                    style={{
+                      padding: '14px 6px', borderRadius: 14, cursor: 'pointer',
+                      background: t.bg, border: `2px solid ${theme === key ? t.accent : 'rgba(255,255,255,0.07)'}`,
+                      transition: 'all .15s', display: 'flex', flexDirection: 'column',
+                      alignItems: 'center', gap: 8,
+                      transform: theme === key ? 'scale(1.05)' : 'scale(1)',
+                      boxShadow: theme === key ? `0 0 20px ${t.accent}40,0 0 0 1px ${t.accent}30` : '',
+                    }}>
+                    <div style={{
+                      width: 24, height: 24, borderRadius: '50%',
+                      background: t.accent, boxShadow: `0 0 8px ${t.accent}60`
+                    }} />
+                    <span style={{
+                      fontSize: 11, fontWeight: 800, color: t.text,
+                      textAlign: 'center', lineHeight: 1
+                    }}>{t.label}</span>
+                  </button>
+                ))}
+              </div>
+            </PanelSection>
           </div>
         </div>
       )}
@@ -1649,8 +1867,8 @@ const OldReader = memo(({ pages, currentChapter, mangaTitle, onBack, onNextChapt
 });
 
 // Mock Droplet / Contrast lucide icons for reader settings missing from imports
-const Droplet = ({size}) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"></path></svg>;
-const Contrast = ({size}) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 18a6 6 0 0 0 0-12v12z"></path></svg>;
+const Droplet = ({ size }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"></path></svg>;
+const Contrast = ({ size }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 18a6 6 0 0 0 0-12v12z"></path></svg>;
 
 const RepoAddRow = memo(({ onAdd }) => {
   const [val, setVal] = useState('');
@@ -1676,10 +1894,14 @@ const RepoAddRow = memo(({ onAdd }) => {
 // ==================== SETTINGS PAGE ====================
 
 const SettingsPage = memo(() => {
-  const { settings, updateSetting, backendOnline, checkHealth, library, history, progress, readingTime, sources, extensions, fetchSources, fetchExtensions, suwayomiReady } = useData();
+  const {
+    settings, updateSetting, backendOnline, checkHealth, library, history,
+    progress, readingTime, sources, extensions, fetchSources, fetchExtensions,
+    suwayomiReady, categories, addCategory, removeCategory, getMangaKey
+  } = useData();
   const toast = useToast();
   const [confirmClear, setConfirmClear] = useState(null);
-  const [serviceStatus, setServiceStatus] = useState(null); 
+  const [serviceStatus, setServiceStatus] = useState(null);
   const [serviceWorking, setServiceWorking] = useState(false);
   const [runtimeInfo, setRuntimeInfo] = useState({ javaPath: '', jarPath: '', configPath: '' });
   const installedExtCount = useMemo(() => {
@@ -1714,7 +1936,7 @@ const SettingsPage = memo(() => {
         jarPath: jarPath || '',
         configPath: configPath || '',
       });
-    }).catch(() => {});
+    }).catch(() => { });
   }, []);
 
   const totalReadingMins = Object.values(readingTime).reduce((a, b) => a + b, 0);
@@ -1866,7 +2088,33 @@ const SettingsPage = memo(() => {
         </Row>
       </Section>
 
+      <Section title="📂 Library Categories">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {categories.map(cat => (
+            <div key={cat.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', background: 'var(--card)', borderRadius: 12, border: '1px solid var(--border)' }}>
+              <div style={{ width: 12, height: 12, borderRadius: '50%', background: cat.color }} />
+              <span style={{ fontSize: 13, fontWeight: 700, flex: 1 }}>{cat.name}</span>
+              {!DEFAULT_CATEGORIES.some(d => d.id === cat.id) && (
+                <button onClick={() => removeCategory(cat.id)} style={{ background: 'none', border: 'none', color: 'var(--red)', cursor: 'pointer', padding: 4 }}><Trash2 size={14} /></button>
+              )}
+            </div>
+          ))}
+          <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+            <input id="new-cat-name" placeholder="New Category Name" style={{ flex: 1, background: 'var(--card2)', border: '1.5px solid var(--border)', borderRadius: 8, padding: '8px 12px', color: 'var(--text)', fontSize: 13, outline: 'none' }} />
+            <input id="new-cat-color" type="color" defaultValue="#f97316" style={{ width: 36, height: 36, border: 'none', background: 'none', cursor: 'pointer' }} />
+            <Btn size="sm" onClick={() => {
+              const name = document.getElementById('new-cat-name').value;
+              const color = document.getElementById('new-cat-color').value;
+              if (name) { addCategory(name, color); document.getElementById('new-cat-name').value = ''; }
+            }} icon={Plus}>Add</Btn>
+          </div>
+        </div>
+      </Section>
+
       <Section title="⚠️ Data Management">
+        <Row label="Auto-Delete Read Chapters" sub="Automatically remove offline downloaded chapters when you finish reading them">
+          <Toggle value={settings?.autoDeleteRead || false} onChange={v => updateSetting('autoDeleteRead', v)} />
+        </Row>
         <Row label="Clear Reading History" sub={`${history.length} entries`}>
           <Btn variant="danger" size="sm" onClick={() => setConfirmClear('history')}><Trash2 size={14} /> Clear</Btn>
         </Row>
@@ -2139,7 +2387,7 @@ const GlobalSearch = memo(({ sources, onSelectManga, onClose, fetchJSON }) => {
                   {r.results.length > 0 && (
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(120px,1fr))', gap: 14 }}>
                       {r.results.slice(0, 8).map((m, i) => (
-                        <MangaCard key={m.id} manga={{ ...m, sourceId: srcId }} onClick={manga => { onSelectManga(manga, srcId); onClose(); }} index={i} />
+                        <MangaCard key={getMangaKey(m.id, srcId)} manga={{ ...m, sourceId: srcId }} onClick={manga => { onSelectManga(manga, srcId); onClose(); }} index={i} />
                       ))}
                     </div>
                   )}
@@ -2160,7 +2408,7 @@ const GlobalSearch = memo(({ sources, onSelectManga, onClose, fetchJSON }) => {
 // ==================== UPDATES TAB ====================
 
 const UpdatesTab = memo(({ onOpenManga }) => {
-  const { updates, checkingUpdates, checkForUpdates } = useData();
+  const { updates, checkingUpdates, checkForUpdates, getMangaKey } = useData();
 
   return (
     <div className="page-transition">
@@ -2177,7 +2425,7 @@ const UpdatesTab = memo(({ onOpenManga }) => {
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 18 }}>
           {updates.map((manga, i) => (
-            <div key={manga.id} style={{ position: 'relative' }}>
+            <div key={getMangaKey(manga.id, manga.sourceId)} style={{ position: 'relative' }}>
               <MangaCard manga={manga} onClick={onOpenManga || (() => { })} index={i} badge={`+${manga.newChapters}`} />
             </div>
           ))}
@@ -2361,7 +2609,7 @@ async function saveChapterBlobs(mangaId, chapterId, urlsAndBlobs) {
   ));
 
   const db = await openDB();
-  const key = `${mangaId}__${chapterId}`;
+  const key = `${mangaId}___${chapterId}`;
   return new Promise((res, rej) => {
     const tx = db.transaction('chapters', 'readwrite');
     tx.oncomplete = res;
@@ -2375,7 +2623,7 @@ async function loadChapterBlobs(mangaId, chapterId) {
     const db = await openDB();
     const tx = db.transaction('chapters', 'readonly');
     const st = tx.objectStore('chapters');
-    const key = `${mangaId}__${chapterId}`;
+    const key = `${mangaId}___${chapterId}`;
     return new Promise((res) => {
       const req = st.get(key);
       req.onsuccess = () => {
@@ -2399,13 +2647,14 @@ async function deleteChapterBlobs(mangaId, chapterId) {
   try {
     const db = await openDB();
     const tx = db.transaction('chapters', 'readwrite');
-    tx.objectStore('chapters').delete(`${mangaId}__${chapterId}`);
+    tx.objectStore('chapters').delete(`${mangaId}___${chapterId}`);
+    tx.oncomplete = () => window.dispatchEvent(new Event('downloads-updated'));
   } catch { }
 }
 
 async function deleteAllChapterBlobsForManga(mangaId) {
   const keys = await listDownloadedKeys();
-  const prefix = `${mangaId}__`;
+  const prefix = `${mangaId}___`;
   await Promise.all(
     keys
       .map(String)
@@ -2431,13 +2680,8 @@ async function listDownloadedKeys() {
 }
 
 function useDownloads() {
-  const [keys, setKeys] = useState(new Set());
-  const refresh = useCallback(async () => {
-    const all = await listDownloadedKeys();
-    setKeys(new Set(all));
-  }, []);
-  useEffect(() => { refresh(); }, [refresh]);
-  return { downloadedKeys: keys, refreshDownloads: refresh };
+  const { downloadedKeys, refreshDownloads } = useData();
+  return { downloadedKeys, refreshDownloads };
 }
 
 const ONBOARDING_STEPS = [
@@ -2512,7 +2756,7 @@ const ONB_STYLES = `
 const Onboarding = memo(({ onFinish }) => {
   const [step, setStep] = useState(0);
   const [rect, setRect] = useState(null);
-  const [animKey, setAnimKey] = useState(0);  
+  const [animKey, setAnimKey] = useState(0);
   const [vw, setVw] = useState(window.innerWidth);
   const [vh, setVh] = useState(window.innerHeight);
 
@@ -2570,7 +2814,7 @@ const Onboarding = memo(({ onFinish }) => {
 
     let cardLeft = cardStyle.left ?? 0;
     let cardTop = cardStyle.top ?? 0;
-    if (cardStyle.transform) return null; 
+    if (cardStyle.transform) return null;
     const cardCx = cardLeft + W / 2;
     const cardCy = cardTop + 150;
 
@@ -2804,7 +3048,7 @@ const StartupScreen = memo(({ onProceed, onRetry }) => {
   const [downloadPct, setDownloadPct] = useState(null);
   const [appVersion, setAppVersion] = useState('');
   useEffect(() => {
-    window.electronAPI?.getVersion?.().then(v => setAppVersion(v || '')).catch(() => {});
+    window.electronAPI?.getVersion?.().then(v => setAppVersion(v || '')).catch(() => { });
   }, []);
 
   const STATUS_MAP = {
@@ -2850,14 +3094,14 @@ const StartupScreen = memo(({ onProceed, onRetry }) => {
     }, 20000);
 
     if (!window.electronAPI?.onServicesStatus) return () => clearTimeout(failSafe);
-    
+
     window.electronAPI.onServicesStatus((status) => {
       if (status.includes(':') && !status.startsWith('update-available')) {
         const [code, val] = status.split(':');
         const pct = parseInt(val);
         if (!isNaN(pct)) {
           setDownloadPct(pct);
-          setBarW(pct * 0.45); 
+          setBarW(pct * 0.45);
           const label = code === 'downloading-jre' ? 'Downloading Java runtime' : 'Downloading Suwayomi';
           setStatusMsg(`${label}... ${pct}%`);
           return;
@@ -3026,13 +3270,13 @@ const StartupScreen = memo(({ onProceed, onRetry }) => {
 
           {hasFailed && (
             <div className="anim-fadeInUp" style={{ display: 'flex', gap: 12, marginTop: 24, justifyContent: 'center' }}>
-              <button 
+              <button
                 onClick={onProceed}
                 style={{ padding: '8px 16px', borderRadius: 8, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#cbd5e1', fontSize: 13, cursor: 'pointer', transition: 'all 0.2s' }}
               >
                 Proceed Offline
               </button>
-              <button 
+              <button
                 onClick={onRetry}
                 style={{ padding: '8px 16px', borderRadius: 8, background: 'linear-gradient(135deg,#f97316,#ea580c)', border: 'none', color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer', boxShadow: '0 4px 12px rgba(249,115,22,0.3)', transition: 'all 0.2s' }}
               >
@@ -3069,7 +3313,7 @@ const CardSlot = ({ children }) => (
   <div style={{ width: 148, minWidth: 148, flexShrink: 0 }}>{children}</div>
 );
 
-const _discoverCache = new Map(); 
+const _discoverCache = new Map();
 
 const DiscoverRow = memo(({ source, query, label, onSelect, progress, rowIndex = 0 }) => {
   const [metas, setMetas] = useState([]);
@@ -3159,13 +3403,13 @@ const DiscoverRow = memo(({ source, query, label, onSelect, progress, rowIndex =
               </div>
             )
             : metas.map((m, i) => (
-              <CardSlot key={m.id}>
+              <CardSlot key={getMangaKey(m.id, source.id)}>
                 <MangaCard
                   manga={{ ...m, sourceId: source.id }}
                   onClick={onSelect}
                   index={i}
-                  progress={progress?.[m.id]
-                    ? Math.round((parseInt(progress[m.id].chapterNum) || 0) / 100 * 100)
+                  progress={progress?.[getMangaKey(m.id, source.id)]
+                    ? Math.round((parseInt(progress[getMangaKey(m.id, source.id)].chapterNum) || 0) / 100 * 100)
                     : 0}
                 />
               </CardSlot>
@@ -3177,6 +3421,7 @@ const DiscoverRow = memo(({ source, query, label, onSelect, progress, rowIndex =
 });
 
 const DiscoverTab = memo(({ sources, history, library, progress, onSelect, onSwitchTab }) => {
+  const { getMangaKey } = useData();
   const installedSources = useMemo(() => Object.values(sources), [sources]);
 
   const [activeGenre, setActiveGenre] = useState(null);
@@ -3200,9 +3445,9 @@ const DiscoverTab = memo(({ sources, history, library, progress, onSelect, onSwi
 
   const continueItems = useMemo(() => {
     return history
-      .filter(m => progress[m.id])
+      .filter(m => progress[getMangaKey(m.id, m.sourceId)])
       .slice(0, 12);
-  }, [history, progress]);
+  }, [history, progress, getMangaKey]);
 
   const searchGenre = useCallback(async (genre) => {
     if (!genre || installedSources.length === 0) return;
@@ -3369,7 +3614,7 @@ const DiscoverTab = memo(({ sources, history, library, progress, onSelect, onSwi
                       paddingBottom: 8, scrollbarWidth: 'none', msOverflowStyle: 'none'
                     }}>
                       {row.metas.map((m, i) => (
-                        <CardSlot key={m.id}>
+                        <CardSlot key={getMangaKey(m.id, srcId)}>
                           <MangaCard manga={{ ...m, sourceId: srcId }} onClick={onSelect} index={i} eager />
                         </CardSlot>
                       ))}
@@ -3398,10 +3643,11 @@ const DiscoverTab = memo(({ sources, history, library, progress, onSelect, onSwi
             paddingBottom: 8, scrollbarWidth: 'none', msOverflowStyle: 'none'
           }}>
             {continueItems.map((m, i) => {
-              const p = progress[m.id];
+              const mKey = getMangaKey(m.id, m.sourceId);
+              const p = progress[mKey];
               const pct = p ? Math.min(100, Math.round((parseInt(p.chapterNum) || 0) * 3)) : 0;
               return (
-                <CardSlot key={m.id}>
+                <CardSlot key={getMangaKey(m.id, m.sourceId)}>
                   <MangaCard
                     manga={{ ...m }}
                     onClick={onSelect}
@@ -3474,6 +3720,116 @@ const MangaNotes = memo(({ mangaId, mangaTitle }) => {
       ) : note ? (
         <p style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.8, whiteSpace: 'pre-wrap' }}>{note}</p>
       ) : null}
+    </div>
+  );
+});
+
+// ==================== SOURCE MIGRATION ====================
+
+const SourceMigrationModal = memo(({ manga, sources, onClose, onMigrate }) => {
+  const { fetchJSON } = useData();
+  const toast = useToast();
+  const [results, setResults] = useState({}); // { sourceId: { status, items } }
+  const [migrating, setMigrating] = useState(false);
+
+  const installedSources = useMemo(() =>
+    Object.values(sources).filter(s => s.id !== String(manga?.sourceId)),
+    [sources, manga?.sourceId]
+  );
+
+  useEffect(() => {
+    if (!manga || installedSources.length === 0) return;
+    const query = manga.title;
+
+    installedSources.forEach(async src => {
+      setResults(prev => ({ ...prev, [src.id]: { status: 'loading', items: [] } }));
+      try {
+        const d = await fetchJSON(`/source/${src.id}/search?q=${encodeURIComponent(query)}&page=1`);
+        const items = Array.isArray(d) ? d : (d?.results || []);
+        setResults(prev => ({ ...prev, [src.id]: { status: 'done', items: items.slice(0, 5) } }));
+      } catch {
+        setResults(prev => ({ ...prev, [src.id]: { status: 'error', items: [] } }));
+      }
+    });
+  }, [manga, installedSources, fetchJSON]);
+
+  if (!manga) return null;
+
+  return (
+    <div className="anim-fadeIn" onClick={onClose}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.82)', backdropFilter: 'blur(12px)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+      <div onClick={e => e.stopPropagation()} className="anim-fadeInUp"
+        style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 20, padding: '28px 28px 24px', maxWidth: 620, width: '100%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', boxShadow: '0 32px 80px rgba(0,0,0,.7)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+          <div style={{ width: 36, height: 36, borderRadius: 10, background: 'rgba(249,115,22,0.12)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <RefreshCw size={18} style={{ color: 'var(--accent)' }} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <h2 style={{ fontWeight: 800, fontSize: 17, margin: 0 }}>Migrate Source</h2>
+            <p style={{ fontSize: 12, color: 'var(--muted)', margin: 0 }}>{manga.title}</p>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)', borderRadius: 8, padding: 4 }}><X size={18} /></button>
+        </div>
+        <p style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 18, lineHeight: 1.6, borderBottom: '1px solid var(--border)', paddingBottom: 14 }}>
+          Searching {installedSources.length} other source{installedSources.length !== 1 ? 's' : ''} for a match. Your reading progress will be transferred automatically.
+        </p>
+        <div style={{ overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {installedSources.length === 0 && (
+            <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--muted)', fontSize: 14 }}>
+              No other sources installed. Install more extensions first.
+            </div>
+          )}
+          {installedSources.map(src => {
+            const r = results[src.id] || { status: 'loading', items: [] };
+            return (
+              <div key={src.id}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                  {src.icon ? <img src={src.icon} style={{ width: 18, height: 18, borderRadius: 4 }} alt="" /> : <Globe size={15} style={{ color: 'var(--muted)' }} />}
+                  <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>{src.name}</span>
+                  <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 'auto' }}>
+                    {r.status === 'loading' ? '⏳ Searching...' : r.status === 'error' ? '❌ Failed' : `${r.items.length} results`}
+                  </span>
+                </div>
+                {r.status === 'loading' && (
+                  <div style={{ display: 'flex', gap: 8, padding: '10px 14px', background: 'var(--card2)', borderRadius: 10 }}>
+                    <Spin size={14} /><span style={{ fontSize: 12, color: 'var(--muted)' }}>Searching...</span>
+                  </div>
+                )}
+                {r.items.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {r.items.map(item => (
+                      <div key={item.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', background: 'var(--card2)', borderRadius: 12, border: '1px solid var(--border)', cursor: 'pointer', transition: 'all 0.2s' }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.background = 'rgba(249,115,22,0.05)'; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.background = 'var(--card2)'; }}
+                        onClick={async () => {
+                          setMigrating(true);
+                          try {
+                            await onMigrate(manga, item, src);
+                            toast(`Migrated to ${src.name}!`, 'success');
+                            onClose();
+                          } catch { toast('Migration failed', 'error'); }
+                          setMigrating(false);
+                        }}>
+                        {item.cover && <img src={item.cover} alt="" style={{ width: 36, height: 50, borderRadius: 6, objectFit: 'cover', flexShrink: 0 }} />}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <p style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.title}</p>
+                          {item.status && <p style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>{item.status}</p>}
+                        </div>
+                        <Btn size="sm" variant="outline" disabled={migrating}>
+                          {migrating ? <Spin size={12} /> : 'Migrate →'}
+                        </Btn>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {r.status === 'done' && r.items.length === 0 && (
+                  <p style={{ fontSize: 12, color: 'var(--muted)', padding: '8px 14px', background: 'var(--card2)', borderRadius: 10 }}>No results found on this source.</p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 });
@@ -3595,11 +3951,11 @@ const DuplicateBanner = memo(({ library, onRemove }) => {
   );
   const dupes = useMemo(() => findDuplicates(library), [library]);
   const visible = dupes.filter(g =>
-    !dismissed.includes(g.map(m => m.id).sort().join(','))
+    !dismissed.includes(g.map(m => getMangaKey(m.id, m.sourceId)).sort().join(','))
   );
   if (!visible.length) return null;
   const dismiss = (g) => {
-    const key = g.map(m => m.id).sort().join(',');
+    const key = g.map(m => getMangaKey(m.id, m.sourceId)).sort().join(',');
     const next = [...dismissed, key];
     setDismissed(next);
     localStorage.setItem('aka:dup-dismissed', JSON.stringify(next));
@@ -3621,8 +3977,8 @@ const DuplicateBanner = memo(({ library, onRemove }) => {
             </span>
             <div style={{ display: 'flex', gap: 6 }}>
               {g.map((m, i) => (
-                <Btn key={m.id} variant="danger" size="sm"
-                  onClick={() => { onRemove(m.id); dismiss(g.filter(x => x.id !== m.id).concat([m])); }}>
+                <Btn key={getMangaKey(m.id, m.sourceId)} variant="danger" size="sm"
+                  onClick={() => { onRemove(m.id, m.sourceId); dismiss(g.filter(x => getMangaKey(x.id, x.sourceId) !== getMangaKey(m.id, m.sourceId)).concat([m])); }}>
                   Remove #{i + 1}
                 </Btn>
               ))}
@@ -3883,9 +4239,10 @@ const MoodDiscovery = memo(({ sources, onSelect }) => {
 });
 
 const ShareCardModal = memo(({ library, history, progress, readChapters, settings, onClose }) => {
+  const { getMangaKey } = useData();
   const canvasRef = useRef(null);
   const [rendered, setRendered] = useState(false);
-  const [style, setStyle] = useState('reading'); 
+  const [style, setStyle] = useState('reading');
 
   const totalRead = useMemo(() =>
     Object.values(readChapters).reduce((a, v) => a + (v?.length || 0), 0), [readChapters]);
@@ -3980,10 +4337,11 @@ const ShareCardModal = memo(({ library, history, progress, readChapters, setting
         ctx.fillStyle = '#e2e8f0';
         const title = m.title.length > 32 ? m.title.slice(0, 30) + '…' : m.title;
         ctx.fillText(title, 44, row);
-        if (progress[m.id]) {
+        const mKey = getMangaKey(m.id, m.sourceId);
+        if (progress[mKey]) {
           ctx.fillStyle = accent;
           ctx.font = '11px "Segoe UI", system-ui, sans-serif';
-          ctx.fillText(`Ch.${progress[m.id].chapterNum}`, 44, row + 16);
+          ctx.fillText(`Ch.${progress[mKey].chapterNum}`, 44, row + 16);
         }
       });
     }
@@ -4064,6 +4422,7 @@ const ShareCardModal = memo(({ library, history, progress, readChapters, setting
 
 
 const StatsStrip = memo(({ library, history, progress, readChapters }) => {
+  const { getMangaKey } = useData();
   const totalRead = useMemo(() => Object.values(readChapters).reduce((a, v) => a + (v?.length || 0), 0), [readChapters]);
   const streak = useMemo(() => calculateStreak(history), [history]);
   const completing = useMemo(() => {
@@ -4071,7 +4430,7 @@ const StatsStrip = memo(({ library, history, progress, readChapters }) => {
     if (!keys.length) return 0;
     return keys.filter(k => {
       const p = progress[k];
-      const m = library.find(m => m.id === k);
+      const m = library.find(m => getMangaKey(m.id, m.sourceId) === k);
       if (!m || !p) return false;
       return (parseInt(p.chapterNum) || 0) >= (m.totalChapters || 999);
     }).length;
@@ -4109,19 +4468,21 @@ const App = memo(() => {
     backendOnline, sources, extensions, library, history, progress,
     mangaCategories, installing, readingTime, settings, updates, checkingUpdates,
     readChapters, markChapterRead,
+    downloadQueue, setDownloadQueue, overlayHidden, setOverlayHidden, dlCancelRef,
     fetchJSON, checkHealth, fetchSources, fetchExtensions,
     installExt, uninstallExt, updateExt, toggleLibrary, setCategory,
     addToHistory, removeFromHistory, removeMangaCompletely, updateProgress, inLibrary,
-    checkForUpdates, addReadingTime, updateSetting,
+    checkForUpdates, addReadingTime, updateSetting, handleMigrate,
+    queueChaptersForDownload,
     suwayomiReady, setSuwayomiReady,
+    categories, getMangaKey,
   } = data;
 
   const { downloadedKeys, refreshDownloads } = useDownloads();
 
-  const [downloadQueue, setDownloadQueue] = useState([]);
   const dlProcessingRef = useRef(false);
 
-  const [updateAvailable, setUpdateAvailable] = useState(null); 
+  const [updateAvailable, setUpdateAvailable] = useState(null);
 
   const [tab, setTab] = useState('home');
   const [view, setView] = useState('tabs');
@@ -4139,7 +4500,6 @@ const App = memo(() => {
         if (status === 'crashed' || status === 'offline') {
           setShowErrorModal(true);
         } else if (status === 'online') {
-          setForceProceed(true);
           setShowErrorModal(false);
           checkHealth().then(() => { fetchSources(); fetchExtensions(); });
         } else if (status === 'suwayomi-starting') {
@@ -4158,6 +4518,23 @@ const App = memo(() => {
     }
   }, [checkHealth, fetchSources, fetchExtensions]);
 
+  useEffect(() => {
+    if (suwayomiReady && extensions.length === 0) {
+      const hasRetried = sessionStorage.getItem('aka:ext-retry');
+      if (!hasRetried) {
+        sessionStorage.setItem('aka:ext-retry', 'true');
+        console.log('Extensions empty on start, performing one-time auto-refresh...');
+        setTimeout(() => {
+          fetchExtensions();
+          fetchSources();
+        }, 1000);
+      }
+    } else if (extensions.length > 0) {
+      // Clear retry flag if we have extensions
+      sessionStorage.removeItem('aka:ext-retry');
+    }
+  }, [suwayomiReady, extensions.length, fetchExtensions, fetchSources]);
+
   const viewRef = useRef(view);
   const goBackRef = useRef(null);
   useEffect(() => { viewRef.current = view; }, [view]);
@@ -4175,68 +4552,6 @@ const App = memo(() => {
     return () => window.removeEventListener('mousedown', onMouseDown);
   }, []);
 
-  const dlCancelRef = useRef(false);
-
-  useEffect(() => {
-    if (dlProcessingRef.current) return;
-    const pending = downloadQueue.find(d => d.status === 'pending');
-    if (!pending) return;
-    dlProcessingRef.current = true;
-    dlCancelRef.current = false;
-
-    setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, status: 'downloading', progress: 0, pagesLoaded: 0, pagesTotal: 0 } : d));
-
-    (async () => {
-      try {
-        const imgs = await fetchJSON(`/source/${pending.sourceId}/chapter/${pending.chapterId}`);
-        const urls = Array.isArray(imgs) ? imgs : [];
-        if (!urls.length) throw new Error('No pages found');
-        setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, pagesTotal: urls.length } : d));
-        let done = 0;
-        const blobs = [];
-        for (const url of urls) {
-          if (dlCancelRef.current) {
-            setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, status: 'cancelled' } : d));
-            return;
-          }
-          const r = await fetch(url);
-          if (!r.ok) throw new Error(`Page failed: ${r.status}`);
-          const blob = await r.blob();
-          blobs.push({ url, blob });
-          done++;
-          const pct = Math.round(done / urls.length * 100);
-          setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, progress: pct, pagesLoaded: done } : d));
-        }
-        await saveChapterBlobs(pending.mangaId, pending.chapterId, blobs);
-        await refreshDownloads();
-        setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, status: 'done', progress: 100 } : d));
-        toast(`Ch. ${pending.chapterNum} of "${pending.mangaTitle}" saved`, 'success');
-      } catch (e) {
-        if (!dlCancelRef.current) {
-          setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, status: 'error', error: e.message } : d));
-        }
-      } finally {
-        dlProcessingRef.current = false;
-      }
-    })();
-  }, [downloadQueue, fetchJSON, refreshDownloads, toast]);
-
-  const queueChaptersForDownload = useCallback((chapters, mangaId, mangaTitle, sourceId) => {
-    const sorted = [...chapters].sort((a, b) => parseFloat(a.number) - parseFloat(b.number));
-    const newItems = sorted.map(ch => ({
-      id: `${mangaId}__${ch.id}__${Date.now()}_${Math.random()}`,
-      mangaId, mangaTitle, chapterId: ch.id, chapterNum: ch.number, sourceId,
-      status: 'pending', progress: 0, pagesLoaded: 0, pagesTotal: 0, error: null
-    }));
-    setDownloadQueue(prev => {
-      const existing = new Set(prev.filter(d => d.status !== 'error' && d.status !== 'cancelled').map(d => d.chapterId));
-      const toAdd = newItems.filter(item => !existing.has(item.chapterId));
-      if (!toAdd.length) { toast('All selected chapters already queued or downloaded', 'warning'); return prev; }
-      return [...prev, ...toAdd];
-    });
-    toast(`Queued chapters for download`, 'info');
-    setTab('downloads');
-  }, [toast]);
 
   useEffect(() => {
     if (backendOnline === false) {
@@ -4282,7 +4597,7 @@ const App = memo(() => {
   const [pages, setPages] = useState([]);
   const [pagesLoading, setPagesLoading] = useState(false);
   const [readerPage, setReaderPage] = useState(0);
-  const chapterAbortRef = useRef(null); 
+  const chapterAbortRef = useRef(null);
 
   const [activeCategory, setActiveCategory] = useState('all');
   const [libraryView, setLibraryView] = useState(() => settings?.libraryView || 'grid');
@@ -4294,6 +4609,7 @@ const App = memo(() => {
 
   const [contextMenu, setContextMenu] = useState(null);
   const [catchUpManga, setCatchUpManga] = useState(null);
+  const [migrateManga, setMigrateManga] = useState(null);
   const [showShareCard, setShowShareCard] = useState(false);
   const [extSearch, setExtSearch] = useState('');
   const [extLang, setExtLang] = useState('en');
@@ -4334,6 +4650,7 @@ const App = memo(() => {
       setHasNextPage(d.hasNextPage || false);
     } catch (e) {
       setBrowseError(e.message);
+      setHasNextPage(false); // Stop infinite loop if request fails
     } finally {
       setBrowseLoading(false);
     }
@@ -4372,9 +4689,10 @@ const App = memo(() => {
         if (entries[0].isIntersecting && !loadingMore && hasNextPage) {
           setLoadingMore(true);
           const nextPage = browsePage + 1;
-          doSearch(query, activeSource, nextPage, true, browseFilters).finally(() => {
-            setLoadingMore(false);
+          doSearch(query, activeSource, nextPage, true, browseFilters).then(() => {
             setBrowsePage(nextPage);
+          }).finally(() => {
+            setLoadingMore(false);
           });
         }
       },
@@ -4385,13 +4703,11 @@ const App = memo(() => {
   }, [view, activeSource, hasNextPage, loadingMore, browsePage, query, doSearch, browseFilters]);
 
   const openManga = useCallback(async (manga, overrideSourceId) => {
+    if (!manga) return;
     const sourceId = overrideSourceId || manga.sourceId || activeSource?.id;
     const source = sources[sourceId] || Object.values(sources).find(s => s.id === String(sourceId));
     if (!source) {
-      removeMangaCompletely(manga.id);
-      await deleteAllChapterBlobsForManga(manga.id);
-      await refreshDownloads();
-      toast('Removed broken manga entry from local data', 'warning');
+      toast('Source extension is not installed or offline.', 'error');
       return;
     }
 
@@ -4402,92 +4718,90 @@ const App = memo(() => {
       const d = await fetchJSON(`/source/${source.id}/manga/${manga.id}`);
       if (d.error) throw new Error(d.error);
       setMangaDetail(d); addToHistory(manga, source.id, d);
-    } catch (e) { setMangaError(e.message); toast('Failed to load manga', 'error'); }
+    } catch (e) {
+      let msg = e.message;
+      try {
+        const parsed = JSON.parse(msg);
+        if (parsed.error) msg = parsed.error;
+      } catch { }
+      if (msg.toLowerCase().includes('cloudflare')) {
+        msg = 'Cloudflare bypass required. Please open this manga in your browser to solve the challenge.';
+      }
+      setMangaError(msg);
+      toast('Failed to load manga', 'error');
+    }
     finally { setMangaLoading(false); }
   }, [activeSource, sources, fetchJSON, addToHistory, removeMangaCompletely, refreshDownloads, toast]);
 
-  const openChapter = useCallback(async (chapter, overrideSourceId) => {
+  const openChapter = useCallback(async (chapter, overrideSourceId, explicitMangaId, explicitPage) => {
     if (chapterAbortRef.current) chapterAbortRef.current.abort();
     const ac = new AbortController();
     chapterAbortRef.current = ac;
 
-    setCurrentChapter(chapter); setPages([]); setReaderPage(0); setView('reader'); setPagesLoading(true);
+    const srcId = overrideSourceId || activeSource?.id || selectedManga?.sourceId;
+    const mId = explicitMangaId || mangaDetail?.id || selectedManga?.id;
+    const mKey = getMangaKey(mId, srcId);
+    
+    const existingProg = progress[mKey];
+    const defaultPage = (existingProg && existingProg.chapterId === chapter.id) ? existingProg.page : 0;
+    const startPage = explicitPage !== undefined ? explicitPage : defaultPage;
+
+    setCurrentChapter(chapter); setPages([]); setReaderPage(startPage); setView('reader'); setPagesLoading(true);
+
     try {
-      const mangaId = mangaDetail?.id;
-      const localPages = mangaId ? await loadChapterBlobs(mangaId, chapter.id) : null;
+      const localPages = mKey ? await loadChapterBlobs(mKey, chapter.id) : null;
       if (ac.signal.aborted) return;
+
       if (localPages && localPages.length > 0) {
         setPages(localPages);
         toast(`Chapter ${chapter.number} (offline)`, 'success');
       } else {
-        const srcId = overrideSourceId || activeSource?.id;
-        if (!srcId) { toast('Source not available', 'error'); setPagesLoading(false); return; }
-        const imgs = await fetchJSON(`/source/${srcId}/chapter/${chapter.id}`);
+        if (!srcId) throw new Error('Source not available');
+        const imgs = await fetchJSON(`/source/${srcId}/chapter/${chapter.id}`, { signal: ac.signal });
         if (ac.signal.aborted) return;
         setPages(Array.isArray(imgs) ? imgs : []);
         toast(`Chapter ${chapter.number} loaded`, 'success');
       }
-      updateProgress(mangaDetail?.id, chapter.id, chapter.number, 0);
-      markChapterRead(mangaDetail?.id, chapter.id, true);
+      updateProgress(mId, chapter.id, chapter.number, startPage, srcId);
     } catch (e) {
-      if (!ac.signal.aborted) toast('Failed to load chapter', 'error');
+      if (ac.signal.aborted) return;
+      toast(`Failed to load chapter: ${e.message}`, 'error');
     } finally {
       if (!ac.signal.aborted) setPagesLoading(false);
     }
-  }, [activeSource, mangaDetail, fetchJSON, updateProgress, markChapterRead, toast]);
+  }, [activeSource, progress, selectedManga, fetchJSON, updateProgress, toast]);
 
-  const fetchNextChapter = useCallback(async (afterChapterId) => {
+  const fetchNextChapter = useCallback(async (afterChapterId, signal) => {
     const idx = chapRef.current.findIndex(c => c.id === afterChapterId);
     const n = chapRef.current[idx - 1];
     if (!n) return null;
-    const srcId = activeSource?.id;
+    const srcId = activeSource?.id || selectedManga?.sourceId;
     if (!srcId) return null;
     try {
-      const imgs = await fetchJSON(`/source/${srcId}/chapter/${n.id}`);
-      markChapterRead(mangaDetail?.id, n.id, true);
+      const mId = selectedManga?.id;
+      if (mId) {
+        const mKey = getMangaKey(mId, srcId);
+        const localPages = await loadChapterBlobs(mKey, n.id);
+        if (localPages && localPages.length > 0) {
+          return { chapter: n, pages: localPages };
+        }
+      }
+      const imgs = await fetchJSON(`/source/${srcId}/chapter/${n.id}`, { signal });
       return { chapter: n, pages: Array.isArray(imgs) ? imgs : [] };
     } catch (e) {
-      toast('Failed to load next chapter automatically', 'error');
       return null;
     }
-  }, [activeSource, fetchJSON, markChapterRead, mangaDetail?.id, toast]);
+  }, [activeSource, selectedManga, fetchJSON]);
 
   const chIdx = chapRef.current.findIndex(c => c.id === currentChapter?.id);
   const hasNextCh = chIdx > 0;
   const hasPrevCh = chIdx >= 0 && chIdx < chapRef.current.length - 1;
 
-  const handleDownload = useCallback(async (chapter) => {
-    const mangaId = mangaDetail?.id;
-    try {
-      toast(`Downloading chapter ${chapter.number}...`, 'info');
-      const imgs = await fetchJSON(`/source/${activeSource.id}/chapter/${chapter.id}`);
-      const urls = Array.isArray(imgs) ? imgs : [];
-      if (!urls.length) throw new Error('No pages found');
-      const blobs = await Promise.all(urls.map(async url => {
-        const r = await fetch(url);
-        if (!r.ok) throw new Error(`Page fetch failed: ${r.status}`);
-        return { url, blob: await r.blob() };
-      }));
-      if (mangaId) {
-        await saveChapterBlobs(mangaId, chapter.id, blobs);
-        await refreshDownloads();
-      }
-      try {
-        const response = await fetch(`${CONFIG.API}/source/${activeSource.id}/chapter/${chapter.id}/download?title=${encodeURIComponent(mangaDetail?.title || 'chapter')}-${chapter.number}`);
-        if (response.ok) {
-          const blob = await response.blob();
-          const url = window.URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url; a.download = `${mangaDetail?.title || 'chapter'}-ch${chapter.number}.cbz`;
-          document.body.appendChild(a); a.click(); document.body.removeChild(a);
-          window.URL.revokeObjectURL(url);
-        }
-      } catch {  }
-      toast(`Chapter ${chapter.number} saved for offline reading`, 'success');
-    } catch (e) {
-      toast(`Download error: ${e.message}`, 'error');
-    }
-  }, [activeSource, mangaDetail, fetchJSON, refreshDownloads, toast]);
+  const handleDownload = useCallback((chapter) => {
+    if (!mangaDetail) return;
+    queueChaptersForDownload([chapter], mangaDetail.id, mangaDetail.title, activeSource?.id);
+    setOverlayHidden(false); // Show overlay when a new download starts
+  }, [mangaDetail, activeSource, queueChaptersForDownload]);
 
   const handleChapterContextMenu = useCallback((e, ch) => {
     e.preventDefault();
@@ -4497,13 +4811,13 @@ const App = memo(() => {
     const allChs = chapRef.current;
     const idx = allChs.findIndex(c => c.id === ch.id);
     const markRange = (from, to, read) => {
-      allChs.slice(from, to + 1).forEach(c => markChapterRead(mangaDetail.id, c.id, read));
+      allChs.slice(from, to + 1).forEach(c => markChapterRead(mangaDetail.id, c.id, read, activeSource?.id));
       toast(`Marked ${to - from + 1} chapter${to - from > 0 ? 's' : ''} as ${read ? 'read' : 'unread'}`, 'success');
     };
     const items = [
       {
         label: isRead ? 'Mark as Unread' : 'Mark as Read', icon: isRead ? EyeOff : Eye,
-        action: () => { markChapterRead(mangaDetail.id, ch.id, !isRead); fetchJSON(`/chapter/${ch.id}/read`, { method: 'PATCH', body: JSON.stringify({ isRead: !isRead }) }).catch(() => { }); }
+        action: () => { markChapterRead(mangaDetail.id, ch.id, !isRead, activeSource?.id); fetchJSON(`/chapter/${ch.id}/read`, { method: 'PATCH', body: JSON.stringify({ isRead: !isRead }) }).catch(() => { }); }
       },
       {
         label: 'Mark from here (above as read)', icon: Check,
@@ -4596,7 +4910,7 @@ const App = memo(() => {
   }, [normalizedExts, extTab, extLang, extSearch, showNsfw, extSort]);
 
   const filteredLibrary = useMemo(() => {
-    let list = activeCategory === 'all' ? library : library.filter(m => mangaCategories[m.id] === activeCategory);
+    let list = activeCategory === 'all' ? library : library.filter(m => mangaCategories[getMangaKey(m.id, m.sourceId)] === activeCategory);
     if (librarySearch.trim()) {
       const q = librarySearch.toLowerCase();
       list = list.filter(m => m.title.toLowerCase().includes(q) || m.author?.toLowerCase().includes(q));
@@ -4605,17 +4919,21 @@ const App = memo(() => {
     if (librarySort === 'recent') list = [...list].sort((a, b) => (b.lastRead || b.addedAt || 0) - (a.lastRead || a.addedAt || 0));
     if (librarySort === 'added') list = [...list].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
     if (librarySort === 'unread') list = [...list].sort((a, b) => {
-      const ar = progress[a.id] ? (a.totalChapters || 0) - (parseInt(progress[a.id]?.chapterNum) || 0) : (a.totalChapters || 0);
-      const br = progress[b.id] ? (b.totalChapters || 0) - (parseInt(progress[b.id]?.chapterNum) || 0) : (b.totalChapters || 0);
+      const aKey = getMangaKey(a.id, a.sourceId);
+      const bKey = getMangaKey(b.id, b.sourceId);
+      const ar = progress[aKey] ? (a.totalChapters || 0) - (parseInt(progress[aKey]?.chapterNum) || 0) : (a.totalChapters || 0);
+      const br = progress[bKey] ? (b.totalChapters || 0) - (parseInt(progress[bKey]?.chapterNum) || 0) : (b.totalChapters || 0);
       return br - ar;
     });
     if (librarySort === 'progress') list = [...list].sort((a, b) => {
-      const ap = a.totalChapters ? (parseInt(progress[a.id]?.chapterNum) || 0) / a.totalChapters : 0;
-      const bp = b.totalChapters ? (parseInt(progress[b.id]?.chapterNum) || 0) / b.totalChapters : 0;
+      const aKey = getMangaKey(a.id, a.sourceId);
+      const bKey = getMangaKey(b.id, b.sourceId);
+      const ap = a.totalChapters ? (parseInt(progress[aKey]?.chapterNum) || 0) / a.totalChapters : 0;
+      const bp = b.totalChapters ? (parseInt(progress[bKey]?.chapterNum) || 0) / b.totalChapters : 0;
       return bp - ap;
     });
     return list;
-  }, [library, activeCategory, mangaCategories, librarySearch, librarySort, progress]);
+  }, [library, activeCategory, mangaCategories, librarySearch, librarySort, progress, getMangaKey]);
   const installedSources = useMemo(() => Object.values(sources), [sources]);
   const groupedInstalledSources = useMemo(() => {
     const groups = new Map();
@@ -4698,7 +5016,8 @@ const App = memo(() => {
     const items = [
       { label: 'Open', icon: ExternalLink, action: () => openManga(manga) },
       { label: inLibrary(manga.id) ? 'Remove from Library' : 'Add to Library', icon: inLibrary(manga.id) ? Trash2 : Heart, action: () => toggleLibrary(manga, activeSource?.id) },
-      ...CATEGORIES.map(cat => ({ label: `→ ${cat.name}`, icon: cat.icon, action: () => setCategory(manga.id, cat.id) })),
+      ...categories.map(cat => ({ label: `→ ${cat.name}`, icon: CATEGORY_ICON_MAP[cat.id] || Bookmark, action: () => setCategory(manga.id, cat.id) })),
+      { label: 'Migrate Source', icon: RefreshCw, action: () => setMigrateManga(manga) },
     ];
     setContextMenu({ x: e.clientX, y: e.clientY, items });
   }, [inLibrary, openManga, toggleLibrary, setCategory, activeSource]);
@@ -4743,17 +5062,13 @@ const App = memo(() => {
 
   const [forceProceed, setForceProceed] = useState(false);
 
-  useEffect(() => {
-    if (backendOnline !== null || showErrorModal || forceProceed) return;
-    const timer = setTimeout(() => setForceProceed(true), 650);
-    return () => clearTimeout(timer);
-  }, [backendOnline, showErrorModal, forceProceed]);
+  // Removed premature forceProceed timeout to allow StartupScreen to display until servers are ready
 
-  if (!forceProceed && backendOnline === null && !showErrorModal) {
+  if (!forceProceed && (backendOnline === null || !suwayomiReady) && !showErrorModal) {
     return (
-      <StartupScreen 
-        onProceed={() => setForceProceed(true)} 
-        onRetry={() => { window.electronAPI?.restartServices?.(); checkHealth(); }} 
+      <StartupScreen
+        onProceed={() => setForceProceed(true)}
+        onRetry={() => { window.electronAPI?.restartServices?.(); checkHealth(); }}
       />
     );
   }
@@ -4765,6 +5080,7 @@ const App = memo(() => {
         <p style={{ color: 'var(--muted)', fontSize: 13 }}>Loading chapter...</p>
       </div>
     );
+    const mKeyForReader = getMangaKey(mangaDetail?.id || selectedManga?.id, mangaDetail?.sourceId || selectedManga?.sourceId || activeSource?.id);
     return (
       <NewReader
         pages={pages} currentChapter={currentChapter} mangaTitle={mangaDetail?.title}
@@ -4774,9 +5090,9 @@ const App = memo(() => {
         fetchNextChapter={fetchNextChapter}
         hasNext={hasNextCh} hasPrev={hasPrevCh}
         onPageChange={setReaderPage}
-        initialPage={progress[mangaDetail?.id]?.page || 0}
-        mangaId={mangaDetail?.id}
-        mangaCover={mangaDetail?.cover}
+        initialPage={progress[mKeyForReader]?.page || 0}
+        mangaId={mKeyForReader}
+        mangaCover={mangaDetail?.cover || selectedManga?.cover}
       />
     );
   }
@@ -4989,9 +5305,9 @@ const App = memo(() => {
                 {/* QUICK SETTINGS BAR ON MANGA DETAIL */}
                 <div style={{ display: 'flex', background: 'var(--card2)', borderRadius: 99, border: '1px solid var(--border)', overflow: 'hidden', marginRight: 8 }}>
                   {[
-                    {id: 'scroll', icon: '↕️', title: 'Scroll Mode'},
-                    {id: 'paged', icon: '📖', title: 'Paged Mode'},
-                    {id: 'webtoon', icon: '📜', title: 'Strip Mode'}
+                    { id: 'scroll', icon: '↕️', title: 'Scroll Mode' },
+                    { id: 'paged', icon: '📖', title: 'Paged Mode' },
+                    { id: 'webtoon', icon: '📜', title: 'Strip Mode' }
                   ].map(m => (
                     <button key={m.id} title={m.title} onClick={() => updateSetting('readerMode', m.id)}
                       style={{
@@ -5102,7 +5418,21 @@ const App = memo(() => {
                 {mangaLoading ? (
                   <MangaDetailSkeleton />
                 ) : mangaError ? (
-                  <EmptyState icon={AlertTriangle} title="Failed to load" sub={mangaError} action={<Btn onClick={() => openManga(selectedManga)}>Retry</Btn>} />
+                  <EmptyState
+                    icon={AlertTriangle}
+                    title="Failed to load"
+                    sub={mangaError}
+                    action={
+                      <div style={{ display: 'flex', gap: 10 }}>
+                        <Btn onClick={() => openManga(selectedManga)}>Retry</Btn>
+                        {mangaError.toLowerCase().includes('cloudflare') && (
+                          <Btn variant="outline" onClick={() => window.electronAPI.openExternal(mangaDetail?.url || selectedManga?.url)}>
+                            Solve in Browser
+                          </Btn>
+                        )}
+                      </div>
+                    }
+                  />
                 ) : mangaDetail ? (
                   <>
                     <div style={{ display: 'flex', gap: 28, marginBottom: 32, flexWrap: 'wrap' }}>
@@ -5132,535 +5462,650 @@ const App = memo(() => {
                           </div>
                         )}
                         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-                          {mangaDetail.chapters?.length > 0 && (
+                          {mangaDetail.chapters?.length > 0 ? (
                             <Btn onClick={() => {
-                              const last = progress[mangaDetail.id];
-                              const ch = last ? mangaDetail.chapters.find(c => c.id === last.chapterId) || mangaDetail.chapters[mangaDetail.chapters.length - 1] : mangaDetail.chapters[mangaDetail.chapters.length - 1];
-                              openChapter(ch);
-                            }} size="lg" icon={Play}>{progress[mangaDetail.id] ? 'Continue' : 'Start Reading'}</Btn>
-                          )}
-                          {mangaDetail?.chapters?.length > 10 && (
-                            <Btn variant="outline" size="lg" icon={Zap}
-                              onClick={() => setCatchUpManga({ ...mangaDetail, chapters: (mangaDetail.chapters || []).filter(ch => !ch.read && !(readChapters[mangaDetail.id]?.includes(String(ch.id)))) })}>
-                              Catch Up
-                            </Btn>
-                          )}
-                          <Btn variant={inLibrary(mangaDetail.id) ? 'default' : 'outline'} onClick={() => toggleLibrary(mangaDetail, activeSource?.id)} icon={Heart}>
-                            {inLibrary(mangaDetail.id) ? 'In Library' : 'Add to Library'}
+                              const mKey = getMangaKey(mangaDetail.id, activeSource?.id);
+                              const last = progress[mKey];
+                              let ch = last ? mangaDetail.chapters.find(c => c.id === last.chapterId) || mangaDetail.chapters[mangaDetail.chapters.length - 1] : mangaDetail.chapters[mangaDetail.chapters.length - 1];
+
+                              let startPage = last?.page || 0;
+                              const isFullyRead = readChapters[mKey]?.includes(String(ch.id)) || ch.read;
+
+                              if (isFullyRead) {
+                                const chIdx = mangaDetail.chapters.findIndex(c => c.id === ch.id);
+                                if (chIdx > 0) {
+                                  ch = mangaDetail.chapters[chIdx - 1];
+                                  startPage = 0;
+                                }
+                              }
+                              openChapter(ch, null, mangaDetail.id, startPage);
+                            }} size="lg" icon={Play}>{progress[getMangaKey(mangaDetail.id, activeSource?.id)] ? 'Continue' : 'Start Reading'}</Btn>
+                          ) : null}
+                        {mangaDetail?.chapters?.length > 10 && (
+                          <Btn variant="outline" size="lg" icon={Zap}
+                            onClick={() => {
+                              const mKey = getMangaKey(mangaDetail.id, activeSource?.id);
+                              setCatchUpManga({ ...mangaDetail, chapters: (mangaDetail.chapters || []).filter(ch => !ch.read && !(readChapters[mKey]?.includes(String(ch.id)))) });
+                            }}>
+                            Catch Up
                           </Btn>
-                        </div>
-
-                        {mangaDetail.chapters?.length > 0 && (() => {
-                          const prog = progress[mangaDetail.id];
-                          const chapsDone = prog ? (parseInt(prog.chapterNum) || 0) : 0;
-                          const total = mangaDetail.totalChapters || mangaDetail.chapters.length;
-                          const chapsLeft = Math.max(0, total - chapsDone);
-                          const minsLeft = Math.round(chapsLeft * 20);
-                          const totalHrs = Math.round(total * 20 / 60 * 10) / 10;
-                          if (!chapsLeft) return null;
-                          return (
-                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 14 }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 12px', borderRadius: 99, background: 'var(--card)', border: '1px solid var(--border)', fontSize: 12 }}>
-                                <Clock size={12} style={{ color: 'var(--accent)' }} />
-                                <span style={{ color: 'var(--text-dim)' }}>{minsLeft >= 60 ? `~${Math.round(minsLeft / 60)}h` : `~${minsLeft}m`} left</span>
-                              </div>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 12px', borderRadius: 99, background: 'var(--card)', border: '1px solid var(--border)', fontSize: 12 }}>
-                                <BookOpen size={12} style={{ color: 'var(--muted)' }} />
-                                <span style={{ color: 'var(--text-dim)' }}>~{totalHrs}h total</span>
-                              </div>
-                              {chapsDone > 0 && <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 12px', borderRadius: 99, background: 'var(--card)', border: '1px solid var(--border)', fontSize: 12 }}>
-                                <Check size={12} style={{ color: 'var(--green)' }} />
-                                <span style={{ color: 'var(--text-dim)' }}>{chapsDone} read</span>
-                              </div>}
-                            </div>
-                          );
-                        })()}
-                      </div>
-                    </div>
-
-                    <MangaNotes mangaId={mangaDetail?.id} mangaTitle={mangaDetail?.title} />
-                    {mangaDetail.description && (
-                      <div style={{ marginBottom: 24, padding: '18px 22px', background: 'var(--card)', borderRadius: 16, border: '1.5px solid var(--border)', position: 'relative', overflow: 'hidden' }}>
-                        <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: 'linear-gradient(90deg,var(--accent),transparent)' }} />
-                        <p style={{ color: 'var(--text-dim)', fontSize: 14, lineHeight: 1.8 }}>{mangaDetail.description}</p>
-                      </div>
-                    )}
-
-                    {readingTime[mangaDetail.id] > 0 && (
-                      <div style={{ marginBottom: 20, padding: '12px 16px', background: 'var(--card)', borderRadius: 12, border: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <Clock size={16} style={{ color: 'var(--accent)', flexShrink: 0 }} />
-                        <span style={{ fontSize: 13, color: 'var(--text-dim)' }}>
-                          Reading time: <strong>{Math.floor(readingTime[mangaDetail.id] / 3600)}h {Math.floor((readingTime[mangaDetail.id] % 3600) / 60)}m</strong>
-                        </span>
-                      </div>
-                    )}
-
-                    <div>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
-                        <h3 style={{ fontFamily: "'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight: 700, fontSize: 18, display: 'flex', alignItems: 'center', gap: 8 }}>
-                          Chapters <Badge variant="outline" size="sm">{filteredChapters.length}</Badge>
-                        </h3>
-                        <div style={{ display: 'flex', gap: 8 }}>
-                          <Btn variant="outline" size="sm" onClick={() => {
-                            const unread = mangaDetail.chapters.filter(ch => !ch.read && !(readChapters[mangaDetail.id]?.includes(String(ch.id))));
-                            if (!unread.length) { toast('No unread chapters to download', 'warning'); return; }
-                            queueChaptersForDownload(unread, mangaDetail.id, mangaDetail.title, activeSource?.id);
-                          }} icon={EyeOff} title="Download unread chapters only">Unread</Btn>
-                          <Btn variant="outline" size="sm" onClick={() => queueChaptersForDownload(mangaDetail.chapters, mangaDetail.id, mangaDetail.title, activeSource?.id)} icon={Archive}>All</Btn>
-                          <Btn variant="ghost" size="sm" onClick={() => setChapterSort(s => s === 'desc' ? 'asc' : 'desc')} icon={chapterSort === 'desc' ? ChevronDown : ChevronUp}>
-                            {chapterSort === 'desc' ? 'Newest' : 'Oldest'}
-                          </Btn>
-                        </div>
+                        )}
+                        <Btn variant={inLibrary(mangaDetail.id) ? 'default' : 'outline'} onClick={() => toggleLibrary(mangaDetail, activeSource?.id)} icon={Heart}>
+                          {inLibrary(mangaDetail.id) ? 'In Library' : 'Add to Library'}
+                        </Btn>
+                        <Btn variant="outline" onClick={() => setMigrateManga(mangaDetail)} icon={RefreshCw} title="Find this on other sources">
+                          Migrate
+                        </Btn>
                       </div>
 
-                      {mangaDetail.chapters.length > 15 && (
-                        <div style={{ position: 'relative', marginBottom: 14 }}>
-                          <Search size={15} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)', pointerEvents: 'none' }} />
-                          <input placeholder="Search chapters..." value={chapSearch} onChange={e => setChapSearch(e.target.value)}
-                            style={{ width: '100%', background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 12, padding: '11px 14px 11px 40px', color: 'var(--text)', fontSize: 13, outline: 'none', fontFamily: 'system-ui,-apple-system,Segoe UI,sans-serif' }}
-                            onFocus={e => e.target.style.borderColor = 'var(--accent)'} onBlur={e => e.target.style.borderColor = 'var(--border)'} />
+                      {inLibrary(mangaDetail.id) && (
+                        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 12 }}>
+                          {categories.map(cat => (
+                            <button key={cat.id} onClick={() => setCategory(mangaDetail.id, cat.id, activeSource?.id)}
+                              style={{
+                                padding: '5px 12px', borderRadius: 20, fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                                background: mangaCategories[getMangaKey(mangaDetail.id, activeSource?.id)] === cat.id ? cat.color : 'var(--card)',
+                                color: mangaCategories[getMangaKey(mangaDetail.id, activeSource?.id)] === cat.id ? '#fff' : 'var(--text-dim)',
+                                border: `1px solid ${mangaCategories[getMangaKey(mangaDetail.id, activeSource?.id)] === cat.id ? 'transparent' : 'var(--border)'}`,
+                                transition: 'all 0.2s'
+                              }}>
+                              {cat.name}
+                            </button>
+                          ))}
                         </div>
                       )}
 
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                        {filteredChapters.map((ch, i) => {
-                          const isCurrent = progress[mangaDetail.id]?.chapterId === ch.id;
-                          const isRead = ch.read || !!(readChapters[mangaDetail.id]?.includes(String(ch.id)));
-                          const isDownloaded = downloadedKeys.has(`${mangaDetail.id}__${ch.id}`);
+                      {mangaDetail.chapters?.length > 0 && (() => {
+                        const mKey = getMangaKey(mangaDetail.id, activeSource?.id);
+                        const prog = progress[mKey];
+                        const chapsDone = prog ? (parseInt(prog.chapterNum) || 0) : 0;
+                        const total = mangaDetail.totalChapters || mangaDetail.chapters.length;
+                        const chapsLeft = Math.max(0, total - chapsDone);
+                        const minsLeft = Math.round(chapsLeft * 20);
+                        const totalHrs = Math.round(total * 20 / 60 * 10) / 10;
+                        if (!chapsLeft) return null;
+                        return (
+                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 14 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 12px', borderRadius: 99, background: 'var(--card)', border: '1px solid var(--border)', fontSize: 12 }}>
+                              <Clock size={12} style={{ color: 'var(--accent)' }} />
+                              <span style={{ color: 'var(--text-dim)' }}>{minsLeft >= 60 ? `~${Math.round(minsLeft / 60)}h` : `~${minsLeft}m`} left</span>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 12px', borderRadius: 99, background: 'var(--card)', border: '1px solid var(--border)', fontSize: 12 }}>
+                              <BookOpen size={12} style={{ color: 'var(--muted)' }} />
+                              <span style={{ color: 'var(--text-dim)' }}>~{totalHrs}h total</span>
+                            </div>
+                            {chapsDone > 0 && <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '5px 12px', borderRadius: 99, background: 'var(--card)', border: '1px solid var(--border)', fontSize: 12 }}>
+                              <Check size={12} style={{ color: 'var(--green)' }} />
+                              <span style={{ color: 'var(--text-dim)' }}>{chapsDone} read</span>
+                            </div>}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  </div>
+
+                <MangaNotes mangaId={mangaDetail?.id} mangaTitle={mangaDetail?.title} />
+                {mangaDetail.description && (
+                  <div style={{ marginBottom: 24, padding: '18px 22px', background: 'var(--card)', borderRadius: 16, border: '1.5px solid var(--border)', position: 'relative', overflow: 'hidden' }}>
+                    <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 2, background: 'linear-gradient(90deg,var(--accent),transparent)' }} />
+                    <p style={{ color: 'var(--text-dim)', fontSize: 14, lineHeight: 1.8 }}>{mangaDetail.description}</p>
+                  </div>
+                )}
+
+                {readingTime[getMangaKey(mangaDetail.id, activeSource?.id)] > 0 && (
+                  <div style={{ marginBottom: 20, padding: '12px 16px', background: 'var(--card)', borderRadius: 12, border: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <Clock size={16} style={{ color: 'var(--accent)', flexShrink: 0 }} />
+                    <span style={{ fontSize: 13, color: 'var(--text-dim)' }}>
+                      Reading time: <strong>{Math.floor(readingTime[getMangaKey(mangaDetail.id, activeSource?.id)] / 3600)}h {Math.floor((readingTime[getMangaKey(mangaDetail.id, activeSource?.id)] % 3600) / 60)}m</strong>
+                    </span>
+                  </div>
+                )}
+
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
+                    <h3 style={{ fontFamily: "'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight: 700, fontSize: 18, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      Chapters <Badge variant="outline" size="sm">{filteredChapters.length}</Badge>
+                    </h3>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <Btn variant="outline" size="sm" onClick={() => {
+                        const mKey = getMangaKey(mangaDetail.id, activeSource?.id);
+                        const unread = mangaDetail.chapters.filter(ch => !ch.read && !(readChapters[mKey]?.includes(String(ch.id))));
+                        if (!unread.length) { toast('No unread chapters to download', 'warning'); return; }
+                        queueChaptersForDownload(unread, mangaDetail.id, mangaDetail.title, activeSource?.id);
+                      }} icon={EyeOff} title="Download unread chapters only">Unread</Btn>
+                      <Btn variant="outline" size="sm" onClick={() => queueChaptersForDownload(mangaDetail.chapters, mangaDetail.id, mangaDetail.title, activeSource?.id)} icon={Archive}>All</Btn>
+                      <Btn variant="ghost" size="sm" onClick={() => setChapterSort(s => s === 'desc' ? 'asc' : 'desc')} icon={chapterSort === 'desc' ? ChevronDown : ChevronUp}>
+                        {chapterSort === 'desc' ? 'Newest' : 'Oldest'}
+                      </Btn>
+                    </div>
+                  </div>
+
+                  {mangaDetail.chapters.length > 15 && (
+                    <div style={{ position: 'relative', marginBottom: 14 }}>
+                      <Search size={15} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)', pointerEvents: 'none' }} />
+                      <input placeholder="Search chapters..." value={chapSearch} onChange={e => setChapSearch(e.target.value)}
+                        style={{ width: '100%', background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 12, padding: '11px 14px 11px 40px', color: 'var(--text)', fontSize: 13, outline: 'none', fontFamily: 'system-ui,-apple-system,Segoe UI,sans-serif' }}
+                        onFocus={e => e.target.style.borderColor = 'var(--accent)'} onBlur={e => e.target.style.borderColor = 'var(--border)'} />
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {filteredChapters.map((ch, i) => {
+                      const mKey = getMangaKey(mangaDetail.id, activeSource?.id);
+                      const isCurrent = progress[mKey]?.chapterId === ch.id;
+                      const isRead = ch.read || !!(readChapters[mKey]?.includes(String(ch.id)));
+                      const isDownloaded = downloadedKeys.has(`${mangaDetail.id}__${ch.id}`);
+                      return (
+                        <div key={ch.id}
+                          className={`anim-fadeInUp delay-${Math.min(i, 14)}`}
+                          onClick={() => openChapter(ch)}
+                          onContextMenu={(e) => handleChapterContextMenu(e, ch)}
+                          style={{
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                            padding: '13px 16px', borderRadius: 12, cursor: 'pointer',
+                            background: isCurrent ? 'rgba(249,115,22,0.1)' : isRead ? 'rgba(34,197,94,0.04)' : 'var(--card)',
+                            border: `1.5px solid ${isCurrent ? 'var(--accent)' : isDownloaded ? 'rgba(59,130,246,0.5)' : isRead ? 'rgba(34,197,94,0.2)' : 'var(--border)'}`,
+                            transition: 'all 0.2s', position: 'relative', overflow: 'hidden',
+                          }}
+                          onMouseEnter={e => { if (!isCurrent) { e.currentTarget.style.borderColor = isDownloaded ? 'rgba(59,130,246,0.85)' : 'var(--border-hover)'; e.currentTarget.style.transform = 'translateX(3px)'; } }}
+                          onMouseLeave={e => { e.currentTarget.style.borderColor = isCurrent ? 'var(--accent)' : isDownloaded ? 'rgba(59,130,246,0.5)' : isRead ? 'rgba(34,197,94,0.2)' : 'var(--border)'; e.currentTarget.style.transform = ''; }}>
+                          {isCurrent && <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: 'var(--accent)' }} />}
+                          {isDownloaded && !isCurrent && <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: '#3b82f6', boxShadow: '0 0 8px #3b82f680' }} />}
+                          <div style={{ flex: 1, minWidth: 0, marginLeft: (isCurrent || isDownloaded) ? 8 : 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                              <p style={{ fontWeight: 600, fontSize: 14, color: isCurrent ? 'var(--accent)' : isRead ? 'var(--muted)' : 'var(--text)', textDecoration: isRead ? 'line-through' : 'none', opacity: isRead ? 0.6 : 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                Ch. {ch.number}{ch.title && ch.title !== `Chapter ${ch.number}` && ` — ${ch.title}`}
+                              </p>
+                              {isRead && <Check size={13} style={{ color: '#4ade80', flexShrink: 0 }} />}
+                              {isDownloaded && <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', color: '#60a5fa', background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.25)', borderRadius: 4, padding: '1px 5px', flexShrink: 0 }}>offline</span>}
+                            </div>
+                            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+                              {ch.date && <span style={{ fontSize: 11, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 3 }}><Calendar size={10} />{ch.date}</span>}
+                              {ch.group && <span style={{ fontSize: 11, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 180 }}>{ch.group}</span>}
+                            </div>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            {isDownloaded && (
+                              <Btn variant="outline" size="icon" onClick={e => { e.stopPropagation(); deleteChapterBlobs(getMangaKey(mangaDetail.id, activeSource?.id), ch.id).then(refreshDownloads); toast('Offline copy removed', 'warning'); }} style={{ padding: 4, borderRadius: 8, color: '#60a5fa', borderColor: 'rgba(59,130,246,0.3)' }} title="Remove offline copy">
+                                <Trash2 size={13} />
+                              </Btn>
+                            )}
+                            <Btn variant="outline" size="icon" onClick={e => { e.stopPropagation(); handleDownload(ch); }} style={{ padding: 4, borderRadius: 8, color: isDownloaded ? '#60a5fa' : 'var(--muted)', borderColor: isDownloaded ? 'rgba(59,130,246,0.3)' : 'var(--border)' }} title={isDownloaded ? 'Re-download' : 'Save for offline'}>
+                              <Download size={14} />
+                            </Btn>
+                            <ChevronRight size={16} style={{ color: isCurrent ? 'var(--accent)' : 'var(--muted)' }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </>
+                ) : null}
+            </div>
+            </div>
+          )}
+
+        {view !== 'manga' && <>
+          {tab === 'home' && (
+            <HomeTab
+              history={history} library={library} progress={progress}
+              sources={sources} updates={updates}
+              getMangaKey={getMangaKey}
+              onSelect={openManga}
+              onContinue={async m => {
+                const p = progress[getMangaKey(m.id, m.sourceId)];
+                if (p?.chapterId) {
+                  const source = sources[m.sourceId] || Object.values(sources).find(s => s.id === String(m.sourceId));
+                  if (source) setActiveSource(source);
+                  openManga(m); // Start fetching manga details
+
+                  // We need to fetch the chapter list to determine if we should jump to the next chapter
+                  let chId = p.chapterId;
+                  let page = p.page;
+                  try {
+                    const res = await fetchJSON(`/source/${m.sourceId}/manga/${m.id}`);
+                    if (res && res.chapters) {
+                      const isFullyRead = readChapters[getMangaKey(m.id, m.sourceId)]?.includes(String(chId));
+                      if (isFullyRead) {
+                        const chIdx = res.chapters.findIndex(c => c.id === chId);
+                        if (chIdx > 0) {
+                          chId = res.chapters[chIdx - 1].id;
+                          page = 0;
+                        }
+                      }
+                    }
+                  } catch { }
+
+                  openChapter({ id: chId, number: p.chapterNum }, m.sourceId, m.id, page);
+                } else {
+                  openManga(m);
+                }
+              }}
+              onSwitchTab={switchTab}
+            />
+          )}
+          {tab === 'recommendations' && (
+            <DiscoverTab sources={sources} history={history} library={library} progress={progress} onSelect={openManga} onSwitchTab={switchTab} />
+          )}
+          {tab === 'browse' && (
+            <div className="page-transition">
+              {view === 'tabs' ? (
+                groupedInstalledSources.length === 0 ? (
+                  <EmptyState icon={Globe} title="No sources installed" sub="Install extensions to start browsing" action={<Btn onClick={() => switchTab('extensions')}>Browse Extensions <ArrowRight size={16} /></Btn>} />
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(170px,1fr))', gap: 18 }}>
+                    {groupedInstalledSources.map((src, i) => (
+                      <button key={src.id} className={`card-hover anim-fadeInUp delay-${Math.min(i, 10)}`} onClick={() => enterSource(src)} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '24px 16px', background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 20, cursor: 'pointer', gap: 14, textAlign: 'center', position: 'relative', overflow: 'hidden' }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border-hover)'; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; }}>
+                        <div style={{ width: 60, height: 60, background: 'var(--card2)', borderRadius: 18, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1.5px solid var(--border)' }}>
+                          {src.icon ? <img src={src.icon} style={{ width: '100%', height: '100%', objectFit: 'contain', padding: 10 }} onError={e => e.target.style.display = 'none'} alt="" loading="lazy" /> : <Globe size={26} style={{ color: 'var(--muted)' }} />}
+                        </div>
+                        <div>
+                          <p style={{ fontFamily: "'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight: 700, fontSize: 15, color: 'var(--text)', marginBottom: 6 }}>{src.name}</p>
+                          {src.variantCount > 1
+                            ? <Badge variant="outline" size="sm">{`${src.variantCount} langs • ${src.lang}`}</Badge>
+                            : src.lang && <Badge variant="outline" size="sm">{src.lang}</Badge>}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )
+              ) : view === 'source' ? (
+                <>
+                  {showFilterBar && (
+                    <BrowseFilterBar
+                      filters={browseFilters}
+                      onChange={handleFilterChange}
+                      onClear={handleFilterClear}
+                      activeCount={activeFilterCount}
+                    />
+                  )}
+
+                  {browseLoading && results.length === 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '100px 24px', gap: 20 }}>
+                      <Spin size={40} /><p style={{ fontSize: 12, color: 'var(--muted)' }}>{query ? 'Searching...' : 'Loading...'}</p>
+                    </div>
+                  ) : browseError ? (
+                    <EmptyState icon={AlertTriangle} title={browseError} action={<Btn onClick={() => doSearch(query, activeSource, browsePage, false, browseFilters)}>Retry</Btn>} />
+                  ) : (
+                    <>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 18 }}>
+                        {results.map((m, i) => <MangaCard key={getMangaKey(m.id, m.sourceId)} manga={m} onClick={openManga} index={i} onContextMenu={handleMangaContextMenu} />)}
+                      </div>
+                      {results.length === 0 && !browseLoading && (
+                        <EmptyState icon={Search} title="No results" sub="Try adjusting your filters or search query" compact
+                          action={activeFilterCount > 0 && <Btn variant="outline" size="sm" onClick={handleFilterClear}><X size={14} /> Clear Filters</Btn>}
+                        />
+                      )}
+                      {hasNextPage && <div ref={sentinelRef} style={{ height: 20, margin: '20px 0' }} />}
+                      {loadingMore && (
+                        <div style={{ display: 'flex', justifyContent: 'center', padding: '20px' }}>
+                          <Spin size={24} />
+                        </div>
+                      )}
+                    </>
+                  )}
+                </>
+              ) : null}
+            </div>
+          )}
+
+          {tab === 'extensions' && (
+            <div className="page-transition">
+              <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
+                <div style={{ position: 'relative', flex: 1, minWidth: 220 }}>
+                  <Search size={15} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)', pointerEvents: 'none' }} />
+                  <input placeholder="Search extensions by name..." value={extSearch} onChange={e => setExtSearch(e.target.value)} style={{ width: '100%', background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 12, padding: '11px 14px 11px 40px', color: 'var(--text)', fontSize: 13, outline: 'none' }} onFocus={e => e.target.style.borderColor = 'var(--accent)'} onBlur={e => e.target.style.borderColor = 'var(--border)'} />
+                </div>
+                <select value={extLang} onChange={e => setExtLang(e.target.value)} style={{ background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 12, padding: '11px 14px', color: 'var(--text)', fontSize: 13, outline: 'none', cursor: 'pointer', minWidth: 130 }}>
+                  {LANGUAGES.map(l => <option key={l.value} value={l.value}>{l.label}</option>)}
+                </select>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 12, padding: '0 12px' }}>
+                  <span style={{ fontSize: 13, color: 'var(--text-dim)' }}>NSFW</span>
+                  <button onClick={() => setShowNsfw(prev => !prev)} style={{ width: 40, height: 22, borderRadius: 11, background: showNsfw ? 'var(--accent)' : 'rgba(255,255,255,0.15)', border: 'none', cursor: 'pointer', position: 'relative', transition: 'background 0.2s' }}>
+                    <div style={{ position: 'absolute', top: 2, left: showNsfw ? 20 : 2, width: 18, height: 18, borderRadius: '50%', background: '#fff', transition: 'left 0.2s', boxShadow: '0 1px 4px rgba(0,0,0,0.3)' }} />
+                  </button>
+                </div>
+                <div style={{ display: 'flex', background: 'var(--card)', borderRadius: 12, border: '1.5px solid var(--border)', overflow: 'hidden' }}>
+                  {[['all', 'All'], ['installed', 'Installed']].map(([v, l]) => (
+                    <button key={v} onClick={() => setExtTab(v)} style={{ padding: '11px 18px', border: 'none', background: extTab === v ? 'var(--accent)' : 'transparent', color: extTab === v ? '#fff' : 'var(--muted)', fontWeight: 600, fontSize: 13, cursor: 'pointer', transition: 'all 0.2s' }}>{l}</button>
+                  ))}
+                </div>
+                <select value={extSort} onChange={e => setExtSort(e.target.value)} style={{ background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 12, padding: '11px 14px', color: 'var(--text)', fontSize: 13, outline: 'none', cursor: 'pointer', minWidth: 140 }}>
+                  <option value="name">Sort by Name</option>
+                  <option value="version">Sort by Version</option>
+                  <option value="installed">Installed First</option>
+                </select>
+                <Btn variant="outline" onClick={() => { fetchExtensions(); fetchSources(); }}>
+                  <RefreshCw size={15} /> Refresh
+                </Btn>
+              </div>
+
+              {filteredExts.length === 0 ? (
+                <EmptyState icon={Puzzle} title="No extensions found" sub="Try adjusting your filters" />
+              ) : (
+                <>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    {filteredExts.slice(0, extDisplayCount).map((ext, i) => (
+                      <div key={ext.pkgName} className={`anim-fadeInUp delay-${Math.min(i, 10)}`}>
+                        <ExtCard ext={ext} onInstall={installExt} onUninstall={uninstallExt} onUpdate={updateExt} installing={installing} />
+                      </div>
+                    ))}
+                  </div>
+                  {extDisplayCount < filteredExts.length && <div ref={extSentinelRef} style={{ height: 20, margin: '20px 0' }} />}
+                </>
+              )}
+            </div>
+          )}
+
+          {tab === 'library' && (
+            <div className="anim-fadeIn">
+              <DuplicateBanner library={library} onRemove={(id, sid) => { const m = library.find(x => x.id === id && x.sourceId === sid); if (m) toggleLibrary(m, sid); }} />
+              <StatsStrip library={library} history={history} progress={progress} readChapters={readChapters} />
+              <div style={{ display: 'flex', gap: 8, marginBottom: 16, overflowX: 'auto', paddingBottom: 4 }}>
+                <button onClick={() => setActiveCategory('all')} style={{ padding: '9px 18px', borderRadius: 20, border: 'none', background: activeCategory === 'all' ? 'var(--accent)' : 'var(--card)', color: activeCategory === 'all' ? '#fff' : 'var(--text-dim)', fontWeight: 600, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', boxShadow: activeCategory === 'all' ? '0 4px 16px rgba(249,115,22,0.3)' : 'none', transition: 'all 0.2s' }}>All ({library.length})</button>
+                {categories.map(cat => {
+                  const count = library.filter(m => mangaCategories[getMangaKey(m.id, m.sourceId)] === cat.id).length;
+                  return <button key={cat.id} onClick={() => setActiveCategory(cat.id)} style={{ padding: '9px 18px', borderRadius: 20, border: 'none', background: activeCategory === cat.id ? cat.color : 'var(--card)', color: activeCategory === cat.id ? '#fff' : 'var(--text-dim)', fontWeight: 600, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', opacity: count === 0 ? 0.5 : 1, boxShadow: activeCategory === cat.id ? `0 4px 16px ${cat.color}40` : 'none', transition: 'all 0.2s' }}>{cat.name} ({count})</button>;
+                })}
+              </div>
+
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 18, flexWrap: 'wrap' }}>
+                <div style={{ position: 'relative', flex: '1 1 200px', minWidth: 180 }}>
+                  <Search size={14} style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)', pointerEvents: 'none' }} />
+                  <input placeholder="Search library..." value={librarySearch}
+                    onChange={e => setLibrarySearch(e.target.value)}
+                    style={{ width: '100%', background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 10, padding: '9px 36px 9px 38px', color: 'var(--text)', fontSize: 13, outline: 'none', transition: 'border-color 0.2s' }}
+                    onFocus={e => e.target.style.borderColor = 'var(--accent)'}
+                    onBlur={e => e.target.style.borderColor = 'var(--border)'} />
+                  {librarySearch && <button onClick={() => setLibrarySearch('')} style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)', padding: 4 }}><X size={13} /></button>}
+                </div>
+
+                <div style={{ position: 'relative', flexShrink: 0 }}>
+                  <select value={librarySort} onChange={e => setLibrarySort(e.target.value)}
+                    style={{ appearance: 'none', WebkitAppearance: 'none', background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 10, padding: '9px 32px 9px 14px', color: 'var(--text)', fontSize: 12, fontWeight: 600, cursor: 'pointer', outline: 'none', transition: 'border-color .2s' }}
+                    onFocus={e => e.target.style.borderColor = 'var(--accent)'}
+                    onBlur={e => e.target.style.borderColor = 'var(--border)'}>
+                    <option value="recent">Last Read</option>
+                    <option value="added">Date Added</option>
+                    <option value="alpha">A → Z</option>
+                    <option value="unread">Most Unread</option>
+                    <option value="progress">Most Progress</option>
+                  </select>
+                  <ChevronDown size={13} style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)', pointerEvents: 'none' }} />
+                </div>
+
+                <Btn variant={bulkMode ? 'default' : 'ghost'} size="sm"
+                  onClick={() => { setBulkMode(m => !m); setBulkSelected(new Set()); }}>
+                  {bulkMode ? <><Check size={13} /> {bulkSelected.size > 0 ? `${bulkSelected.size} selected` : 'Select'}</> : 'Select'}
+                </Btn>
+
+                {bulkMode && bulkSelected.size > 0 && (
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <Btn variant="outline" size="sm" onClick={() => {
+                      bulkSelected.forEach(mKey => {
+                        const m = library.find(x => getMangaKey(x.id, x.sourceId) === mKey);
+                        if (m) toggleLibrary(m, m.sourceId);
+                      });
+                      setBulkSelected(new Set()); setBulkMode(false);
+                      toast(`Removed ${bulkSelected.size} manga`, 'success');
+                    }}><Trash2 size={13} /> Remove</Btn>
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: 4, marginLeft: 'auto' }}>
+                  {[['grid', <LayoutGrid size={16} />], ['list', <List size={16} />], ['compact', <Columns size={16} />], ['shelf', <BookOpen size={16} />]].map(([m, icon]) => (
+                    <Btn key={m} variant={libraryView === m ? 'default' : 'ghost'} size="icon"
+                      title={m === 'shelf' ? 'Bookshelf view' : m === 'compact' ? 'Compact view' : m === 'list' ? 'List view' : 'Grid view'}
+                      onClick={() => { setLibraryView(m); updateSetting('libraryView', m); }}>{icon}</Btn>
+                  ))}
+                </div>
+              </div>
+
+              {filteredLibrary.length === 0 ? (
+                librarySearch
+                  ? <EmptyState icon={Search} title={`No results for "${librarySearch}"`} sub="Try a different search term" compact action={<Btn variant="outline" size="sm" onClick={() => setLibrarySearch('')}><X size={14} /> Clear</Btn>} />
+                  : <EmptyState icon={Library} title={activeCategory === 'all' ? "Your library is empty" : `No manga in ${categories.find(c => c.id === activeCategory)?.name}`} sub={activeCategory === 'all' ? "Add manga from Browse to start" : "Move manga to this category from context menu"} action={activeCategory === 'all' && <Btn onClick={() => switchTab('browse')}>Browse Manga <ArrowRight size={16} /></Btn>} />
+              ) : libraryView === 'list' ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {filteredLibrary.map((m, i) => (
+                    <div key={getMangaKey(m.id, m.sourceId)} style={{ display: 'flex', alignItems: 'center' }}>
+                      {bulkMode && (
+                        <div style={{ paddingRight: 12 }}>
+                          <input type="checkbox" checked={bulkSelected.has(getMangaKey(m.id, m.sourceId))} onChange={e => {
+                            const s = new Set(bulkSelected);
+                            const mKey = getMangaKey(m.id, m.sourceId);
+                            e.target.checked ? s.add(mKey) : s.delete(mKey);
+                            setBulkSelected(s);
+                          }} style={{ width: 16, height: 16, accentColor: 'var(--accent)' }} />
+                        </div>
+                      )}
+                      <div style={{ flex: 1 }}>
+                        <MangaListCard manga={m} onClick={bulkMode ? () => { } : openManga} index={i} category={mangaCategories[getMangaKey(m.id, m.sourceId)]} progress={progress[getMangaKey(m.id, m.sourceId)] ? Math.round((parseInt(progress[getMangaKey(m.id, m.sourceId)].chapterNum) || (m.totalChapters || 100)) / Math.max(m.totalChapters || 1, 1) * 100) : 0} onContextMenu={handleMangaContextMenu} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : libraryView === 'shelf' ? (
+                <div>
+                  {[...Array(Math.ceil(filteredLibrary.length / 10))].map((_, row) => (
+                    <div key={row} style={{ marginBottom: 20 }}>
+                      <div style={{
+                        height: 180, display: 'flex', alignItems: 'flex-end', gap: 2,
+                        background: 'linear-gradient(to bottom,rgba(255,255,255,0.02),rgba(255,255,255,0.04))',
+                        borderRadius: 12, padding: '8px 12px 0',
+                        border: '1px solid var(--border)', position: 'relative', overflow: 'hidden'
+                      }}>
+                        <div style={{
+                          position: 'absolute', bottom: 0, left: 0, right: 0, height: 10,
+                          background: 'linear-gradient(to bottom,var(--card2),var(--bg2))',
+                          borderTop: '2px solid rgba(255,255,255,0.07)'
+                        }} />
+                        {filteredLibrary.slice(row * 10, (row + 1) * 10).map((m) => {
+                          const prog = progress[getMangaKey(m.id, m.sourceId)];
+                          const pct = m.totalChapters && prog ? Math.min(1, (parseInt(prog.chapterNum) || 0) / m.totalChapters) : 0;
+                          const hue = ((getMangaKey(m.id, m.sourceId) || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0)) % 360;
                           return (
-                            <div key={ch.id}
-                              className={`anim-fadeInUp delay-${Math.min(i, 14)}`}
-                              onClick={() => openChapter(ch)}
-                              onContextMenu={(e) => handleChapterContextMenu(e, ch)}
-                              style={{
-                                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                                padding: '13px 16px', borderRadius: 12, cursor: 'pointer',
-                                background: isCurrent ? 'rgba(249,115,22,0.1)' : isRead ? 'rgba(34,197,94,0.04)' : 'var(--card)',
-                                border: `1.5px solid ${isCurrent ? 'var(--accent)' : isDownloaded ? 'rgba(59,130,246,0.5)' : isRead ? 'rgba(34,197,94,0.2)' : 'var(--border)'}`,
-                                transition: 'all 0.2s', position: 'relative', overflow: 'hidden',
-                              }}
-                              onMouseEnter={e => { if (!isCurrent) { e.currentTarget.style.borderColor = isDownloaded ? 'rgba(59,130,246,0.85)' : 'var(--border-hover)'; e.currentTarget.style.transform = 'translateX(3px)'; } }}
-                              onMouseLeave={e => { e.currentTarget.style.borderColor = isCurrent ? 'var(--accent)' : isDownloaded ? 'rgba(59,130,246,0.5)' : isRead ? 'rgba(34,197,94,0.2)' : 'var(--border)'; e.currentTarget.style.transform = ''; }}>
-                              {isCurrent && <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: 'var(--accent)' }} />}
-                              {isDownloaded && !isCurrent && <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: '#3b82f6', boxShadow: '0 0 8px #3b82f680' }} />}
-                              <div style={{ flex: 1, minWidth: 0, marginLeft: (isCurrent || isDownloaded) ? 8 : 0 }}>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
-                                  <p style={{ fontWeight: 600, fontSize: 14, color: isCurrent ? 'var(--accent)' : isRead ? 'var(--muted)' : 'var(--text)', textDecoration: isRead ? 'line-through' : 'none', opacity: isRead ? 0.6 : 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                    Ch. {ch.number}{ch.title && ch.title !== `Chapter ${ch.number}` && ` — ${ch.title}`}
-                                  </p>
-                                  {isRead && <Check size={13} style={{ color: '#4ade80', flexShrink: 0 }} />}
-                                  {isDownloaded && <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', color: '#60a5fa', background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.25)', borderRadius: 4, padding: '1px 5px', flexShrink: 0 }}>offline</span>}
-                                </div>
-                                <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-                                  {ch.date && <span style={{ fontSize: 11, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 3 }}><Calendar size={10} />{ch.date}</span>}
-                                  {ch.group && <span style={{ fontSize: 11, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 180 }}>{ch.group}</span>}
-                                </div>
-                              </div>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                                {isDownloaded && (
-                                  <Btn variant="ghost" size="icon" onClick={e => { e.stopPropagation(); deleteChapterBlobs(mangaDetail.id, ch.id).then(refreshDownloads); toast('Offline copy removed', 'warning'); }} style={{ padding: 4, borderRadius: 8, color: '#60a5fa' }} title="Remove offline copy">
-                                    <Trash2 size={13} />
-                                  </Btn>
+                            <div key={getMangaKey(m.id, m.sourceId)} style={{ display: 'flex', alignItems: 'flex-end' }}>
+                              {bulkMode && (
+                                <input type="checkbox" checked={bulkSelected.has(getMangaKey(m.id, m.sourceId))} onChange={e => {
+                                  const s = new Set(bulkSelected);
+                                  const mKey = getMangaKey(m.id, m.sourceId);
+                                  e.target.checked ? s.add(mKey) : s.delete(mKey);
+                                  setBulkSelected(s);
+                                }} style={{ position: 'absolute', top: -20, left: 4, width: 14, height: 14, accentColor: 'var(--accent)' }} />
+                              )}
+                              <div onClick={() => bulkMode ? null : openManga(m)} title={m.title}
+                                style={{
+                                  flex: 1, maxWidth: 80, minWidth: 24, height: 160,
+                                  borderRadius: '3px 3px 0 0', cursor: 'pointer',
+                                  position: 'relative', overflow: 'hidden',
+                                  boxShadow: '2px 0 6px rgba(0,0,0,0.5)',
+                                  transition: 'transform .2s ease, box-shadow .2s ease'
+                                }}
+                                onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-12px) scale(1.04)'; e.currentTarget.style.zIndex = 10; e.currentTarget.style.boxShadow = '0 16px 36px rgba(0,0,0,0.7)'; }}
+                                onMouseLeave={e => { e.currentTarget.style.transform = ''; e.currentTarget.style.zIndex = ''; e.currentTarget.style.boxShadow = '2px 0 6px rgba(0,0,0,0.5)'; }}>
+                                {m.cover
+                                  ? <img src={proxyImg(m.cover)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
+                                  : <div style={{
+                                    width: '100%', height: '100%', background: `hsl(${hue},35%,18%)`,
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center'
+                                  }}>
+                                    <p style={{
+                                      fontSize: 8, fontWeight: 700, color: 'rgba(255,255,255,0.45)',
+                                      writingMode: 'vertical-rl', overflow: 'hidden', maxHeight: 120, padding: '0 4px', lineHeight: 1.2
+                                    }}>
+                                      {m.title}
+                                    </p>
+                                  </div>
+                                }
+                                {pct > 0 && <div style={{
+                                  position: 'absolute', bottom: 0, left: 0, right: 0, height: 3,
+                                  background: `hsla(${hue},70%,60%,0.9)`, width: `${pct * 100}%`
+                                }} />}
+                                {bulkMode && bulkSelected.has(getMangaKey(m.id, m.sourceId)) && (
+                                  <div style={{ position: 'absolute', inset: 0, background: 'rgba(249,115,22,0.4)', border: '2px solid var(--accent)' }} />
                                 )}
-                                <Btn variant="ghost" size="icon" onClick={e => { e.stopPropagation(); handleDownload(ch); }} style={{ padding: 4, borderRadius: 8, color: isDownloaded ? '#60a5fa' : undefined }} title={isDownloaded ? 'Re-download' : 'Save for offline'}>
-                                  <Download size={14} />
-                                </Btn>
-                                <ChevronRight size={16} style={{ color: isCurrent ? 'var(--accent)' : 'var(--muted)' }} />
                               </div>
                             </div>
                           );
                         })}
                       </div>
                     </div>
-                  </>
-                ) : null}
-              </div>
+                  ))}
+                </div>
+
+              ) : libraryView === 'compact' ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {filteredLibrary.map((m, i) => {
+                    const cat = categories.find(c => c.id === mangaCategories[getMangaKey(m.id, m.sourceId)]);
+                    const prog = progress[getMangaKey(m.id, m.sourceId)];
+                    return (
+                      <div key={getMangaKey(m.id, m.sourceId)} style={{ display: 'flex', alignItems: 'center' }}>
+                        {bulkMode && (
+                          <div style={{ paddingRight: 10 }}>
+                            <input type="checkbox" checked={bulkSelected.has(getMangaKey(m.id, m.sourceId))} onChange={e => {
+                              const s = new Set(bulkSelected);
+                              const mKey = getMangaKey(m.id, m.sourceId);
+                              e.target.checked ? s.add(mKey) : s.delete(mKey);
+                              setBulkSelected(s);
+                            }} style={{ width: 14, height: 14, accentColor: 'var(--accent)' }} />
+                          </div>
+                        )}
+                        <div onClick={() => bulkMode ? null : openManga(m)} onContextMenu={e => handleMangaContextMenu(e, m)}
+                          style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 10, padding: '7px 12px', borderRadius: 9, background: 'var(--card)', border: '1px solid var(--border)', cursor: 'pointer', transition: 'all 0.15s' }}
+                          onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border-hover)'; e.currentTarget.style.background = 'var(--card-hover)'; }}
+                          onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.background = 'var(--card)'; }}
+                        >
+                          <div style={{ width: 32, height: 44, borderRadius: 6, overflow: 'hidden', flexShrink: 0, background: 'var(--card2)', border: '1px solid var(--border)' }}>
+                            {m.cover ? <img src={proxyImg(m.cover)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" alt="" /> : <BookOpen size={14} style={{ color: 'var(--muted)', opacity: .4, margin: 'auto', display: 'block', marginTop: 14 }} />}
+                          </div>
+                          {cat && <div style={{ width: 3, height: 32, borderRadius: 2, background: cat.color, flexShrink: 0 }} />}
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <p style={{ fontWeight: 600, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.title}</p>
+                            {m.author && <p style={{ fontSize: 11, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.author}</p>}
+                          </div>
+                          {prog && <span style={{ fontSize: 11, color: 'var(--muted)', flexShrink: 0 }}>Ch.{prog.chapterNum}</span>}
+                          <ChevronRight size={14} style={{ color: 'var(--muted)', flexShrink: 0 }} />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 18 }}>
+                  {filteredLibrary.map((m, i) => (
+                    <div key={getMangaKey(m.id, m.sourceId)} style={{ position: 'relative' }}>
+                      <MangaCard manga={m} onClick={bulkMode ? () => { } : openManga} index={i} category={mangaCategories[getMangaKey(m.id, m.sourceId)]} progress={progress[getMangaKey(m.id, m.sourceId)] ? Math.round((parseInt(progress[getMangaKey(m.id, m.sourceId)].chapterNum) || (m.totalChapters || 100)) / Math.max(m.totalChapters || 1, 1) * 100) : 0} onContextMenu={handleMangaContextMenu} />
+                      {bulkMode && (
+                        <div style={{ position: 'absolute', inset: 0, background: bulkSelected.has(getMangaKey(m.id, m.sourceId)) ? 'rgba(249,115,22,0.2)' : 'transparent', border: bulkSelected.has(getMangaKey(m.id, m.sourceId)) ? '2px solid var(--accent)' : 'none', borderRadius: 16, pointerEvents: 'none' }} />
+                      )}
+                      {bulkMode && (
+                        <input type="checkbox" checked={bulkSelected.has(getMangaKey(m.id, m.sourceId))} onChange={e => {
+                          const s = new Set(bulkSelected);
+                          const mKey = getMangaKey(m.id, m.sourceId);
+                          e.target.checked ? s.add(mKey) : s.delete(mKey);
+                          setBulkSelected(s);
+                        }} style={{ position: 'absolute', top: 8, left: 8, width: 18, height: 18, accentColor: 'var(--accent)' }} />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
-          {view !== 'manga' && <>
-            {tab === 'home' && (
-              <HomeTab
-                history={history} library={library} progress={progress}
-                sources={sources} updates={updates}
-                onSelect={openManga}
-                onContinue={m => { openManga(m); setTimeout(() => { const p = progress[m.id]; if (p?.chapterId) openChapter({ id: p.chapterId, number: p.chapterNum }, m.sourceId); }, 200); }}
-                onSwitchTab={switchTab}
-              />
-            )}
-            {tab === 'recommendations' && (
-              <DiscoverTab sources={sources} history={history} library={library} progress={progress} onSelect={openManga} onSwitchTab={switchTab} />
-            )}
-            {tab === 'browse' && (
-              <div className="page-transition">
-                {view === 'tabs' ? (
-                  groupedInstalledSources.length === 0 ? (
-                    <EmptyState icon={Globe} title="No sources installed" sub="Install extensions to start browsing" action={<Btn onClick={() => switchTab('extensions')}>Browse Extensions <ArrowRight size={16} /></Btn>} />
-                  ) : (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(170px,1fr))', gap: 18 }}>
-                      {groupedInstalledSources.map((src, i) => (
-                        <button key={src.id} className={`card-hover anim-fadeInUp delay-${Math.min(i, 10)}`} onClick={() => enterSource(src)} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '24px 16px', background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 20, cursor: 'pointer', gap: 14, textAlign: 'center', position: 'relative', overflow: 'hidden' }}
-                          onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border-hover)'; }}
-                          onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; }}>
-                          <div style={{ width: 60, height: 60, background: 'var(--card2)', borderRadius: 18, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1.5px solid var(--border)' }}>
-                            {src.icon ? <img src={src.icon} style={{ width: '100%', height: '100%', objectFit: 'contain', padding: 10 }} onError={e => e.target.style.display = 'none'} alt="" loading="lazy" /> : <Globe size={26} style={{ color: 'var(--muted)' }} />}
-                          </div>
-                          <div>
-                            <p style={{ fontFamily: "'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight: 700, fontSize: 15, color: 'var(--text)', marginBottom: 6 }}>{src.name}</p>
-                            {src.variantCount > 1
-                              ? <Badge variant="outline" size="sm">{`${src.variantCount} langs • ${src.lang}`}</Badge>
-                              : src.lang && <Badge variant="outline" size="sm">{src.lang}</Badge>}
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  )
-                ) : view === 'source' ? (
-                  <>
-                    {showFilterBar && (
-                      <BrowseFilterBar
-                        filters={browseFilters}
-                        onChange={handleFilterChange}
-                        onClear={handleFilterClear}
-                        activeCount={activeFilterCount}
-                      />
-                    )}
-
-                    {browseLoading && results.length === 0 ? (
-                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '100px 24px', gap: 20 }}>
-                        <Spin size={40} /><p style={{ fontSize: 12, color: 'var(--muted)' }}>{query ? 'Searching...' : 'Loading...'}</p>
-                      </div>
-                    ) : browseError ? (
-                      <EmptyState icon={AlertTriangle} title={browseError} action={<Btn onClick={() => doSearch(query, activeSource, browsePage, false, browseFilters)}>Retry</Btn>} />
-                    ) : (
-                      <>
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 18 }}>
-                          {results.map((m, i) => <MangaCard key={m.id} manga={m} onClick={openManga} index={i} onContextMenu={handleMangaContextMenu} />)}
-                        </div>
-                        {results.length === 0 && !browseLoading && (
-                          <EmptyState icon={Search} title="No results" sub="Try adjusting your filters or search query" compact
-                            action={activeFilterCount > 0 && <Btn variant="outline" size="sm" onClick={handleFilterClear}><X size={14} /> Clear Filters</Btn>}
-                          />
-                        )}
-                        {hasNextPage && <div ref={sentinelRef} style={{ height: 20, margin: '20px 0' }} />}
-                        {loadingMore && (
-                          <div style={{ display: 'flex', justifyContent: 'center', padding: '20px' }}>
-                            <Spin size={24} />
-                          </div>
-                        )}
-                      </>
-                    )}
-                  </>
-                ) : null}
-              </div>
-            )}
-
-            {tab === 'extensions' && (
-              <div className="page-transition">
-                <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
-                  <div style={{ position: 'relative', flex: 1, minWidth: 220 }}>
-                    <Search size={15} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)', pointerEvents: 'none' }} />
-                    <input placeholder="Search extensions by name..." value={extSearch} onChange={e => setExtSearch(e.target.value)} style={{ width: '100%', background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 12, padding: '11px 14px 11px 40px', color: 'var(--text)', fontSize: 13, outline: 'none' }} onFocus={e => e.target.style.borderColor = 'var(--accent)'} onBlur={e => e.target.style.borderColor = 'var(--border)'} />
-                  </div>
-                  <select value={extLang} onChange={e => setExtLang(e.target.value)} style={{ background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 12, padding: '11px 14px', color: 'var(--text)', fontSize: 13, outline: 'none', cursor: 'pointer', minWidth: 130 }}>
-                    {LANGUAGES.map(l => <option key={l.value} value={l.value}>{l.label}</option>)}
-                  </select>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 12, padding: '0 12px' }}>
-                    <span style={{ fontSize: 13, color: 'var(--text-dim)' }}>NSFW</span>
-                    <button onClick={() => setShowNsfw(prev => !prev)} style={{ width: 40, height: 22, borderRadius: 11, background: showNsfw ? 'var(--accent)' : 'rgba(255,255,255,0.15)', border: 'none', cursor: 'pointer', position: 'relative', transition: 'background 0.2s' }}>
-                      <div style={{ position: 'absolute', top: 2, left: showNsfw ? 20 : 2, width: 18, height: 18, borderRadius: '50%', background: '#fff', transition: 'left 0.2s', boxShadow: '0 1px 4px rgba(0,0,0,0.3)' }} />
-                    </button>
-                  </div>
-                  <div style={{ display: 'flex', background: 'var(--card)', borderRadius: 12, border: '1.5px solid var(--border)', overflow: 'hidden' }}>
-                    {[['all', 'All'], ['installed', 'Installed']].map(([v, l]) => (
-                      <button key={v} onClick={() => setExtTab(v)} style={{ padding: '11px 18px', border: 'none', background: extTab === v ? 'var(--accent)' : 'transparent', color: extTab === v ? '#fff' : 'var(--muted)', fontWeight: 600, fontSize: 13, cursor: 'pointer', transition: 'all 0.2s' }}>{l}</button>
-                    ))}
-                  </div>
-                  <select value={extSort} onChange={e => setExtSort(e.target.value)} style={{ background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 12, padding: '11px 14px', color: 'var(--text)', fontSize: 13, outline: 'none', cursor: 'pointer', minWidth: 140 }}>
-                    <option value="name">Sort by Name</option>
-                    <option value="version">Sort by Version</option>
-                    <option value="installed">Installed First</option>
-                  </select>
-                  <Btn variant="outline" onClick={() => { fetchExtensions(); fetchSources(); }}>
-                    <RefreshCw size={15} /> Refresh
-                  </Btn>
-                </div>
-
-                {filteredExts.length === 0 ? (
-                  <EmptyState icon={Puzzle} title="No extensions found" sub="Try adjusting your filters" />
-                ) : (
-                  <>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                      {filteredExts.slice(0, extDisplayCount).map((ext, i) => (
-                        <div key={ext.pkgName} className={`anim-fadeInUp delay-${Math.min(i, 10)}`}>
-                          <ExtCard ext={ext} onInstall={installExt} onUninstall={uninstallExt} onUpdate={updateExt} installing={installing} />
-                        </div>
-                      ))}
-                    </div>
-                    {extDisplayCount < filteredExts.length && <div ref={extSentinelRef} style={{ height: 20, margin: '20px 0' }} />}
-                  </>
+          {tab === 'history' && (
+            <div className="page-transition">
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 18 }}>
+                {history.length > 0 && (
+                  <Btn variant="danger" onClick={() => {
+                    toastRef.current?.('History cleared', 'warning');
+                    clearHistory();
+                  }}><Trash2 size={15} /> Clear All</Btn>
                 )}
               </div>
-            )}
-
-            {tab === 'library' && (
-              <div className="anim-fadeIn">
-                <DuplicateBanner library={library} onRemove={id => { const m = library.find(x => x.id === id); if (m) toggleLibrary(m, m.sourceId); }} />
-                <StatsStrip library={library} history={history} progress={progress} readChapters={readChapters} />
-                <div style={{ display: 'flex', gap: 8, marginBottom: 16, overflowX: 'auto', paddingBottom: 4 }}>
-                  <button onClick={() => setActiveCategory('all')} style={{ padding: '9px 18px', borderRadius: 20, border: 'none', background: activeCategory === 'all' ? 'var(--accent)' : 'var(--card)', color: activeCategory === 'all' ? '#fff' : 'var(--text-dim)', fontWeight: 600, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', boxShadow: activeCategory === 'all' ? '0 4px 16px rgba(249,115,22,0.3)' : 'none', transition: 'all 0.2s' }}>All ({library.length})</button>
-                  {CATEGORIES.map(cat => {
-                    const count = library.filter(m => mangaCategories[m.id] === cat.id).length;
-                    return <button key={cat.id} onClick={() => setActiveCategory(cat.id)} style={{ padding: '9px 18px', borderRadius: 20, border: 'none', background: activeCategory === cat.id ? cat.color : 'var(--card)', color: activeCategory === cat.id ? '#fff' : 'var(--text-dim)', fontWeight: 600, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', opacity: count === 0 ? 0.5 : 1, boxShadow: activeCategory === cat.id ? `0 4px 16px ${cat.color}40` : 'none', transition: 'all 0.2s' }}>{cat.name} ({count})</button>;
-                  })}
-                </div>
-
-                <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 18, flexWrap: 'wrap' }}>
-                  <div style={{ position: 'relative', flex: '1 1 200px', minWidth: 180 }}>
-                    <Search size={14} style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)', pointerEvents: 'none' }} />
-                    <input placeholder="Search library..." value={librarySearch}
-                      onChange={e => setLibrarySearch(e.target.value)}
-                      style={{ width: '100%', background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 10, padding: '9px 36px 9px 38px', color: 'var(--text)', fontSize: 13, outline: 'none', transition: 'border-color 0.2s' }}
-                      onFocus={e => e.target.style.borderColor = 'var(--accent)'}
-                      onBlur={e => e.target.style.borderColor = 'var(--border)'} />
-                    {librarySearch && <button onClick={() => setLibrarySearch('')} style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)', padding: 4 }}><X size={13} /></button>}
-                  </div>
-
-                  <div style={{ position: 'relative', flexShrink: 0 }}>
-                    <select value={librarySort} onChange={e => setLibrarySort(e.target.value)}
-                      style={{ appearance: 'none', WebkitAppearance: 'none', background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 10, padding: '9px 32px 9px 14px', color: 'var(--text)', fontSize: 12, fontWeight: 600, cursor: 'pointer', outline: 'none', transition: 'border-color .2s' }}
-                      onFocus={e => e.target.style.borderColor = 'var(--accent)'}
-                      onBlur={e => e.target.style.borderColor = 'var(--border)'}>
-                      <option value="recent">Last Read</option>
-                      <option value="added">Date Added</option>
-                      <option value="alpha">A → Z</option>
-                      <option value="unread">Most Unread</option>
-                      <option value="progress">Most Progress</option>
-                    </select>
-                    <ChevronDown size={13} style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)', pointerEvents: 'none' }} />
-                  </div>
-
-                  <Btn variant={bulkMode ? 'default' : 'ghost'} size="sm"
-                    onClick={() => { setBulkMode(m => !m); setBulkSelected(new Set()); }}>
-                    {bulkMode ? <><Check size={13} /> {bulkSelected.size > 0 ? `${bulkSelected.size} selected` : 'Select'}</> : 'Select'}
-                  </Btn>
-
-                  {bulkMode && bulkSelected.size > 0 && (
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <Btn variant="outline" size="sm" onClick={() => {
-                        bulkSelected.forEach(id => toggleLibrary(library.find(x => x.id === id), activeSource?.id));
-                        setBulkSelected(new Set()); setBulkMode(false);
-                        toast(`Removed ${bulkSelected.size} manga`, 'success');
-                      }}><Trash2 size={13} /> Remove</Btn>
+              {history.length === 0 ? <EmptyState icon={Clock} title="No history" sub="Manga you read will appear here" /> : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 18 }}>
+                  {history.map((m, i) => (
+                    <div key={getMangaKey(m.id, m.sourceId)} style={{ position: 'relative' }}>
+                      <MangaCard manga={m} onClick={openManga} index={i} badge={m.lastRead ? new Date(m.lastRead).toLocaleDateString() : null} />
+                      <Btn variant="ghost" size="icon" onClick={e => { e.stopPropagation(); removeFromHistory(m.id, m.sourceId); }} style={{ position: 'absolute', top: 36, right: 6, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)', width: 28, height: 28, borderRadius: 8 }}><X size={12} /></Btn>
                     </div>
-                  )}
-
-                  <div style={{ display: 'flex', gap: 4, marginLeft: 'auto' }}>
-                    {[['grid', <LayoutGrid size={16} />], ['list', <List size={16} />], ['compact', <Columns size={16} />], ['shelf', <BookOpen size={16} />]].map(([m, icon]) => (
-                      <Btn key={m} variant={libraryView === m ? 'default' : 'ghost'} size="icon"
-                        title={m === 'shelf' ? 'Bookshelf view' : m === 'compact' ? 'Compact view' : m === 'list' ? 'List view' : 'Grid view'}
-                        onClick={() => { setLibraryView(m); updateSetting('libraryView', m); }}>{icon}</Btn>
-                    ))}
-                  </div>
+                  ))}
                 </div>
+              )}
+            </div>
+          )}
 
-                {filteredLibrary.length === 0 ? (
-                  librarySearch
-                    ? <EmptyState icon={Search} title={`No results for "${librarySearch}"`} sub="Try a different search term" compact action={<Btn variant="outline" size="sm" onClick={() => setLibrarySearch('')}><X size={14} /> Clear</Btn>} />
-                    : <EmptyState icon={Library} title={activeCategory === 'all' ? "Your library is empty" : `No manga in ${CATEGORIES.find(c => c.id === activeCategory)?.name}`} sub={activeCategory === 'all' ? "Add manga from Browse to start" : "Move manga to this category from context menu"} action={activeCategory === 'all' && <Btn onClick={() => switchTab('browse')}>Browse Manga <ArrowRight size={16} /></Btn>} />
-                ) : libraryView === 'list' ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    {filteredLibrary.map((m, i) => (
-                      <div key={m.id} style={{ display: 'flex', alignItems: 'center' }}>
-                        {bulkMode && (
-                          <div style={{ paddingRight: 12 }}>
-                            <input type="checkbox" checked={bulkSelected.has(m.id)} onChange={e => {
-                              const s = new Set(bulkSelected);
-                              e.target.checked ? s.add(m.id) : s.delete(m.id);
-                              setBulkSelected(s);
-                            }} style={{ width: 16, height: 16, accentColor: 'var(--accent)' }} />
-                          </div>
-                        )}
-                        <div style={{ flex: 1 }}>
-                          <MangaListCard manga={m} onClick={bulkMode ? () => {} : openManga} index={i} category={mangaCategories[m.id]} progress={progress[m.id] ? Math.round((parseInt(progress[m.id].chapterNum) || (m.totalChapters || 100)) / Math.max(m.totalChapters || 1, 1) * 100) : 0} onContextMenu={handleMangaContextMenu} />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : libraryView === 'shelf' ? (
-                  <div>
-                    {[...Array(Math.ceil(filteredLibrary.length / 10))].map((_, row) => (
-                      <div key={row} style={{ marginBottom: 20 }}>
-                        <div style={{
-                          height: 180, display: 'flex', alignItems: 'flex-end', gap: 2,
-                          background: 'linear-gradient(to bottom,rgba(255,255,255,0.02),rgba(255,255,255,0.04))',
-                          borderRadius: 12, padding: '8px 12px 0',
-                          border: '1px solid var(--border)', position: 'relative', overflow: 'hidden'
-                        }}>
-                          <div style={{
-                            position: 'absolute', bottom: 0, left: 0, right: 0, height: 10,
-                            background: 'linear-gradient(to bottom,var(--card2),var(--bg2))',
-                            borderTop: '2px solid rgba(255,255,255,0.07)'
-                          }} />
-                          {filteredLibrary.slice(row * 10, (row + 1) * 10).map((m) => {
-                            const prog = progress[m.id];
-                            const pct = m.totalChapters && prog ? Math.min(1, (parseInt(prog.chapterNum) || 0) / m.totalChapters) : 0;
-                            const hue = ((m.id || '').split('').reduce((a, c) => a + c.charCodeAt(0), 0)) % 360;
-                            return (
-                              <div key={m.id} style={{ display: 'flex', alignItems: 'flex-end' }}>
-                                {bulkMode && (
-                                  <input type="checkbox" checked={bulkSelected.has(m.id)} onChange={e => {
-                                    const s = new Set(bulkSelected);
-                                    e.target.checked ? s.add(m.id) : s.delete(m.id);
-                                    setBulkSelected(s);
-                                  }} style={{ position: 'absolute', top: -20, left: 4, width: 14, height: 14, accentColor: 'var(--accent)' }} />
-                                )}
-                                <div onClick={() => bulkMode ? null : openManga(m)} title={m.title}
-                                  style={{
-                                    flex: 1, maxWidth: 80, minWidth: 24, height: 160,
-                                    borderRadius: '3px 3px 0 0', cursor: 'pointer',
-                                    position: 'relative', overflow: 'hidden',
-                                    boxShadow: '2px 0 6px rgba(0,0,0,0.5)',
-                                    transition: 'transform .2s ease, box-shadow .2s ease'
-                                  }}
-                                  onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-12px) scale(1.04)'; e.currentTarget.style.zIndex = 10; e.currentTarget.style.boxShadow = '0 16px 36px rgba(0,0,0,0.7)'; }}
-                                  onMouseLeave={e => { e.currentTarget.style.transform = ''; e.currentTarget.style.zIndex = ''; e.currentTarget.style.boxShadow = '2px 0 6px rgba(0,0,0,0.5)'; }}>
-                                  {m.cover
-                                    ? <img src={proxyImg(m.cover)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" />
-                                    : <div style={{
-                                      width: '100%', height: '100%', background: `hsl(${hue},35%,18%)`,
-                                      display: 'flex', alignItems: 'center', justifyContent: 'center'
-                                    }}>
-                                      <p style={{
-                                        fontSize: 8, fontWeight: 700, color: 'rgba(255,255,255,0.45)',
-                                        writingMode: 'vertical-rl', overflow: 'hidden', maxHeight: 120, padding: '0 4px', lineHeight: 1.2
-                                      }}>
-                                        {m.title}
-                                      </p>
-                                    </div>
-                                  }
-                                  {pct > 0 && <div style={{
-                                    position: 'absolute', bottom: 0, left: 0, right: 0, height: 3,
-                                    background: `hsla(${hue},70%,60%,0.9)`, width: `${pct * 100}%`
-                                  }} />}
-                                  {bulkMode && bulkSelected.has(m.id) && (
-                                    <div style={{ position: 'absolute', inset: 0, background: 'rgba(249,115,22,0.4)', border: '2px solid var(--accent)' }} />
-                                  )}
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                ) : libraryView === 'compact' ? (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    {filteredLibrary.map((m, i) => {
-                      const cat = CATEGORIES.find(c => c.id === mangaCategories[m.id]);
-                      const prog = progress[m.id];
-                      return (
-                        <div key={m.id} style={{ display: 'flex', alignItems: 'center' }}>
-                          {bulkMode && (
-                            <div style={{ paddingRight: 10 }}>
-                              <input type="checkbox" checked={bulkSelected.has(m.id)} onChange={e => {
-                                const s = new Set(bulkSelected);
-                                e.target.checked ? s.add(m.id) : s.delete(m.id);
-                                setBulkSelected(s);
-                              }} style={{ width: 14, height: 14, accentColor: 'var(--accent)' }} />
-                            </div>
-                          )}
-                          <div onClick={() => bulkMode ? null : openManga(m)} onContextMenu={e => handleMangaContextMenu(e, m)}
-                            style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 10, padding: '7px 12px', borderRadius: 9, background: 'var(--card)', border: '1px solid var(--border)', cursor: 'pointer', transition: 'all 0.15s' }}
-                            onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border-hover)'; e.currentTarget.style.background = 'var(--card-hover)'; }}
-                            onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.background = 'var(--card)'; }}
-                          >
-                            <div style={{ width: 32, height: 44, borderRadius: 6, overflow: 'hidden', flexShrink: 0, background: 'var(--card2)', border: '1px solid var(--border)' }}>
-                              {m.cover ? <img src={proxyImg(m.cover)} style={{ width: '100%', height: '100%', objectFit: 'cover' }} loading="lazy" alt="" /> : <BookOpen size={14} style={{ color: 'var(--muted)', opacity: .4, margin: 'auto', display: 'block', marginTop: 14 }} />}
-                            </div>
-                            {cat && <div style={{ width: 3, height: 32, borderRadius: 2, background: cat.color, flexShrink: 0 }} />}
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <p style={{ fontWeight: 600, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.title}</p>
-                              {m.author && <p style={{ fontSize: 11, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.author}</p>}
-                            </div>
-                            {prog && <span style={{ fontSize: 11, color: 'var(--muted)', flexShrink: 0 }}>Ch.{prog.chapterNum}</span>}
-                            <ChevronRight size={14} style={{ color: 'var(--muted)', flexShrink: 0 }} />
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 18 }}>
-                    {filteredLibrary.map((m, i) => (
-                      <div key={m.id} style={{ position: 'relative' }}>
-                        <MangaCard manga={m} onClick={bulkMode ? () => {} : openManga} index={i} category={mangaCategories[m.id]} progress={progress[m.id] ? Math.round((parseInt(progress[m.id].chapterNum) || (m.totalChapters || 100)) / Math.max(m.totalChapters || 1, 1) * 100) : 0} onContextMenu={handleMangaContextMenu} />
-                        {bulkMode && (
-                          <div style={{ position: 'absolute', inset: 0, background: bulkSelected.has(m.id) ? 'rgba(249,115,22,0.2)' : 'transparent', border: bulkSelected.has(m.id) ? '2px solid var(--accent)' : 'none', borderRadius: 16, pointerEvents: 'none' }} />
-                        )}
-                        {bulkMode && (
-                          <input type="checkbox" checked={bulkSelected.has(m.id)} onChange={e => {
-                            const s = new Set(bulkSelected);
-                            e.target.checked ? s.add(m.id) : s.delete(m.id);
-                            setBulkSelected(s);
-                          }} style={{ position: 'absolute', top: 8, left: 8, width: 18, height: 18, accentColor: 'var(--accent)' }} />
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
+          {tab === 'updates' && <UpdatesTab onOpenManga={openManga} />}
+          {tab === 'downloads' && <DownloadsTab
+            queue={downloadQueue}
+            onClear={() => setDownloadQueue(prev => prev.filter(d => d.status === 'pending' || d.status === 'downloading'))}
+            onRemove={id => setDownloadQueue(prev => prev.filter(d => d.id !== id))}
+            onRetry={id => setDownloadQueue(prev => prev.map(d => d.id === id ? { ...d, status: 'pending', progress: 0, pagesLoaded: 0, pagesTotal: 0, error: null } : d))}
+            onCancel={id => {
+              setDownloadQueue(prev => prev.map(d => {
+                if (d.id !== id) return d;
+                if (d.status === 'downloading') { dlCancelRef.current = true; return { ...d, status: 'cancelled' }; }
+                if (d.status === 'pending') return { ...d, status: 'cancelled' };
+                return d;
+              }));
+            }}
+            onCancelAll={() => {
+              dlCancelRef.current = true;
+              setDownloadQueue(prev => prev.map(d =>
+                (d.status === 'pending' || d.status === 'downloading') ? { ...d, status: 'cancelled' } : d
+              ));
+            }}
+          />}
+          {tab === 'settings' && <SettingsPage />}
+          {migrateManga && <SourceMigrationModal manga={migrateManga} sources={sources} onClose={() => setMigrateManga(null)} onMigrate={handleMigrate} />}
+        </>}
+        {/* Live Download Overlay */}
+        {downloadQueue.some(d => d.status === 'downloading' || d.status === 'pending') && !overlayHidden && (
+          <div style={{
+            position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)', zIndex: 1000,
+            background: 'rgba(15,15,22,0.95)', backdropFilter: 'blur(16px)', border: '1px solid var(--border)',
+            borderRadius: 20, padding: '12px 20px', display: 'flex', alignItems: 'center', gap: 16,
+            boxShadow: '0 20px 50px rgba(0,0,0,0.5)', width: 'min(450px, 90vw)', animation: 'slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1)'
+          }}>
+            <div style={{ position: 'relative', width: 44, height: 44, flexShrink: 0 }}>
+              <svg viewBox="0 0 36 36" style={{ transform: 'rotate(-90deg)', width: '100%', height: '100%' }}>
+                <circle cx="18" cy="18" r="16" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="3" />
+                <circle cx="18" cy="18" r="16" fill="none" stroke="var(--accent)" strokeWidth="3"
+                  strokeDasharray={`${(downloadQueue.find(d => d.status === 'downloading')?.progress || 0) * 1.005} 100`}
+                  style={{ transition: 'stroke-dasharray 0.3s ease' }} />
+              </svg>
+              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                <Download size={16} style={{ color: 'var(--accent)' }} className="anim-pulse" />
               </div>
-            )}
+            </div>
 
-            {tab === 'history' && (
-              <div className="page-transition">
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 18 }}>
-                  {history.length > 0 && (
-                    <Btn variant="danger" onClick={() => {
-                      toastRef.current?.('History cleared', 'warning');
-                      history.forEach(m => removeFromHistory(m.id));
-                    }}><Trash2 size={15} /> Clear All</Btn>
-                  )}
-                </div>
-                {history.length === 0 ? <EmptyState icon={Clock} title="No history" sub="Manga you read will appear here" /> : (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 18 }}>
-                    {history.map((m, i) => (
-                      <div key={m.id} style={{ position: 'relative' }}>
-                        <MangaCard manga={m} onClick={openManga} index={i} badge={m.lastRead ? new Date(m.lastRead).toLocaleDateString() : null} />
-                        <Btn variant="ghost" size="icon" onClick={e => { e.stopPropagation(); removeFromHistory(m.id); }} style={{ position: 'absolute', top: 36, right: 6, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)', width: 28, height: 28, borderRadius: 8 }}><X size={12} /></Btn>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <p style={{ margin: 0, fontSize: 13, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {downloadQueue.find(d => d.status === 'downloading')?.mangaTitle || 'Preparing...'}
+              </p>
+              <p style={{ margin: 0, fontSize: 11, color: 'var(--muted)', marginTop: 2 }}>
+                {(() => {
+                  const downloading = downloadQueue.filter(d => d.status === 'downloading').length;
+                  const pending = downloadQueue.filter(d => d.status === 'pending').length;
+                  const current = downloadQueue.find(d => d.status === 'downloading');
+                  if (current) return `Downloading Ch. ${current.chapterNum} • ${current.progress}% (${pending + downloading} left)`;
+                  return `Waiting for ${pending} chapters...`;
+                })()}
+              </p>
+            </div>
 
-            {tab === 'updates' && <UpdatesTab onOpenManga={openManga} />}
-            {tab === 'downloads' && <DownloadsTab
-              queue={downloadQueue}
-              onClear={() => setDownloadQueue(prev => prev.filter(d => d.status === 'pending' || d.status === 'downloading'))}
-              onRemove={id => setDownloadQueue(prev => prev.filter(d => d.id !== id))}
-              onRetry={id => setDownloadQueue(prev => prev.map(d => d.id === id ? { ...d, status: 'pending', progress: 0, pagesLoaded: 0, pagesTotal: 0, error: null } : d))}
-              onCancel={id => {
-                setDownloadQueue(prev => prev.map(d => {
-                  if (d.id !== id) return d;
-                  if (d.status === 'downloading') { dlCancelRef.current = true; return { ...d, status: 'cancelled' }; }
-                  if (d.status === 'pending') return { ...d, status: 'cancelled' };
-                  return d;
-                }));
-              }}
-              onCancelAll={() => {
-                dlCancelRef.current = true;
-                setDownloadQueue(prev => prev.map(d =>
-                  (d.status === 'pending' || d.status === 'downloading') ? { ...d, status: 'cancelled' } : d
-                ));
-              }}
-            />}
-            {tab === 'settings' && <SettingsPage />}
-          </>}
-        </div>
-      </main>
+            <button onClick={() => setOverlayHidden(true)} style={{ background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: '50%', width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: 'var(--muted)' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}>
+              <X size={14} />
+            </button>
+          </div>
+        )}
+      </div>
+    </main >
     </>
   );
 });

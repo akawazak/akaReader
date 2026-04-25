@@ -555,6 +555,7 @@ ipcMain.handle('get-version',       ()    => app.getVersion());
 ipcMain.handle('get-java-path',     ()    => findJava());
 ipcMain.handle('get-jar-path',      ()    => jarPath);
 ipcMain.handle('get-suwayomi-config-path', () => suwayomiConfigPath);
+ipcMain.handle('open-external',      (_, url) => shell.openExternal(url));
 
 // ── Tray ──────────────────────────────────────────────────────────────────────
 function createTray() {

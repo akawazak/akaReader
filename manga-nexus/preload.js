@@ -32,4 +32,5 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // App version (reads from package.json via Electron — always accurate)
   getVersion:  () => ipcRenderer.invoke('get-version'),
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
 });
