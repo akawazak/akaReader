@@ -87,10 +87,15 @@ jobs:
           name: dist-${{ matrix.os }}
           path: |
             manga-nexus/dist-electron/*.exe
+            manga-nexus/dist-electron/*.exe.blockmap
             manga-nexus/dist-electron/*.dmg
+            manga-nexus/dist-electron/*.dmg.blockmap
             manga-nexus/dist-electron/*.zip
+            manga-nexus/dist-electron/*.zip.blockmap
             manga-nexus/dist-electron/*.AppImage
+            manga-nexus/dist-electron/*.AppImage.blockmap
             manga-nexus/dist-electron/*.deb
+            manga-nexus/dist-electron/*.yml
           if-no-files-found: ignore
 
   release:
