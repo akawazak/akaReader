@@ -577,7 +577,8 @@ const DataProvider = memo(({ children }) => {
       if (d.ok && d.suwayomi !== undefined) setSuwayomiReady(d.suwayomi);
     }
     catch {
-      if (backendOnlineRef.current !== null) setBackendOnline(false);
+      setBackendOnline(false);
+      setSuwayomiReady(false);
     }
   }, [fetchJSON]);
 
@@ -4503,13 +4504,15 @@ const App = memo(() => {
   ], [installedExts, library.length, history.length, updates.length, downloadQueue]);
 
   const [forceProceed, setForceProceed] = useState(false);
+  const managedStartup = !!window.electronAPI?.ensureServices;
+  const canUseShellOffline = !managedStartup && backendOnline !== null;
 
-  if (!forceProceed && (backendOnline === null || !suwayomiReady) && !showErrorModal) {
+  if (!forceProceed && !canUseShellOffline && (backendOnline === null || !suwayomiReady) && !showErrorModal) {
     return (
       <StartupScreen
         onProceed={() => setForceProceed(true)}
         onRetry={() => { setForceProceed(false); window.electronAPI?.restartServices?.(); checkHealth(); }}
-        managedStartup={!!window.electronAPI?.ensureServices}
+        managedStartup={managedStartup}
         backendOnline={backendOnline}
         suwayomiReady={suwayomiReady}
       />
@@ -4567,7 +4570,7 @@ const App = memo(() => {
       {showShareCard && <ShareCardModal library={library} history={history} progress={progress} readChapters={readChapters} settings={settings} onClose={() => setShowShareCard(false)} />}
       {showErrorModal && <ServiceErrorModal onRestart={() => { setShowErrorModal(false); checkHealth(); }} />}
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
-      {backendOnline && !suwayomiReady && !showErrorModal && forceProceed && (
+      {backendOnline && !suwayomiReady && !showErrorModal && (forceProceed || canUseShellOffline) && (
         <div className="anim-slideDown" style={{ position: 'fixed', top: 38, left: 0, right: 0, zIndex: 800, background: 'rgba(15,15,24,0.96)', backdropFilter: 'blur(12px)', borderBottom: '1px solid rgba(249,115,22,0.25)', padding: '9px 20px', display: 'flex', alignItems: 'center', gap: 10 }}>
           <div className="anim-spin" style={{ width: 13, height: 13, border: '2px solid rgba(249,115,22,0.3)', borderTopColor: 'var(--accent)', borderRadius: '50%', flexShrink: 0 }} />
           <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 500 }}>Suwayomi is starting… browse and extensions will load shortly</span>
