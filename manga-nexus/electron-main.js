@@ -172,6 +172,28 @@ function findJava() {
     const p = path.join(process.env.JAVA_HOME, 'bin', 'java.exe');
     if (fs.existsSync(p)) return p;
   }
+
+  // 4. Check common Windows Java install roots. Electron can launch with a
+  // trimmed PATH, so relying only on "java" can miss a perfectly good JDK/JRE.
+  if (process.platform === 'win32') {
+    const roots = [
+      path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Eclipse Adoptium'),
+      path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Java'),
+      path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Microsoft'),
+    ];
+    for (const root of roots) {
+      try {
+        const dirs = fs.readdirSync(root, { withFileTypes: true })
+          .filter(d => d.isDirectory())
+          .map(d => path.join(root, d.name));
+        for (const dir of dirs) {
+          const candidate = path.join(dir, 'bin', 'java.exe');
+          if (fs.existsSync(candidate)) return candidate;
+        }
+      } catch {}
+    }
+  }
+
   return 'java';
 }
 
@@ -260,7 +282,10 @@ async function ensureJre() {
 }
 
 async function ensureJar() {
-  if (fs.existsSync(jarPath)) return;
+  if (fs.existsSync(jarPath)) {
+    sendStatus('using-existing-suwayomi');
+    return;
+  }
 
   // Check if we have a bundled JAR in the backend directory
   try {
@@ -493,7 +518,7 @@ function waitForServer(retries = 30, delayMs = 300) {
   return new Promise(resolve => {
     let attempts = 0;
     const check = () => {
-      const req = http.get(`http://localhost:${SERVER_PORT}/api/health`, res => { resolve(res.statusCode === 200); });
+      const req = http.get(`http://localhost:${SERVER_PORT}/api/ping`, res => { resolve(res.statusCode === 200); });
       req.on('error', () => {
         attempts++;
         if (attempts >= retries) return resolve(false);
@@ -521,6 +546,57 @@ function setWindowsStartup(enable) {
   else        cp.exec(`reg delete ${key} /v "akaReader" /f`);
 }
 
+let servicesPromise = null;
+async function ensureManagedServices({ restart = false } = {}) {
+  if (servicesPromise && !restart) return servicesPromise;
+
+  servicesPromise = (async () => {
+    try {
+      if (restart) {
+        if (suwayomiProc) killSuwayomi();
+        killServer();
+        serviceMode = false;
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      sendStatus('starting-backend');
+      startServer();
+      const serverOk = await waitForServer(40, 250);
+      if (!serverOk) {
+        sendStatus('offline');
+        return false;
+      }
+      sendStatus('backend-ready');
+
+      sendStatus('suwayomi-starting');
+      await ensureJre();
+      await ensureJar();
+
+      if (await isServiceRunning()) {
+        console.log('[startup] Service already running, waiting for it to be ready...');
+        serviceMode = true;
+        await waitForSuwayomi(90000);
+      } else {
+        serviceMode = false;
+        const started = await startSuwayomi();
+        if (!started) return false;
+      }
+
+      sendStatus('suwayomi-ready');
+      sendStatus('online');
+      return true;
+    } catch (e) {
+      console.error('[startup] Service error:', e.message);
+      sendStatus('suwayomi-failed:' + e.message);
+      return false;
+    } finally {
+      servicesPromise = null;
+    }
+  })();
+
+  return servicesPromise;
+}
+
 // ── IPC ───────────────────────────────────────────────────────────────────────
 ipcMain.handle('get-close-to-tray',      ()    => appSettings.closeToTray);
 ipcMain.handle('set-close-to-tray',      (_, v) => { appSettings.closeToTray = v; saveSettings(appSettings); });
@@ -534,18 +610,8 @@ ipcMain.handle('window-close',    ()     => {
   else { isQuitting = true; app.quit(); }
 });
 
-ipcMain.handle('restart-services', async () => {
-  try {
-    if (suwayomiProc) killSuwayomi();
-    killServer();
-    await new Promise(r => setTimeout(r, 500));
-    startServer();
-    if (!serviceMode) await startSuwayomi();
-    const ok = await waitForServer(15, 500);
-    sendStatus(ok ? 'online' : 'offline');
-    return ok;
-  } catch { sendStatus('offline'); return false; }
-});
+ipcMain.handle('ensure-services', () => ensureManagedServices());
+ipcMain.handle('restart-services', () => ensureManagedServices({ restart: true }));
 
 ipcMain.handle('check-service',     ()    => isServiceRunning());
 ipcMain.handle('install-service',   async () => { await installWindowsService(); return true; });
@@ -556,6 +622,33 @@ ipcMain.handle('get-java-path',     ()    => findJava());
 ipcMain.handle('get-jar-path',      ()    => jarPath);
 ipcMain.handle('get-suwayomi-config-path', () => suwayomiConfigPath);
 ipcMain.handle('open-external',      (_, url) => shell.openExternal(url));
+
+ipcMain.handle('check-for-app-update', async () => {
+  if (!autoUpdater) return { ok: false, error: 'Updater is not available in this build.' };
+  if (isDev) return { ok: false, error: 'Updater only runs in a packaged app.' };
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    return { ok: true, version: result?.updateInfo?.version || null };
+  } catch (e) {
+    return { ok: false, error: e?.message || 'Failed to check for updates.' };
+  }
+});
+ipcMain.handle('download-app-update', async () => {
+  if (!autoUpdater) return { ok: false, error: 'Updater is not available in this build.' };
+  if (isDev) return { ok: false, error: 'Updater only runs in a packaged app.' };
+  try {
+    await autoUpdater.downloadUpdate();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e?.message || 'Failed to download update.' };
+  }
+});
+ipcMain.handle('install-app-update', () => {
+  if (!autoUpdater || isDev) return { ok: false };
+  isQuitting = true;
+  autoUpdater.quitAndInstall();
+  return { ok: true };
+});
 
 // ── Tray ──────────────────────────────────────────────────────────────────────
 function createTray() {
@@ -657,36 +750,7 @@ app.whenReady().then(async () => {
   seedExtensions();
   createTray();
   createMainWindow(); // window appears instantly
-  startServer();      // kick off in background
-
-  // ── Step 1: unblock the UI as soon as the Node server responds ─────────────
-  // This exits the startup screen within ~2 seconds so the user sees the app.
-  // Suwayomi continues starting in the background (step 2).
-  waitForServer(40, 250).then(ok => {
-    if (ok) sendStatus('online');
-    else    sendStatus('offline');
-  });
-
-  // ── Step 2: start Suwayomi in the background — doesn't block the UI ────────
-  (async () => {
-    try {
-      sendStatus('suwayomi-starting');
-      await ensureJre();
-      await ensureJar();
-
-      if (await isServiceRunning()) {
-        console.log('[startup] Service already running, waiting for it to be ready...');
-        serviceMode = true;
-        await waitForSuwayomi(90000);
-      } else {
-        await startSuwayomi();
-      }
-      sendStatus('suwayomi-ready');
-    } catch (e) {
-      console.error('[startup] Suwayomi error:', e.message);
-      sendStatus('suwayomi-failed:' + e.message);
-    }
-  })();
+  ensureManagedServices();
 
   if (appSettings.startWithWindows) setWindowsStartup(true);
 
@@ -700,8 +764,12 @@ app.whenReady().then(async () => {
   if (autoUpdater && !isDev) {
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
+    autoUpdater.on('checking-for-update', () => sendStatus('update-checking'));
     autoUpdater.on('update-available',  i => sendStatus('update-available:' + i.version));
+    autoUpdater.on('update-not-available', () => sendStatus('update-not-available'));
+    autoUpdater.on('download-progress', p => sendStatus('update-downloading:' + Math.round(p.percent || 0)));
     autoUpdater.on('update-downloaded', () => {
+      sendStatus('update-downloaded');
       dialog.showMessageBox(mainWindow, {
         type: 'info', title: 'Update ready',
         message: 'A new version has been downloaded. Restart to install.',
@@ -710,8 +778,11 @@ app.whenReady().then(async () => {
         if (response === 0) { isQuitting = true; autoUpdater.quitAndInstall(); }
       });
     });
-    autoUpdater.on('error', e => console.error('[updater]', e.message));
-    setTimeout(()  => autoUpdater.checkForUpdates().catch(() => {}), 10000);
+    autoUpdater.on('error', e => {
+      console.error('[updater]', e.message);
+      sendStatus('update-error:' + (e?.message || 'unknown'));
+    });
+    autoUpdater.checkForUpdates().catch(() => {});
     setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 4 * 60 * 60 * 1000);
   }
 

@@ -1,10 +1,13 @@
 import React, { memo, useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { ChevronLeft, ChevronRight, Activity, SkipBack, SkipForward, Sun, Pause, Play, Settings2, X, ZoomIn, ZoomOut, AlignJustify, BookOpen, Columns, ChevronDown, Monitor } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Activity, SkipBack, SkipForward, Sun, Pause, Play, Settings2, X, ZoomIn, AlignJustify, BookOpen, Columns, ChevronDown, RefreshCw } from 'lucide-react';
 import { useData } from '../../contexts/DataContext';
 import { Spin } from '../ui/Spin';
 import { proxyImg } from '../../utils/helpers';
 import { THEMES } from '../../constants';
 import { Btn } from '../ui/Btn';
+
+const DEFAULT_ACCENT_COLOR = 'rgb(249, 115, 22)';
+const normalizePages = (value) => Array.isArray(value) ? value.filter(Boolean) : [];
 
 const Droplet = ({ size }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"></path></svg>;
 const Contrast = ({ size }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 18a6 6 0 0 0 0-12v12z"></path></svg>;
@@ -12,25 +15,30 @@ const Contrast = ({ size }) => <svg width={size} height={size} viewBox="0 0 24 2
 // ─── Color Utility ────────────────────────────────────────────────────────────
 const getAdaptiveColor = (url) => {
   return new Promise((resolve) => {
-    if (!url) return resolve('rgb(249, 115, 22)');
+    if (!url) return resolve(DEFAULT_ACCENT_COLOR);
     const img = new Image();
     img.crossOrigin = 'Anonymous';
     img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = 1; canvas.height = 1;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0, 1, 1);
-      const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
-      // Ensure vibrancy: if the color is too dark, boost it
-      const hsp = Math.sqrt(0.299 * (r * r) + 0.587 * (g * g) + 0.114 * (b * b));
-      if (hsp < 40) {
-        // Too dark, return a lightened version or the theme default
-        resolve(`rgb(${Math.min(255, r + 60)}, ${Math.min(255, g + 60)}, ${Math.min(255, b + 60)})`);
-      } else {
-        resolve(`rgb(${r}, ${g}, ${b})`);
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = 1; canvas.height = 1;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('Canvas unavailable');
+        ctx.drawImage(img, 0, 0, 1, 1);
+        const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+        // Ensure vibrancy: if the color is too dark, boost it
+        const hsp = Math.sqrt(0.299 * (r * r) + 0.587 * (g * g) + 0.114 * (b * b));
+        if (hsp < 40) {
+          // Too dark, return a lightened version or the theme default
+          resolve(`rgb(${Math.min(255, r + 60)}, ${Math.min(255, g + 60)}, ${Math.min(255, b + 60)})`);
+        } else {
+          resolve(`rgb(${r}, ${g}, ${b})`);
+        }
+      } catch {
+        resolve(DEFAULT_ACCENT_COLOR);
       }
     };
-    img.onerror = () => resolve('rgb(249, 115, 22)');
+    img.onerror = () => resolve(DEFAULT_ACCENT_COLOR);
     img.src = proxyImg(url);
   });
 };
@@ -152,6 +160,72 @@ const Toggle = ({ val, onChange, label, sub, kbd }) => (
   </div>
 );
 
+const PageImage = memo(({ url, alt, style, loading = 'eager' }) => {
+  const [failed, setFailed] = useState(false);
+  const [retry, setRetry] = useState(0);
+
+  useEffect(() => {
+    setFailed(false);
+    setRetry(0);
+  }, [url]);
+
+  const src = useMemo(() => {
+    if (!url) return '';
+    const base = proxyImg(url);
+    if (!retry) return base;
+    return `${base}${base.includes('?') ? '&' : '?'}retry=${retry}`;
+  }, [url, retry]);
+
+  if (!url || failed) {
+    return (
+      <div
+        role="img"
+        aria-label={alt || 'Unreadable page'}
+        onClick={e => e.stopPropagation()}
+        style={{
+          ...style,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 12,
+          minWidth: 220,
+          minHeight: 280,
+          padding: 24,
+          background: 'rgba(255,255,255,0.055)',
+          border: '1px solid rgba(255,255,255,0.08)',
+          borderRadius: 12,
+          color: 'rgba(255,255,255,0.7)',
+          textAlign: 'center'
+        }}
+      >
+        <BookOpen size={28} style={{ color: 'rgba(255,255,255,0.45)' }} />
+        <span style={{ fontSize: 13, fontWeight: 700 }}>Page failed to load</span>
+        {url && (
+          <button
+            onClick={() => { setFailed(false); setRetry(v => v + 1); }}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '9px 14px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.07)', color: '#fff', cursor: 'pointer', fontSize: 12, fontWeight: 800 }}
+          >
+            <RefreshCw size={13} /> Retry Page
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <img
+      src={src}
+      alt={alt}
+      draggable={false}
+      loading={loading}
+      decoding="async"
+      onError={() => setFailed(true)}
+      style={style}
+    />
+  );
+});
+
 // ─── Ref helper: always access latest value without re-subscribing ───────────
 const Section = ({ title, children, last }) => (
   <div style={{ marginBottom: last ? 0 : 32, borderBottom: last ? 'none' : '1px solid rgba(255,255,255,0.05)', paddingBottom: last ? 0 : 28 }}>
@@ -176,10 +250,11 @@ function useLatest(value) {
 export const Reader = memo(({
   pages: initialPages, currentChapter: initialChapter, mangaTitle,
   onBack, onNextChapter, onPrevChapter, fetchNextChapter,
-  hasNext, hasPrev, onPageChange, initialPage = 0, mangaId,
+  hasNext, hasPrev, onPageChange, initialPage = 0, mangaId, mangaSourceId,
   mangaCover
 }) => {
-  const [adaptiveColor, setAdaptiveColor] = useState('rgb(249, 115, 22)');
+  const [adaptiveColor, setAdaptiveColor] = useState(DEFAULT_ACCENT_COLOR);
+  const safeInitialPages = useMemo(() => normalizePages(initialPages), [initialPages]);
 
   useEffect(() => {
     getAdaptiveColor(mangaCover).then(setAdaptiveColor);
@@ -187,26 +262,35 @@ export const Reader = memo(({
   const data = useData();
   const { updateProgress, addReadingTime, settings, updateSetting, markChapterRead } = data || {};
 
-  const [loadedChapters, setLoadedChapters] = useState([]);
+  const [loadedChapters, setLoadedChapters] = useState(() => (
+    initialChapter ? [{ chapter: initialChapter, pages: safeInitialPages }] : []
+  ));
   const [isFetchingNext, setIsFetchingNext] = useState(false);
   const [localHasNext, setLocalHasNext] = useState(hasNext);
+  const [nextChapterError, setNextChapterError] = useState('');
 
   useEffect(() => {
-    setLoadedChapters([{ chapter: initialChapter, pages: initialPages }]);
+    setLoadedChapters(initialChapter ? [{ chapter: initialChapter, pages: safeInitialPages }] : []);
     setLocalHasNext(hasNext);
-  }, [initialChapter?.id, initialPages, hasNext]);
+    setNextChapterError('');
+    startPageRef.current = Math.max(0, initialPage || 0);
+    markedReadRef.current = new Set();
+    pendingPersistRef.current = null;
+    clearTimeout(persistTimerRef.current);
+    initialPositionKeyRef.current = null;
+  }, [initialChapter?.id, safeInitialPages, hasNext]);
 
   const allPages = useMemo(() => {
     let indexOffset = 0;
     return loadedChapters.flatMap(c => {
-      const chapterPages = c.pages.map((url, i) => ({
+      const chapterPages = normalizePages(c.pages).map((url, i) => ({
         url,
         chapter: c.chapter,
         localIndex: i,
-        total: c.pages.length,
+        total: normalizePages(c.pages).length,
         globalIndex: indexOffset + i
       }));
-      indexOffset += c.pages.length;
+      indexOffset += chapterPages.length;
       return chapterPages;
     });
   }, [loadedChapters]);
@@ -217,10 +301,9 @@ export const Reader = memo(({
   const [page, setPage] = useState(0);
 
   useEffect(() => {
-    if (initialPage > 0 && initialPage < pages.length && loadedChapters.length === 1) {
-      setPage(initialPage);
-    }
-  }, [initialPage, pages.length, loadedChapters.length]);
+    if (!pages.length || loadedChapters.length !== 1) return;
+    setPage(Math.max(0, Math.min(startPageRef.current, pages.length - 1)));
+  }, [initialChapter?.id, pages.length, loadedChapters.length]);
   const [theme, setTheme] = useState(settings?.readerTheme || 'dark');
   const [fitMode, setFitMode] = useState(settings?.fitMode || 'original');
   const [direction, setDirection] = useState(settings?.readerDirection || 'rtl');
@@ -242,6 +325,15 @@ export const Reader = memo(({
 
   const containerRef = useRef(null);
   const uiTimer = useRef(null);
+  const loadingNextRef = useRef(false);
+  const suppressNextTapRef = useRef(false);
+  const suppressTapTimerRef = useRef(null);
+  const initialPositionKeyRef = useRef(null);
+  const startPageRef = useRef(Math.max(0, initialPage || 0));
+  const persistTimerRef = useRef(null);
+  const pendingPersistRef = useRef(null);
+  const lastPersistRef = useRef({ key: '', at: 0 });
+  const markedReadRef = useRef(new Set());
   const sessionStart = useRef(Date.now());
   const T = THEMES[theme] || THEMES.dark;
   const accent = T.accent || '#f97316';
@@ -273,13 +365,13 @@ export const Reader = memo(({
       const target = containerRef.current.querySelector(`[data-page="${np}"]`);
       if (target) {
         containerRef.current.scrollTo({
-          top: target.offsetTop - (settings?.readerMode === 'scroll' ? 52 : 0),
+          top: target.offsetTop - 54,
           behavior: smooth ? 'smooth' : 'auto'
         });
       }
     }
     nudgeUI();
-  }, [settings?.readerMode, allPagesRef, modeRef, nudgeUI]);
+  }, [allPagesRef, modeRef, nudgeUI]);
 
   const chapterRange = useMemo(() => {
     const cur = allPages[page];
@@ -301,6 +393,93 @@ export const Reader = memo(({
   const pagesLenRef = useLatest(pages.length);
   const hasNextRef = useLatest(localHasNext);
   const hasPrevRef = useLatest(hasPrev);
+  const loadedChaptersRef = useLatest(loadedChapters);
+
+  const persistPage = useCallback((pInfo) => {
+    if (!pInfo || !mangaId) return;
+    onPageChange?.(pInfo.localIndex, pInfo);
+
+    const key = `${mangaId}:${mangaSourceId || ''}:${pInfo.chapter.id}:${pInfo.localIndex}`;
+    if (lastPersistRef.current.key === key) return;
+
+    const save = (info) => {
+      if (!info) return;
+      const saveKey = `${mangaId}:${mangaSourceId || ''}:${info.chapter.id}:${info.localIndex}`;
+      lastPersistRef.current = { key: saveKey, at: Date.now() };
+      updateProgress?.(mangaId, info.chapter.id, info.chapter.number, info.localIndex, mangaSourceId);
+      if (info.localIndex >= info.total - 1 && !markedReadRef.current.has(String(info.chapter.id))) {
+        markedReadRef.current.add(String(info.chapter.id));
+        markChapterRead?.(mangaId, info.chapter.id, true, mangaSourceId);
+      }
+    };
+
+    const elapsed = Date.now() - lastPersistRef.current.at;
+    if (elapsed >= 700) {
+      clearTimeout(persistTimerRef.current);
+      pendingPersistRef.current = null;
+      save(pInfo);
+      return;
+    }
+
+    pendingPersistRef.current = pInfo;
+    clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = setTimeout(() => {
+      const pending = pendingPersistRef.current;
+      pendingPersistRef.current = null;
+      save(pending);
+    }, 700 - elapsed);
+  }, [mangaId, mangaSourceId, onPageChange, updateProgress, markChapterRead]);
+
+  useEffect(() => () => clearTimeout(persistTimerRef.current), []);
+
+  const loadNextChapter = useCallback(async () => {
+    if (loadingNextRef.current || !fetchNextChapter || !hasNextRef.current) return null;
+
+    const lastEntry = loadedChaptersRef.current[loadedChaptersRef.current.length - 1];
+    const lastChapterId = lastEntry?.chapter?.id;
+    if (!lastChapterId) {
+      setLocalHasNext(false);
+      return null;
+    }
+
+    loadingNextRef.current = true;
+    setNextChapterError('');
+    setIsFetchingNext(true);
+
+    try {
+      const res = await fetchNextChapter(lastChapterId);
+      if (res?.error) {
+        setNextChapterError(res.error);
+        return null;
+      }
+
+      const nextPages = normalizePages(res?.pages);
+      if (res?.chapter && nextPages.length > 0) {
+        setLoadedChapters(prev => {
+          if (prev.some(item => item.chapter?.id === res.chapter.id)) return prev;
+          return [...prev, { chapter: res.chapter, pages: nextPages }];
+        });
+        return res;
+      }
+
+      setLocalHasNext(false);
+      return null;
+    } catch (e) {
+      setNextChapterError(e?.message || 'Failed to load the next chapter.');
+      return null;
+    } finally {
+      loadingNextRef.current = false;
+      setIsFetchingNext(false);
+    }
+  }, [fetchNextChapter, hasNextRef, loadedChaptersRef]);
+
+  useEffect(() => {
+    if (!allPages.length) {
+      if (page !== 0) setPage(0);
+      return;
+    }
+    if (page > allPages.length - 1) setPage(allPages.length - 1);
+  }, [allPages.length, page]);
 
   // ─ Persist settings (debounced 400ms so dragging sliders doesn't spam storage) ─
   useEffect(() => {
@@ -326,9 +505,9 @@ export const Reader = memo(({
     sessionStart.current = Date.now();
     return () => {
       const sec = Math.round((Date.now() - sessionStart.current) / 1000);
-      if (mangaId && addReadingTime && sec > 5) addReadingTime(mangaId, sec);
+      if (mangaId && addReadingTime && sec > 5) addReadingTime(mangaId, sec, mangaSourceId);
     };
-  }, [mangaId, initialChapter?.id, addReadingTime]);
+  }, [mangaId, mangaSourceId, initialChapter?.id, addReadingTime]);
 
   // ─ Auto-scroll (stable — speed changes via ref, not effect re-run) ─
   useEffect(() => {
@@ -350,10 +529,26 @@ export const Reader = memo(({
   // ─ Restore scroll position ─
   useEffect(() => {
     if (!containerRef.current || mode === 'paged') return;
+    if (startPageRef.current > 0) return;
     const key = `aka:sc:${mangaId}:${initialChapter?.id}`;
     const saved = +localStorage.getItem(key) || 0;
     if (saved > 20) setTimeout(() => { if (containerRef.current) containerRef.current.scrollTop = saved; }, 150);
   }, [initialChapter?.id, mode, mangaId]);
+
+  useEffect(() => {
+    if (mode === 'paged' || !containerRef.current || !pages.length || loadedChapters.length !== 1) return;
+    const targetPage = Math.max(0, Math.min(startPageRef.current, pages.length - 1));
+    const positionKey = `${mangaId}:${initialChapter?.id}:${targetPage}:${pages.length}`;
+    if (initialPositionKeyRef.current === positionKey) return;
+    initialPositionKeyRef.current = positionKey;
+    const target = containerRef.current.querySelector(`[data-page="${targetPage}"]`);
+    if (!target) return;
+    setTimeout(() => {
+      if (containerRef.current) {
+        containerRef.current.scrollTo({ top: target.offsetTop - 54, behavior: 'auto' });
+      }
+    }, 180);
+  }, [pages.length, loadedChapters.length, mode, mangaId, initialChapter?.id]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -380,40 +575,47 @@ export const Reader = memo(({
     }
 
     const step = isDouble ? delta * 2 : delta;
-    jumpToPage(currentP + step);
-    const np = Math.max(0, Math.min(allPagesRef.current.length - 1, pageRef.current + step));
-    const pInfo = allPagesRef.current[np];
-    if (pInfo) {
-      onPageChange?.(pInfo.localIndex);
-      updateProgress?.(mangaId, pInfo.chapter.id, pInfo.chapter.number, pInfo.localIndex);
-      if (pInfo.localIndex >= pInfo.total - 1) markChapterRead?.(mangaId, pInfo.chapter.id, true);
+    const targetPage = currentP + step;
+    const pageCount = allPagesRef.current.length;
+
+    if (targetPage >= pageCount) {
+      if (hasNextRef.current) onNextChapter?.();
+      else nudgeUI();
+      return;
     }
-  }, [jumpToPage, onPageChange, updateProgress, markChapterRead, mangaId, pageRef, allPagesRef, modeRef, doublePageRef]);
+
+    if (targetPage < 0) {
+      if (hasPrevRef.current) onPrevChapter?.();
+      else nudgeUI();
+      return;
+    }
+
+    const np = Math.max(0, Math.min(pageCount - 1, targetPage));
+    jumpToPage(np);
+    const pInfo = allPagesRef.current[np];
+    persistPage(pInfo);
+  }, [jumpToPage, persistPage, pageRef, allPagesRef, modeRef, doublePageRef, doublePageOffsetRef, hasNextRef, hasPrevRef, onNextChapter, onPrevChapter, nudgeUI]);
 
   // ─ Infinite Scroll Auto-Fetch (Observer based) ─
   const fetchSentinelRef = useRef(null);
   useEffect(() => {
     if (mode === 'paged' || isFetchingNext || !fetchNextChapter || !localHasNext || allPages.length === 0) return;
-    
+    const root = containerRef.current;
+    if (!root) return;
+
     const obs = new IntersectionObserver(([e]) => {
-      if (e.isIntersecting) {
-        const lastChap = loadedChapters[loadedChapters.length - 1].chapter;
-        setIsFetchingNext(true);
-        fetchNextChapter(lastChap.id).then(res => {
-          if (res && res.pages.length > 0) setLoadedChapters(prev => [...prev, res]);
-          else setLocalHasNext(false);
-          setIsFetchingNext(false);
-        });
-      }
-    }, { rootMargin: '800px 0px' }); // Trigger when 800px away from bottom
+      if (e.isIntersecting) loadNextChapter();
+    }, { root, rootMargin: '800px 0px' }); // Trigger when 800px away from bottom
 
     if (fetchSentinelRef.current) obs.observe(fetchSentinelRef.current);
     return () => obs.disconnect();
-  }, [mode, isFetchingNext, fetchNextChapter, localHasNext, allPages.length, loadedChapters]);
+  }, [mode, isFetchingNext, fetchNextChapter, localHasNext, allPages.length, loadNextChapter]);
 
   // ─ Scroll-mode page tracking ─
   useEffect(() => {
     if (mode === 'paged') return;
+    const root = containerRef.current;
+    if (!root) return;
     const obs = new IntersectionObserver(entries => {
       let best = null, br = 0;
       entries.forEach(e => { if (e.intersectionRatio > br) { br = e.intersectionRatio; best = e; } });
@@ -422,17 +624,13 @@ export const Reader = memo(({
         if (!isNaN(idx)) {
           setPage(idx);
           const pInfo = allPagesRef.current[idx];
-          if (pInfo) {
-            onPageChange?.(pInfo.localIndex);
-            updateProgress?.(mangaId, pInfo.chapter.id, pInfo.chapter.number, pInfo.localIndex);
-            if (pInfo.localIndex >= pInfo.total - 1) markChapterRead?.(mangaId, pInfo.chapter.id, true);
-          }
+          persistPage(pInfo);
         }
       }
-    }, { threshold: [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1], rootMargin: '-10% 0px' });
-    document.querySelectorAll('[data-page]').forEach(el => obs.observe(el));
+    }, { root, threshold: [0, 0.25, 0.5, 0.75, 1], rootMargin: '-54px 0px -10% 0px' });
+    root.querySelectorAll('[data-page]').forEach(el => obs.observe(el));
     return () => obs.disconnect();
-  }, [mode, mangaId, onPageChange, updateProgress, markChapterRead, allPagesRef, allPages.length]);
+  }, [mode, persistPage, allPagesRef, allPages.length]);
 
   // ─ Zoom recentering ─
   useEffect(() => {
@@ -440,12 +638,12 @@ export const Reader = memo(({
       const target = containerRef.current.querySelector(`[data-page="${pageRef.current}"]`);
       if (target) {
         containerRef.current.scrollTo({
-          top: target.offsetTop - (settings?.readerMode === 'scroll' ? 52 : 0),
+          top: target.offsetTop - 54,
           behavior: 'auto'
         });
       }
     }
-  }, [zoom, settings?.readerMode, modeRef, pageRef]);
+  }, [zoom, mode, modeRef, pageRef]);
 
   // ─ Keyboard shortcuts (registered ONCE — uses refs for live values) ─
   useEffect(() => {
@@ -479,9 +677,16 @@ export const Reader = memo(({
       } else if (k === 'PageUp') {
         e.preventDefault(); go(-1);
       } else if (k === 'End') {
-        e.preventDefault(); setPage(len - 1); onPageChange?.(len - 1);
+        e.preventDefault();
+        const idx = Math.max(0, len - 1);
+        jumpToPage(idx);
+        const pInfo = allPagesRef.current[idx];
+        persistPage(pInfo);
       } else if (k === 'Home') {
-        e.preventDefault(); setPage(0); onPageChange?.(0);
+        e.preventDefault();
+        jumpToPage(0);
+        const pInfo = allPagesRef.current[0];
+        persistPage(pInfo);
       } else if (k === 'n' || (k === 'ArrowRight' && e.ctrlKey)) {
         if (hasNextRef.current) { e.preventDefault(); onNextChapter?.(); }
       } else if (k === 'p' || (k === 'ArrowLeft' && e.ctrlKey)) {
@@ -510,7 +715,7 @@ export const Reader = memo(({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [go, onBack, onNextChapter, onPrevChapter, onPageChange, nudgeUI]);
+  }, [go, jumpToPage, allPagesRef, onBack, onNextChapter, onPrevChapter, persistPage, nudgeUI]);
 
   // ─ Trackpad / mouse wheel paging for desktop (paged mode only) ─
   useEffect(() => {
@@ -539,7 +744,21 @@ export const Reader = memo(({
   }, []);
 
   // ─ Tap handling ─
+  useEffect(() => () => clearTimeout(suppressTapTimerRef.current), []);
+
+  const suppressNextTap = useCallback(() => {
+    suppressNextTapRef.current = true;
+    clearTimeout(suppressTapTimerRef.current);
+    suppressTapTimerRef.current = setTimeout(() => {
+      suppressNextTapRef.current = false;
+    }, 450);
+  }, []);
+
   const handleTap = useCallback(e => {
+    if (suppressNextTapRef.current) {
+      suppressNextTapRef.current = false;
+      return;
+    }
     if (panelOpenRef.current) { setPanelOpen(false); return; }
     if (zoomRef.current > 1.05) { nudgeUI(); return; }
     const x = e.clientX / window.innerWidth;
@@ -564,8 +783,15 @@ export const Reader = memo(({
   };
 
   if (pages.length === 0) return (
-    <div style={{ position: 'fixed', inset: 0, background: T.bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16 }}>
-      <Spin size={40} />
+    <div style={{ position: 'fixed', inset: 0, background: T.bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, padding: 24, textAlign: 'center', color: T.text }}>
+      <div style={{ width: 56, height: 56, borderRadius: 16, background: `${accent}18`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: accent }}>
+        <BookOpen size={28} />
+      </div>
+      <h2 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>No pages found</h2>
+      <p style={{ color: 'rgba(255,255,255,0.48)', fontSize: 13, maxWidth: 360, lineHeight: 1.6, margin: 0 }}>
+        This chapter did not return any readable pages. Try another chapter or reload it from the manga details page.
+      </p>
+      <Btn onClick={onBack} icon={ChevronLeft}>Back to Manga</Btn>
     </div>
   );
 
@@ -622,7 +848,7 @@ export const Reader = memo(({
         opacity: uiVisible ? 1 : 0,
         boxShadow: '0 4px 30px rgba(0,0,0,0.3)'
       }}>
-        <button onClick={onBack} style={{ width: 36, height: 36, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.07)', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}>
+        <button onClick={onBack} title="Back to manga" aria-label="Back to manga" style={{ width: 36, height: 36, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.07)', color: '#fff', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.2s' }}>
           <ChevronLeft size={18} />
         </button>
 
@@ -634,7 +860,7 @@ export const Reader = memo(({
         </div>
 
         <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={() => setShowReceipt(true)} style={{ width: 36, height: 36, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.07)', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }} title="Reading Stats">
+          <button onClick={() => setShowReceipt(true)} title="Reading stats" aria-label="Reading stats" style={{ width: 36, height: 36, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.07)', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <Activity size={16} />
           </button>
         </div>
@@ -643,21 +869,22 @@ export const Reader = memo(({
       {/* ── Bottom Floating Controls ── */}
       <div style={{
         position: 'fixed', bottom: 24, left: '50%', transform: `translateX(-50%) ${uiVisible ? 'translateY(0)' : 'translateY(40px)'}`,
-        width: 'calc(100% - 48px)', maxWidth: 840, zIndex: 300,
+        width: 'min(840px, calc(100vw - 24px))', zIndex: 300,
         background: 'rgba(15,16,25,0.85)', backdropFilter: 'blur(32px) saturate(2)',
-        border: '1px solid rgba(255,255,255,0.1)', borderRadius: 24, padding: '16px 24px',
+        border: '1px solid rgba(255,255,255,0.1)', borderRadius: 18, padding: '12px 14px',
         transition: 'all 0.45s cubic-bezier(0.16, 1, 0.3, 1)',
         opacity: uiVisible ? 1 : 0,
         boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
-        display: 'flex', flexDirection: 'column', gap: 16
+        display: 'flex', flexDirection: 'column', gap: 12
       }}>
         {/* Scrubber (Focused on current chapter) */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
           <button
-            onClick={() => { jumpToPage(chapterRange.start - 1); }}
-            disabled={chapterRange.start === 0}
-            style={{ width: 34, height: 34, borderRadius: 12, border: 'none', background: 'rgba(255,255,255,0.05)', color: chapterRange.start > 0 ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.15)', cursor: chapterRange.start > 0 ? 'pointer' : 'default', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-            title="Previous Chapter"
+            onClick={() => { if (chapterRange.start === 0 && hasPrev) onPrevChapter?.(); else jumpToPage(chapterRange.start - 1); }}
+            disabled={chapterRange.start === 0 && !hasPrev}
+            style={{ width: 34, height: 34, borderRadius: 12, border: 'none', background: 'rgba(255,255,255,0.05)', color: (chapterRange.start > 0 || hasPrev) ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.15)', cursor: (chapterRange.start > 0 || hasPrev) ? 'pointer' : 'default', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+            title="Previous chapter"
+            aria-label="Previous chapter"
           >
             <SkipBack size={14} />
           </button>
@@ -690,7 +917,11 @@ export const Reader = memo(({
               min={chapterRange.start}
               max={chapterRange.end}
               value={page}
-              onInput={e => jumpToPage(+e.target.value, false)}
+              onInput={e => {
+                const nextPage = +e.target.value;
+                jumpToPage(nextPage, false);
+                persistPage(allPagesRef.current[nextPage]);
+              }}
               style={{
                 width: '100%',
                 accentColor: adaptiveColor,
@@ -707,25 +938,29 @@ export const Reader = memo(({
           </span>
 
           <button
-            onClick={() => { jumpToPage(chapterRange.end + 1); }}
+            onClick={() => {
+              if (chapterRange.end >= pages.length - 1 && localHasNext) onNextChapter?.();
+              else jumpToPage(chapterRange.end + 1);
+            }}
             disabled={!localHasNext && page === pages.length - 1}
             style={{ width: 34, height: 34, borderRadius: 12, border: 'none', background: 'rgba(255,255,255,0.05)', color: (localHasNext || page < pages.length - 1) ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.15)', cursor: (localHasNext || page < pages.length - 1) ? 'pointer' : 'default', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-            title="Next Chapter"
+            title="Next chapter"
+            aria-label="Next chapter"
           >
             <SkipForward size={14} />
           </button>
         </div>
 
         {/* Toolbar */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             <ToolbarBtn active={mode === 'scroll'} accent={accent} onClick={() => setMode('scroll')} icon={<Columns size={15} />} label="Scroll" />
             <ToolbarBtn active={mode === 'paged'} accent={accent} onClick={() => setMode('paged')} icon={<BookOpen size={15} />} label="Paged" />
             <ToolbarBtn active={mode === 'webtoon'} accent={accent} onClick={() => setMode('webtoon')} icon={<AlignJustify size={15} />} label="Strip" />
           </div>
 
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <button onClick={() => setAutoScroll(a => !a)} style={{
+            <button onClick={() => setAutoScroll(a => !a)} title={autoScroll ? 'Pause auto-scroll' : 'Start auto-scroll'} aria-label={autoScroll ? 'Pause auto-scroll' : 'Start auto-scroll'} style={{
               width: 40, height: 40, borderRadius: 14, border: 'none',
               background: autoScroll ? `${adaptiveColor}20` : 'rgba(255,255,255,0.06)',
               color: autoScroll ? adaptiveColor : 'rgba(255,255,255,0.6)',
@@ -738,7 +973,7 @@ export const Reader = memo(({
 
             <div style={{ width: 1, height: 24, background: 'rgba(255,255,255,0.1)', margin: '0 4px' }} />
 
-            <button onClick={() => setPanelOpen(true)} style={{ width: 34, height: 34, borderRadius: 12, border: 'none', background: 'rgba(255,255,255,0.05)', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <button onClick={() => setPanelOpen(true)} title="Reader settings" aria-label="Reader settings" style={{ width: 34, height: 34, borderRadius: 12, border: 'none', background: 'rgba(255,255,255,0.05)', color: 'rgba(255,255,255,0.6)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Settings2 size={16} />
             </button>
           </div>
@@ -763,7 +998,7 @@ export const Reader = memo(({
           }} onClick={e => e.stopPropagation()}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 32 }}>
               <h3 style={{ fontSize: 20, fontWeight: 800, color: '#fff', margin: 0, letterSpacing: -0.5 }}>Reader Settings</h3>
-              <button onClick={() => setPanelOpen(false)} style={{ width: 32, height: 32, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.4)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <button onClick={() => setPanelOpen(false)} title="Close reader settings" aria-label="Close reader settings" style={{ width: 32, height: 32, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.4)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 <X size={16} />
               </button>
             </div>
@@ -771,9 +1006,9 @@ export const Reader = memo(({
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 32, scrollbarWidth: 'none' }}>
               <Section title="Reading Mode">
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-                  <ModeCard active={mode === 'scroll'} accent={accent} onClick={() => setMode('scroll')} icon="↕️" label="Scroll" />
-                  <ModeCard active={mode === 'paged'} accent={accent} onClick={() => setMode('paged')} icon="📖" label="Paged" />
-                  <ModeCard active={mode === 'webtoon'} accent={accent} onClick={() => setMode('webtoon')} icon="📜" label="Strip" />
+                  <ModeCard active={mode === 'scroll'} accent={accent} onClick={() => setMode('scroll')} icon={<Columns size={22} />} label="Scroll" />
+                  <ModeCard active={mode === 'paged'} accent={accent} onClick={() => setMode('paged')} icon={<BookOpen size={22} />} label="Paged" />
+                  <ModeCard active={mode === 'webtoon'} accent={accent} onClick={() => setMode('webtoon')} icon={<AlignJustify size={22} />} label="Strip" />
                 </div>
               </Section>
 
@@ -814,11 +1049,15 @@ export const Reader = memo(({
       {mode === 'paged' ? (
         <div
           onClick={handleTap}
-          onTouchStart={e => setTouchStart(e.touches[0].clientX)}
+          onTouchStart={e => setTouchStart({ x: e.touches[0].clientX, y: e.touches[0].clientY })}
           onTouchEnd={e => {
             if (touchStart != null && zoom <= 1.05) {
-              const d = touchStart - e.changedTouches[0].clientX;
-              if (Math.abs(d) > 48) direction === 'rtl' ? go(d > 0 ? 1 : -1) : go(d > 0 ? -1 : 1);
+              const dx = touchStart.x - e.changedTouches[0].clientX;
+              const dy = touchStart.y - e.changedTouches[0].clientY;
+              if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.25) {
+                suppressNextTap();
+                direction === 'rtl' ? go(dx > 0 ? 1 : -1) : go(dx > 0 ? -1 : 1);
+              }
             }
             setTouchStart(null);
           }}
@@ -826,9 +1065,9 @@ export const Reader = memo(({
         >
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: direction === 'rtl' ? 'row-reverse' : 'row', gap: doublePage ? 2 : 0, minWidth: zoom > 1.05 ? `${zoom * 100}vw` : '100vw', minHeight: zoom > 1.05 ? `${zoom * 100}vh` : '100vh', padding: uiVisible ? '54px 0 100px' : '4px 0' }}>
             {doublePage && pages[direction === 'rtl' ? page + 1 : (page - 1)] !== undefined && (
-              <img src={proxyImg(pages[direction === 'rtl' ? page + 1 : (page - 1)])} draggable={false} alt="" style={{ display: 'block', userSelect: 'none', flexShrink: 0, filter: imgFilter, opacity: .88, maxWidth: '50vw', maxHeight: uiVisible ? 'calc(100vh - 154px)' : '100vh', height: fitMode === 'height' ? (uiVisible ? 'calc(100vh - 154px)' : '100vh') : 'auto', width: 'auto', objectFit: 'contain', animation: 'fadeIn .14s ease both' }} />
+              <PageImage url={pages[direction === 'rtl' ? page + 1 : (page - 1)]} alt="" style={{ display: 'block', userSelect: 'none', flexShrink: 0, filter: imgFilter, opacity: .88, maxWidth: '50vw', maxHeight: uiVisible ? 'calc(100vh - 154px)' : '100vh', height: fitMode === 'height' ? (uiVisible ? 'calc(100vh - 154px)' : '100vh') : 'auto', width: 'auto', objectFit: 'contain', animation: 'fadeIn .14s ease both' }} />
             )}
-            <img src={proxyImg(pages[page])} draggable={false} alt={`Page ${page + 1}`}
+            <PageImage url={pages[page]} alt={`Page ${page + 1}`}
               style={{ display: 'block', userSelect: 'none', flexShrink: 0, filter: imgFilter, animation: 'fadeIn .14s ease both', ...(zoom <= 1 ? { maxWidth: doublePage ? '50vw' : '100vw', maxHeight: uiVisible ? 'calc(100vh - 154px)' : '100vh', width: fitMode === 'width' ? (doublePage ? '50vw' : '100vw') : 'auto', height: fitMode === 'height' ? (uiVisible ? 'calc(100vh - 154px)' : '100vh') : 'auto', objectFit: 'contain' } : { maxWidth: 'none', maxHeight: 'none', width: fitMode === 'width' ? `${zoom * (doublePage ? 50 : 100)}vw` : 'auto', height: fitMode === 'height' ? `${zoom * 100}vh` : 'auto', zoom: fitMode === 'original' && zoom !== 1 ? zoom : undefined }) }}
             />
           </div>
@@ -837,9 +1076,16 @@ export const Reader = memo(({
         <div
           ref={containerRef}
           onClick={handleTap}
-          onTouchStart={e => setTouchStart(e.touches[0].clientX)}
-          onTouchEnd={e => { if (touchStart != null) { const d = touchStart - e.changedTouches[0].clientX; if (Math.abs(d) > 60) go(d > 0 ? 1 : -1); } setTouchStart(null); }}
-          style={{ height: '100vh', overflowY: 'auto', overflowX: isWebtoon ? 'hidden' : 'auto', paddingTop: uiVisible ? 54 : 0, scrollbarWidth: 'none', msOverflowStyle: 'none', transition: 'padding .2s ease' }}
+          onTouchStart={e => setTouchStart({ x: e.touches[0].clientX, y: e.touches[0].clientY })}
+          onTouchEnd={e => {
+            if (touchStart != null) {
+              const dx = touchStart.x - e.changedTouches[0].clientX;
+              const dy = touchStart.y - e.changedTouches[0].clientY;
+              if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.35) suppressNextTap();
+            }
+            setTouchStart(null);
+          }}
+          style={{ height: '100vh', overflowY: 'auto', overflowX: isWebtoon ? 'hidden' : 'auto', paddingTop: uiVisible ? 54 : 0, paddingBottom: 16, scrollbarWidth: 'none', msOverflowStyle: 'none', transition: 'padding .2s ease' }}
         >
           {allPages.map((p, i) => (
             <React.Fragment key={`${p.chapter.id}-${i}`}>
@@ -877,24 +1123,21 @@ export const Reader = memo(({
                 </div>
               )}
               <div data-page={i} style={{ display: 'flex', justifyContent: 'center', width: '100%', marginBottom: pageGap }}>
-                <img src={proxyImg(p.url)} alt={`Page ${i + 1}`} draggable={false} style={{ ...getScrollStyle(isWebtoon, fitMode, zoom) }} loading={i < page + 5 ? 'eager' : 'lazy'} />
+                <PageImage url={p.url} alt={`Page ${i + 1}`} style={{ ...getScrollStyle(isWebtoon, fitMode, zoom) }} loading={i < page + 5 ? 'eager' : 'lazy'} />
               </div>
             </React.Fragment>
           ))}
           {isFetchingNext && <div style={{ padding: '60px 0', display: 'flex', justifyContent: 'center' }}><Spin size={34} /></div>}
           {localHasNext && <div ref={fetchSentinelRef} style={{ height: 1, width: '100%' }} />}
+          {nextChapterError && (
+            <div style={{ maxWidth: 520, margin: '54px auto 0', padding: '18px 20px', borderRadius: 14, border: `1px solid ${accent}45`, background: `${accent}12`, color: 'rgba(255,255,255,0.78)', textAlign: 'center', fontSize: 13, lineHeight: 1.5 }}>
+              {nextChapterError}
+            </div>
+          )}
           {localHasNext && !isFetchingNext && (
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '80px 24px 120px', gap: 16 }}>
-              <button onClick={() => {
-                setIsFetchingNext(true);
-                const lastChap = loadedChapters[loadedChapters.length - 1].chapter;
-                fetchNextChapter(lastChap.id).then(res => {
-                  if (res && res.pages.length > 0) setLoadedChapters(prev => [...prev, res]);
-                  else setLocalHasNext(false);
-                  setIsFetchingNext(false);
-                });
-              }} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '16px 40px', borderRadius: 99, background: `linear-gradient(135deg,${accent},${accent}cc)`, color: '#fff', fontWeight: 800, fontSize: 16, border: 'none', cursor: 'pointer', boxShadow: `0 15px 40px ${accent}40`, transition: 'all 0.3s ease' }}>
-                Load Next Chapter <ChevronDown size={20} />
+              <button onClick={loadNextChapter} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '16px 40px', borderRadius: 99, background: `linear-gradient(135deg,${accent},${accent}cc)`, color: '#fff', fontWeight: 800, fontSize: 16, border: 'none', cursor: 'pointer', boxShadow: `0 15px 40px ${accent}40`, transition: 'all 0.3s ease' }}>
+                {nextChapterError ? 'Retry Next Chapter' : 'Load Next Chapter'} <ChevronDown size={20} />
               </button>
             </div>
           )}

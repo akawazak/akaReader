@@ -151,6 +151,10 @@ const mapRestExtension = (ext) => ({
 });
 
 // ── Health ─────────────────────────────────────────────────────────────────
+app.get('/api/ping', (_, res) => {
+  res.json({ ok: true, timestamp: Date.now() });
+});
+
 app.get('/api/health', async (_, res) => {
   let suwayomi = false;
   try {

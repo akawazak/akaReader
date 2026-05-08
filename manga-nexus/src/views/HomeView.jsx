@@ -1,5 +1,5 @@
 import React, { memo, useState, useMemo, useRef } from 'react';
-import { BookOpen, Clock, Play, Sparkles, BellRing, ChevronRight, ChevronLeft, Globe, Download, Library, Pen } from 'lucide-react';
+import { BookOpen, Clock, Play, Sparkles, BellRing, ChevronRight, ChevronLeft, Globe, Download, Library, Pen, Puzzle } from 'lucide-react';
 import { timeAgo, proxyImg } from '../utils/helpers';
 import { Btn } from '../components/ui/Btn';
 import { MangaCard } from '../components/manga/MangaCard';
@@ -34,7 +34,7 @@ const HeroRow = memo(({ title, icon: Icon, items, progress, getMangaKey, onSelec
       <div style={{ margin: '0 -32px', padding: '0 32px 24px', overflowX: 'auto', scrollbarWidth: 'none', msOverflowStyle: 'none' }}>
         <div ref={scrollRef} style={{ display: 'flex', gap: 20, overflowX: 'auto', paddingBottom: 16, scrollbarWidth: 'none', msOverflowStyle: 'none', scrollSnapType: 'x mandatory' }}>
           {items.map((m, i) => (
-            <div key={m.id} style={{ width: 180, minWidth: 180, flexShrink: 0, scrollSnapAlign: 'start' }}>
+            <div key={getMangaKey(m.id, m.sourceId)} style={{ width: 180, minWidth: 180, flexShrink: 0, scrollSnapAlign: 'start' }}>
               <MangaCard manga={m} onClick={onSelect} index={i} eager badge={showTime && m.lastRead ? timeAgo(m.lastRead) : null} category={m.categoryId} progress={(progress[getMangaKey(m.id, m.sourceId)]?.chapterNum / (m.totalChapters || null)) * 100 || 0} />
             </div>
           ))}
@@ -53,15 +53,15 @@ export const HomeView = memo(({ history, library, progress, sources, updates, ge
   const sourceCount = Object.keys(sources).length;
 
   if (!hero && library.length === 0) return (
-    <div className="anim-fadeIn" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '80vh', gap: 32, padding: '40px', textAlign: 'center' }}>
-      <div style={{ width: 120, height: 120, borderRadius: 32, background: 'var(--accent-pale)', border: '1px solid var(--accent-mid)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 16px 48px var(--accent-glow)' }}><BookOpen size={48} style={{ color: 'var(--accent)' }} /></div>
+    <div className="anim-fadeIn" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 'calc(100vh - 130px)', gap: 22, padding: '24px', textAlign: 'center' }}>
+      <div style={{ width: 88, height: 88, borderRadius: 24, background: 'var(--accent-pale)', border: '1px solid var(--accent-mid)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 16px 48px var(--accent-glow)' }}><BookOpen size={38} style={{ color: 'var(--accent)' }} /></div>
       <div>
-        <h2 style={{ fontFamily: 'var(--font-display)', fontWeight: 900, fontSize: 36, marginBottom: 12, letterSpacing: '-0.02em' }}>Welcome to akaReader</h2>
-        <p style={{ color: 'var(--text-dim)', fontSize: 16, lineHeight: 1.8, maxWidth: 500, margin: '0 auto' }}>
+        <h2 style={{ fontFamily: 'var(--font-display)', fontWeight: 900, fontSize: 30, marginBottom: 10, letterSpacing: 0 }}>Welcome to akaReader</h2>
+        <p style={{ color: 'var(--text-dim)', fontSize: 15, lineHeight: 1.65, maxWidth: 500, margin: '0 auto' }}>
           {sourceCount === 0 ? 'Start your journey by installing extensions, then browse amazing sources to find manga you love.' : `You have ${sourceCount} sources ready. Immerse yourself in a new world.`}
         </p>
       </div>
-      <div style={{ display: 'flex', gap: 16, marginTop: 10 }}>
+      <div style={{ display: 'flex', gap: 12, marginTop: 4, flexWrap: 'wrap', justifyContent: 'center' }}>
         {sourceCount === 0 && <Btn size="lg" onClick={() => onSwitchTab('extensions')} icon={Puzzle}>Install Extensions</Btn>}
         <Btn size="lg" variant={sourceCount ? 'default' : 'outline'} onClick={() => onSwitchTab('browse')} icon={BookOpen}>Browse Catalogs</Btn>
       </div>
@@ -196,7 +196,7 @@ export const HomeView = memo(({ history, library, progress, sources, updates, ge
           ))}
         </div>
 
-        {continueReading.length > 0 && <HeroRow title="Jump Back In" icon={Clock} items={continueReading} progress={progress} getMangaKey={getMangaKey} onSelect={onSelect} showTime />}
+        {continueReading.length > 0 && <HeroRow title="Jump Back In" icon={Clock} items={continueReading} progress={progress} getMangaKey={getMangaKey} onSelect={onContinue || onSelect} showTime />}
         
         {recentLib.length > 0 && (
           <div style={{ marginTop: 24 }}>

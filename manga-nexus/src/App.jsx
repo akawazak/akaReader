@@ -12,11 +12,13 @@ import {
   MoreVertical, Share2, ExternalLink, Archive, Star, Flame, Activity,
   ChevronUp, ChevronDown, ZoomIn, ZoomOut, Settings, Sliders, BellRing,
   SlidersHorizontal, Coffee, AlertCircle, RotateCcw, ChevronRightCircle,
-  Pen, Sparkles, Bookmark, Award, StickyNote, Pencil, Pause, Settings2, Plus
+  Pen, Sparkles, Bookmark, Award, StickyNote, Pencil, Pause, Settings2, Plus,
+  AlignJustify
 } from 'lucide-react';
 
 import { Reader as NewReader } from './components/reader/Reader';
 import { HomeView as HomeTab } from './views/HomeView';
+import { DataContext, useData } from './contexts/DataContext';
 
 // ==================== CONFIG & CONSTANTS ====================
 
@@ -41,20 +43,22 @@ class ErrorBoundary extends React.Component {
 }
 
 const CONFIG = {
-  API: 'http://localhost:3001/api',
-  SUWAYOMI: 'http://localhost:4567',
+  API: import.meta.env.VITE_API_BASE_URL || '/api',
+  SUWAYOMI: import.meta.env.VITE_SUWAYOMI_BASE_URL || 'http://localhost:4567',
   DEBOUNCE_DELAY: 300,
   UPDATE_INTERVAL: 3600000,
 };
 
 const proxyImg = (url) => {
   if (!url) return null;
-  if (url.startsWith('http://localhost:4567') || url.startsWith('/')) {
+  if (url.startsWith(CONFIG.SUWAYOMI) || url.startsWith('/')) {
     const absolute = url.startsWith('/') ? `${CONFIG.SUWAYOMI}${url}` : url;
     return `${CONFIG.API}/img?url=${encodeURIComponent(absolute)}`;
   }
   return url;
 };
+
+const getDownloadKey = (mangaKey, chapterId) => `${mangaKey}___${chapterId}`;
 
 const LANGUAGES = [
   { value: 'all', label: 'All Languages' },
@@ -428,7 +432,6 @@ const ToastProvider = memo(({ children }) => {
 });
 const useToast = () => useContext(ToastContext);
 
-const DataContext = createContext(null);
 const getMangaKey = (id, sourceId) => {
   if (!id) return null;
   const sId = String(id);
@@ -536,7 +539,6 @@ const DataProvider = memo(({ children }) => {
     if (newTime) setReadingTime(newTime);
 
     storage.set('keyMigrationV2', true);
-    console.log('[Migration] Manga keys updated to composite format');
   }, [library, history]);
 
   const toastRef = useRef(null);
@@ -716,7 +718,21 @@ const DataProvider = memo(({ children }) => {
   const updateProgress = useCallback((mangaId, chapterId, chapterNum, page, sourceId) => {
     if (!mangaId) return;
     const key = getMangaKey(mangaId, sourceId);
-    setProgress(p => ({ ...p, [key]: { chapterId, chapterNum, page, lastRead: Date.now() } }));
+    const now = Date.now();
+    setProgress(prev => {
+      const current = prev[key];
+      if (
+        current?.chapterId === chapterId &&
+        current?.chapterNum === chapterNum &&
+        current?.page === page &&
+        now - (current?.lastRead || 0) < 2000
+      ) {
+        return prev;
+      }
+      return { ...prev, [key]: { chapterId, chapterNum, page, lastRead: now } };
+    });
+    setHistory(prev => prev.map(m => getMangaKey(m.id, m.sourceId) === key ? { ...m, lastRead: now } : m));
+    setLibrary(prev => prev.map(m => getMangaKey(m.id, m.sourceId) === key ? { ...m, lastRead: now } : m));
   }, []);
 
   const markChapterRead = useCallback((mangaId, chapterId, isRead = true, sourceId) => {
@@ -730,9 +746,9 @@ const DataProvider = memo(({ children }) => {
     });
 
     if (isRead && settings?.autoDeleteRead) {
-      deleteChapterBlobs(mangaId, chapterId);
+      deleteChapterBlobs(getMangaKey(mangaId, sourceId), chapterId).then(refreshDownloads);
     }
-  }, [settings?.autoDeleteRead]);
+  }, [settings?.autoDeleteRead, getMangaKey, refreshDownloads]);
 
   const addReadingTime = useCallback((mangaId, seconds, sourceId) => {
     if (!mangaId || seconds <= 0) return;
@@ -749,60 +765,64 @@ const DataProvider = memo(({ children }) => {
       const newMangaDetail = await fetchJSON(`/source/${newSource.id}/manga/${newItem.id}`);
       if (!newMangaDetail || newMangaDetail.error) throw new Error('Failed to fetch new manga details');
 
-      const oldId = String(oldManga.id);
-      const newId = String(newItem.id);
+      const oldKey = getMangaKey(oldManga.id, oldManga.sourceId);
+      const newKey = getMangaKey(newItem.id, newSource.id);
 
       // 1. Progress
-      const oldProg = progress[oldId];
+      const oldProg = progress[oldKey];
       if (oldProg) {
         const newCh = newMangaDetail.chapters.find(c => String(c.number) === String(oldProg.chapterNum));
-        if (newCh) setProgress(prev => ({ ...prev, [newId]: { chapterId: newCh.id, chapterNum: newCh.number, page: oldProg.page, lastRead: Date.now() } }));
+        if (newCh) setProgress(prev => ({ ...prev, [newKey]: { chapterId: newCh.id, chapterNum: newCh.number, page: oldProg.page, lastRead: Date.now() } }));
       }
 
       // 2. Library
-      const libEntry = library.find(m => String(m.id) === oldId && String(m.sourceId) === String(oldManga.sourceId));
+      const libEntry = library.find(m => String(m.id) === String(oldManga.id) && String(m.sourceId) === String(oldManga.sourceId));
       if (libEntry) {
-        const cat = mangaCategories[oldId];
+        const cat = mangaCategories[oldKey];
         setLibrary(prev => {
-          const filtered = prev.filter(m => String(m.id) !== oldId);
+          const filtered = prev.filter(m => !(String(m.id) === String(oldManga.id) && String(m.sourceId) === String(oldManga.sourceId)));
           return [{ id: newItem.id, title: newItem.title, cover: newItem.cover, sourceId: newSource.id, addedAt: libEntry.addedAt }, ...filtered];
         });
-        if (cat) setMangaCategories(prev => ({ ...prev, [newId]: cat }));
+        if (cat) setMangaCategories(prev => ({ ...prev, [newKey]: cat }));
       }
 
       // 3. History
       setHistory(prev => {
-        const filtered = prev.filter(m => String(m.id) !== oldId);
+        const filtered = prev.filter(m => !(String(m.id) === String(oldManga.id) && String(m.sourceId) === String(oldManga.sourceId)));
         return [{ id: newItem.id, title: newMangaDetail.title, cover: newMangaDetail.cover, sourceId: newSource.id, author: newMangaDetail.author, lastRead: Date.now() }, ...filtered];
       });
 
       // 4. Cleanup
-      setMangaCategories(prev => { const n = { ...prev }; delete n[oldId]; return n; });
-      setProgress(prev => { const n = { ...prev }; delete n[oldId]; return n; });
-      setReadChapters(prev => { const n = { ...prev }; delete n[oldId]; return n; });
+      setMangaCategories(prev => { const n = { ...prev }; delete n[oldKey]; return n; });
+      setProgress(prev => { const n = { ...prev }; delete n[oldKey]; return n; });
+      setReadChapters(prev => { const n = { ...prev }; delete n[oldKey]; return n; });
 
       return true;
     } catch (e) {
       return false;
     }
-  }, [fetchJSON, progress, library, mangaCategories]);
+  }, [fetchJSON, progress, library, mangaCategories, getMangaKey]);
 
   const updateToastedRef = useRef(false);
   const queueChaptersForDownload = useCallback((chapters, mangaId, mangaTitle, sourceId) => {
     const sorted = [...chapters].sort((a, b) => parseFloat(a.number) - parseFloat(b.number));
+    const mangaKey = getMangaKey(mangaId, sourceId);
     const newItems = sorted.map(ch => ({
       id: `${mangaId}__${ch.id}__${Date.now()}_${Math.random()}`,
       mangaId, mangaTitle, chapterId: ch.id, chapterNum: ch.number, sourceId,
+      downloadKey: getDownloadKey(mangaKey, ch.id),
       status: 'pending', progress: 0, pagesLoaded: 0, pagesTotal: 0, error: null
     }));
     setDownloadQueue(prev => {
-      const existing = new Set(prev.filter(d => d.status !== 'error' && d.status !== 'cancelled').map(d => d.chapterId));
-      const toAdd = newItems.filter(item => !existing.has(item.chapterId));
+      const existing = new Set(prev
+        .filter(d => d.status !== 'error' && d.status !== 'cancelled')
+        .map(d => d.downloadKey || getDownloadKey(getMangaKey(d.mangaId, d.sourceId), d.chapterId)));
+      const toAdd = newItems.filter(item => !existing.has(item.downloadKey));
       if (!toAdd.length) { toastRef.current?.('All selected chapters already queued or downloaded', 'warning'); return prev; }
       return [...prev, ...toAdd];
     });
     toastRef.current?.(`Queued ${newItems.length} chapters for download`, 'info');
-  }, []);
+  }, [getMangaKey]);
   useEffect(() => {
     if (dlProcessingRef.current) return;
     const pending = downloadQueue.find(d => d.status === 'pending');
@@ -859,13 +879,14 @@ const DataProvider = memo(({ children }) => {
         const data = await fetchJSON(`/source/${source.id}/manga/${manga.id}`);
         if (data.error) continue;
         const currentTotal = data.totalChapters;
-        const savedProgress = progress[manga.id];
+        const mKey = getMangaKey(manga.id, manga.sourceId);
+        const savedProgress = progress[mKey];
         const lastReadChapter = savedProgress ? parseInt(savedProgress.chapterNum) : 0;
         if (currentTotal > lastReadChapter) {
           newUpdates.push({ ...manga, newChapters: currentTotal - lastReadChapter });
         }
       } catch (e) {
-        console.warn(`Update check failed for ${manga.title}`, e);
+        // Ignore individual source failures so one broken extension does not block the update scan.
       }
     }
     setUpdates(newUpdates);
@@ -881,7 +902,6 @@ const DataProvider = memo(({ children }) => {
   }, [library, backendOnline, checkForUpdates]);
 
   useEffect(() => {
-    fetchSources(); fetchExtensions();
     checkHealth();
     const fastPoll = setInterval(() => {
       if (backendOnlineRef.current === null) checkHealth();
@@ -889,7 +909,13 @@ const DataProvider = memo(({ children }) => {
     }, 1000);
     const slowPoll = setInterval(checkHealth, 30000);
     return () => { clearInterval(fastPoll); clearInterval(slowPoll); };
-  }, [checkHealth, fetchSources, fetchExtensions]);
+  }, [checkHealth]);
+
+  useEffect(() => {
+    if (!suwayomiReady) return;
+    fetchSources();
+    fetchExtensions();
+  }, [suwayomiReady, fetchSources, fetchExtensions]);
 
   // Removed destructive cleanup effect that deleted manga when sources were temporarily offline
 
@@ -916,8 +942,6 @@ const DataProvider = memo(({ children }) => {
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 });
-const useData = () => useContext(DataContext);
-
 // ==================== UI PRIMITIVES ====================
 
 const Spin = memo(({ size = 24 }) => (
@@ -1157,719 +1181,6 @@ const ExtCard = memo(({ ext, onInstall, onUninstall, installing, onUpdate }) => 
   );
 });
 
-// ==================== READER ====================
-
-const OldReader = memo(({ pages, currentChapter, mangaTitle, onBack, onNextChapter, onPrevChapter, hasNext, hasPrev, onPageChange, initialPage = 0, mangaId }) => {
-  const data = useData();
-  const { updateProgress, addReadingTime, settings, updateSetting } = data || {};
-
-  const [mode, setMode] = useState(settings?.readerMode || 'scroll');
-  const [page, setPage] = useState(Math.min(initialPage, Math.max(0, pages.length - 1)));
-  const [theme, setTheme] = useState(settings?.readerTheme || 'dark');
-  const [fitMode, setFitMode] = useState(settings?.fitMode || 'height');
-  const [direction, setDirection] = useState(settings?.readerDirection || 'rtl');
-  const [doublePage, setDoublePage] = useState(settings?.readerDouble || false);
-  const [brightness, setBrightness] = useState(settings?.brightness || 100);
-  const [contrast, setContrast] = useState(settings?.readerContrast || 100);
-  const [saturation, setSaturation] = useState(settings?.readerSaturation || 100);
-  const [zoom, setZoom] = useState(1);
-  const [pageGap, setPageGap] = useState(settings?.readerGap || 0);
-
-  // NEW: Auto-scroll
-  const [autoScroll, setAutoScroll] = useState(false);
-  const [scrollSpeed, setScrollSpeed] = useState(settings?.scrollSpeed || 1);
-
-  const [uiVisible, setUiVisible] = useState(true);
-  const [panelOpen, setPanelOpen] = useState(false);
-  const [showReceipt, setShowReceipt] = useState(false);
-  const [touchStart, setTouchStart] = useState(null);
-
-  const containerRef = useRef(null);
-  const uiTimer = useRef(null);
-  const sessionStart = useRef(Date.now());
-  const T = THEMES[theme] || THEMES.dark;
-
-  useEffect(() => { updateSetting?.('readerMode', mode); }, [mode]);
-  useEffect(() => { updateSetting?.('readerTheme', theme); }, [theme]);
-  useEffect(() => { updateSetting?.('fitMode', fitMode); }, [fitMode]);
-  useEffect(() => { updateSetting?.('readerDirection', direction); }, [direction]);
-  useEffect(() => { updateSetting?.('readerDouble', doublePage); }, [doublePage]);
-  useEffect(() => { updateSetting?.('brightness', brightness); }, [brightness]);
-  useEffect(() => { updateSetting?.('readerContrast', contrast); }, [contrast]);
-  useEffect(() => { updateSetting?.('readerSaturation', saturation); }, [saturation]);
-  useEffect(() => { updateSetting?.('readerGap', pageGap); }, [pageGap]);
-  useEffect(() => { updateSetting?.('scrollSpeed', scrollSpeed); }, [scrollSpeed]);
-
-  useEffect(() => {
-    sessionStart.current = Date.now();
-    return () => {
-      const sec = Math.round((Date.now() - sessionStart.current) / 1000);
-      if (mangaId && addReadingTime && sec > 5) addReadingTime(mangaId, sec);
-    };
-  }, [mangaId, currentChapter?.id]);
-
-  // Handle auto-scroll loop
-  useEffect(() => {
-    if (!autoScroll || mode === 'paged') return;
-    let req;
-    const loop = () => {
-      if (containerRef.current) containerRef.current.scrollTop += scrollSpeed;
-      req = requestAnimationFrame(loop);
-    };
-    req = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(req);
-  }, [autoScroll, scrollSpeed, mode]);
-
-  useEffect(() => {
-    if (!containerRef.current || mode === 'paged') return;
-    const key = `aka:sc:${mangaId}:${currentChapter?.id}`;
-    const saved = +localStorage.getItem(key) || 0;
-    if (saved > 20) setTimeout(() => { if (containerRef.current) containerRef.current.scrollTop = saved; }, 150);
-  }, [currentChapter?.id, mode]);
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el || mode === 'paged') return;
-    const key = `aka:sc:${mangaId}:${currentChapter?.id}`;
-    const fn = () => localStorage.setItem(key, String(el.scrollTop));
-    el.addEventListener('scroll', fn, { passive: true });
-    return () => el.removeEventListener('scroll', fn);
-  }, [mode, mangaId, currentChapter?.id]);
-
-  const nudgeUI = useCallback(() => {
-    setUiVisible(true);
-    clearTimeout(uiTimer.current);
-    if (mode === 'paged') uiTimer.current = setTimeout(() => { if (!panelOpen) setUiVisible(false); }, 3500);
-  }, [mode, panelOpen]);
-
-  useEffect(() => {
-    if (mode !== 'paged') { clearTimeout(uiTimer.current); setUiVisible(true); }
-    else nudgeUI();
-    return () => clearTimeout(uiTimer.current);
-  }, [mode]);
-
-  const go = useCallback((delta) => {
-    const np = Math.max(0, Math.min(pages.length - 1, page + delta));
-    if (np === page) return;
-    setPage(np);
-    onPageChange?.(np);
-    updateProgress?.(mangaId, currentChapter?.id, currentChapter?.number, np);
-    nudgeUI();
-  }, [page, pages.length, onPageChange, updateProgress, mangaId, currentChapter, nudgeUI]);
-
-  useEffect(() => {
-    if (mode === 'paged') return;
-    const obs = new IntersectionObserver(entries => {
-      let best = null, br = 0;
-      entries.forEach(e => { if (e.intersectionRatio > br) { br = e.intersectionRatio; best = e; } });
-      if (best) {
-        const idx = +best.target.dataset.page;
-        if (!isNaN(idx)) { setPage(idx); onPageChange?.(idx); updateProgress?.(mangaId, currentChapter?.id, currentChapter?.number, idx); }
-      }
-    }, { threshold: 0.5, rootMargin: '-10% 0px' });
-    document.querySelectorAll('[data-page]').forEach(el => obs.observe(el));
-    return () => obs.disconnect();
-  }, [mode, pages.length, mangaId, currentChapter, onPageChange, updateProgress]);
-
-  useEffect(() => {
-    const h = e => {
-      if (e.target.tagName === 'INPUT') return;
-      const k = e.key;
-      if (k === 'Escape') { e.preventDefault(); if (panelOpen) setPanelOpen(false); else if (showReceipt) setShowReceipt(false); else onBack(); return; }
-      if (k === 'ArrowRight' || k === 'd') { if (mode === 'paged') direction === 'rtl' ? go(-1) : go(1); }
-      else if (k === 'ArrowLeft' || k === 'a') { if (mode === 'paged') direction === 'rtl' ? go(1) : go(-1); }
-      else if (k === 'ArrowDown') { if (mode === 'paged') go(1); }
-      else if (k === 'ArrowUp') { if (mode === 'paged') go(-1); }
-      else if (k === 'PageDown') { e.preventDefault(); go(1); }
-      else if (k === 'PageUp') { e.preventDefault(); go(-1); }
-      else if (k === 'End') { e.preventDefault(); setPage(pages.length - 1); onPageChange?.(pages.length - 1); }
-      else if (k === 'Home') { e.preventDefault(); setPage(0); onPageChange?.(0); }
-      else if (k === 'n' || (k === 'ArrowRight' && e.ctrlKey)) { if (hasNext) { e.preventDefault(); onNextChapter(); } }
-      else if (k === 'p' || (k === 'ArrowLeft' && e.ctrlKey)) { if (hasPrev) { e.preventDefault(); onPrevChapter(); } }
-      else if ((k === '+' || k === '=') && !e.ctrlKey) setZoom(z => Math.min(3, +(z + .25).toFixed(2)));
-      else if (k === '-' && !e.ctrlKey) setZoom(z => Math.max(.5, +(z - .25).toFixed(2)));
-      else if (k === '0') setZoom(1);
-      else if (k === 'm') setMode(m => ({ scroll: 'paged', paged: 'webtoon', webtoon: 'scroll' }[m] || 'scroll'));
-      else if (k === 'r') setDirection(d => d === 'rtl' ? 'ltr' : 'rtl');
-      else if (k === 'f') { if (!document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => { }); else document.exitFullscreen?.().catch(() => { }); }
-      else if (k === ' ') { e.preventDefault(); if (mode !== 'paged') setAutoScroll(prev => !prev); } // space toggles autoscroll
-      nudgeUI();
-    };
-    window.addEventListener('keydown', h);
-    return () => window.removeEventListener('keydown', h);
-  }, [mode, go, onBack, onNextChapter, onPrevChapter, hasNext, hasPrev, page, pages.length, onPageChange, panelOpen, showReceipt, direction, nudgeUI]);
-
-  const handleTap = useCallback(e => {
-    if (panelOpen) { setPanelOpen(false); return; }
-    if (mode !== 'paged') { setUiVisible(u => !u); return; }
-    if (zoom > 1.05) { nudgeUI(); return; }
-    const x = e.clientX / window.innerWidth;
-    if (direction === 'rtl') {
-      if (x < .28) go(-1);
-      else if (x > .72) go(1);
-      else setUiVisible(u => !u);
-    } else {
-      if (x < .28) go(1);
-      else if (x > .72) go(-1);
-      else setUiVisible(u => !u);
-    }
-  }, [mode, go, zoom, nudgeUI, panelOpen, direction]);
-
-  const pct = pages.length > 1 ? (page / (pages.length - 1)) * 100 : 0;
-  const minsLeft = Math.max(1, Math.ceil((pages.length - page - 1) * 0.3));
-
-  const imgFilter = `brightness(${brightness}%) contrast(${contrast}%) saturate(${saturation}%)`;
-
-  const getScrollStyle = (wt, fm, zm) => {
-    const b = { display: 'block', userSelect: 'none', filter: imgFilter };
-    if (wt) return { ...b, width: `${zm * 100}%`, maxWidth: `${860 * zm}px`, margin: '0 auto' };
-    if (fm === 'width') return { ...b, width: `${zm * 100}vw`, height: 'auto' };
-    if (fm === 'original') return { ...b, transform: zm !== 1 ? `scale(${zm})` : 'none', transformOrigin: 'top center', width: 'auto', height: 'auto' };
-    return { ...b, height: `${zm * 88}vh`, width: 'auto', maxWidth: '100%' };
-  };
-
-  const Seg = ({ val, onChange, opts }) => (
-    <div style={{ display: 'flex', gap: 2, background: 'rgba(255,255,255,0.06)', borderRadius: 10, padding: 3 }}>
-      {opts.map(([v, l]) => (
-        <button key={v} onClick={() => onChange(v)} style={{
-          flex: 1, padding: '8px 6px', borderRadius: 8, border: 'none', cursor: 'pointer',
-          background: val === v ? 'rgba(255,255,255,0.16)' : 'transparent',
-          color: val === v ? '#fff' : 'rgba(255,255,255,0.38)',
-          fontSize: 12, fontWeight: 700, transition: 'all .13s',
-          boxShadow: val === v ? '0 1px 6px rgba(0,0,0,.5)' : '',
-        }}>{l}</button>
-      ))}
-    </div>
-  );
-
-  // Upgraded draggable Slider component
-  const Sl = ({ icon: Icon, min, max, step = 1, val, onChange, fmt }) => (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-      {Icon && <Icon size={16} style={{ color: 'rgba(255,255,255,0.5)', flexShrink: 0 }} />}
-      <input type="range" min={min} max={max} step={step} value={val}
-        onPointerDown={e => e.stopPropagation()}
-        onTouchStart={e => e.stopPropagation()}
-        onChange={e => onChange(+e.target.value)}
-        style={{ flex: 1, cursor: 'grab', accentColor: T.accent }} />
-      <span style={{
-        fontFamily: 'monospace', fontSize: 13, fontWeight: 'bold', color: 'rgba(255,255,255,0.6)',
-        minWidth: 42, textAlign: 'right'
-      }}>{fmt(val)}</span>
-    </div>
-  );
-
-  const PanelSection = ({ title, children }) => (
-    <div>
-      <p style={{
-        fontSize: 11, letterSpacing: '.14em', textTransform: 'uppercase',
-        color: 'rgba(255,255,255,0.4)', marginBottom: 12, fontWeight: 800
-      }}>{title}</p>
-      {children}
-    </div>
-  );
-
-  if (pages.length === 0) return (
-    <div style={{
-      position: 'fixed', inset: 0, background: T.bg,
-      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16
-    }}>
-      <Spin size={40} />
-      <p style={{ color: 'rgba(255,255,255,0.25)', fontSize: 11, letterSpacing: '.2em', textTransform: 'uppercase' }}>Loading…</p>
-    </div>
-  );
-
-  const isWebtoon = mode === 'webtoon';
-
-  return (
-    <div style={{ position: 'fixed', inset: 0, background: T.bg, overflow: 'hidden' }}
-      onMouseMove={mode === 'paged' ? nudgeUI : undefined}>
-
-      {showReceipt && (
-        <ReadingReceipt
-          chapter={currentChapter}
-          pagesRead={pages.length}
-          timeSeconds={Math.round((Date.now() - sessionStart.current) / 1000)}
-          mangaTitle={mangaTitle}
-          hasNext={hasNext}
-          onNext={() => { setShowReceipt(false); onNextChapter(); }}
-          onBack={() => { setShowReceipt(false); onBack(); }}
-        />
-      )}
-
-      <div style={{ position: 'fixed', top: 0, left: 0, right: 0, height: 2, zIndex: 300, pointerEvents: 'none' }}>
-        <div style={{
-          height: '100%', width: `${pct}%`, transition: 'width .2s ease',
-          background: `linear-gradient(90deg,${T.accent},${T.accent}88)`,
-          boxShadow: `0 0 8px ${T.accent}60`
-        }} />
-      </div>
-
-      <div style={{
-        position: 'fixed', top: 0, left: 0, right: 0, zIndex: 200,
-        padding: '14px 16px 14px',
-        background: 'linear-gradient(to bottom,rgba(0,0,0,.86) 0%,rgba(0,0,0,.3) 75%,transparent 100%)',
-        display: 'flex', alignItems: 'center', gap: 12,
-        opacity: uiVisible ? 1 : 0,
-        transform: uiVisible ? 'none' : 'translateY(-8px)',
-        transition: 'opacity .22s ease, transform .22s ease',
-        pointerEvents: uiVisible ? 'all' : 'none',
-      }}>
-        <button onClick={onBack} style={{
-          display: 'flex', alignItems: 'center', gap: 6,
-          padding: '7px 14px 7px 10px', borderRadius: 99,
-          background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(16px)',
-          border: '1px solid rgba(255,255,255,0.12)',
-          color: 'rgba(255,255,255,0.85)', fontSize: 13, fontWeight: 600,
-          cursor: 'pointer', transition: 'all .15s', flexShrink: 0,
-        }}
-          onMouseEnter={e => { e.currentTarget.style.background = 'rgba(0,0,0,0.7)'; e.currentTarget.style.color = '#fff'; }}
-          onMouseLeave={e => { e.currentTarget.style.background = 'rgba(0,0,0,0.5)'; e.currentTarget.style.color = 'rgba(255,255,255,0.85)'; }}>
-          <ChevronLeft size={15} />Back
-        </button>
-
-        <div style={{ flex: 1, minWidth: 0, textAlign: 'center' }}>
-          <p style={{
-            fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 13,
-            color: 'rgba(255,255,255,0.9)', overflow: 'hidden', textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap', lineHeight: 1.2
-          }}>
-            {mangaTitle}
-          </p>
-          <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
-            Ch.{currentChapter?.number}
-            {currentChapter?.title && currentChapter.title !== `Chapter ${currentChapter.number}` && (
-              <span> — {currentChapter.title}</span>
-            )}
-          </p>
-        </div>
-
-        <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-          <button onClick={() => setShowReceipt(true)}
-            title="Reading Stats"
-            style={{
-              width: 34, height: 34, borderRadius: 99, border: 'none',
-              background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(16px)',
-              color: 'rgba(255,255,255,0.7)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: 'pointer', transition: 'all .15s'
-            }}
-            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(0,0,0,0.7)'; e.currentTarget.style.color = '#fff'; }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'rgba(0,0,0,0.5)'; e.currentTarget.style.color = 'rgba(255,255,255,0.7)'; }}>
-            <Activity size={13} />
-          </button>
-          <button onClick={onPrevChapter} disabled={!hasPrev}
-            style={{
-              width: 34, height: 34, borderRadius: 99, border: 'none',
-              background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(16px)',
-              color: hasPrev ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.2)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: hasPrev ? 'pointer' : 'default', transition: 'all .15s'
-            }}
-            onMouseEnter={e => { if (hasPrev) { e.currentTarget.style.background = 'rgba(0,0,0,0.7)'; e.currentTarget.style.color = '#fff'; } }}
-            onMouseLeave={e => { if (hasPrev) { e.currentTarget.style.background = 'rgba(0,0,0,0.5)'; e.currentTarget.style.color = 'rgba(255,255,255,0.7)'; } }}>
-            <SkipBack size={13} />
-          </button>
-          <button onClick={() => hasNext ? onNextChapter() : null}
-            disabled={!hasNext}
-            style={{
-              width: 34, height: 34, borderRadius: 99, border: 'none',
-              background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(16px)',
-              color: hasNext ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.2)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              cursor: hasNext ? 'pointer' : 'default', transition: 'all .15s'
-            }}
-            onMouseEnter={e => { if (hasNext) { e.currentTarget.style.background = 'rgba(0,0,0,0.7)'; e.currentTarget.style.color = '#fff'; } }}
-            onMouseLeave={e => { if (hasNext) { e.currentTarget.style.background = 'rgba(0,0,0,0.5)'; e.currentTarget.style.color = 'rgba(255,255,255,0.7)'; } }}>
-            <SkipForward size={13} />
-          </button>
-        </div>
-      </div>
-
-      <div style={{
-        position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 200,
-        padding: '8px 16px 12px',
-        background: 'linear-gradient(to top,rgba(0,0,0,.88) 0%,rgba(0,0,0,.4) 70%,transparent 100%)',
-        opacity: uiVisible ? 1 : 0,
-        transform: uiVisible ? 'none' : 'translateY(8px)',
-        transition: 'opacity .22s ease, transform .22s ease',
-        pointerEvents: uiVisible ? 'all' : 'none',
-      }}>
-        {mode === 'paged' && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>
-            <span style={{
-              fontSize: 12, color: 'rgba(255,255,255,0.5)', fontWeight: 'bold',
-              minWidth: 22, fontFamily: 'monospace'
-            }}>{page + 1}</span>
-            <input type="range" min={0} max={pages.length - 1} value={page}
-              onPointerDown={e => e.stopPropagation()}
-              onTouchStart={e => e.stopPropagation()}
-              onChange={e => { const p = +e.target.value; setPage(p); onPageChange?.(p); updateProgress?.(mangaId, currentChapter?.id, currentChapter?.number, p); }}
-              style={{ flex: 1, accentColor: T.accent, cursor: 'grab' }} />
-            <span style={{
-              fontSize: 12, color: 'rgba(255,255,255,0.5)', fontWeight: 'bold',
-              minWidth: 22, textAlign: 'right', fontFamily: 'monospace'
-            }}>{pages.length}</span>
-          </div>
-        )}
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          {/* Quick Brightness slider on main bottom bar */}
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(0,0,0,0.55)',
-            backdropFilter: 'blur(20px)', border: '1px solid rgba(255,255,255,0.09)',
-            borderRadius: 99, padding: '4px 12px', minWidth: 100, maxWidth: 160
-          }}>
-            <Sun size={14} style={{ color: 'rgba(255,255,255,0.5)' }} />
-            <input type="range" min={40} max={150} value={brightness}
-              onPointerDown={e => e.stopPropagation()}
-              onTouchStart={e => e.stopPropagation()}
-              onChange={e => setBrightness(+e.target.value)}
-              style={{ flex: 1, accentColor: T.accent, margin: 0, height: 4 }} />
-          </div>
-
-          <div style={{ flex: 1 }} />
-
-          <div style={{ textAlign: 'center', padding: '0 4px' }}>
-            <div style={{
-              fontSize: 12, fontWeight: 700, color: 'rgba(255,255,255,0.6)',
-              fontFamily: 'monospace', lineHeight: 1
-            }}>
-              {page + 1}<span style={{ color: 'rgba(255,255,255,0.25)' }}>/{pages.length}</span>
-            </div>
-            {mode !== 'paged' && pages.length - page - 1 > 2 && (
-              <div style={{ fontSize: 9, color: 'rgba(255,255,255,0.22)', marginTop: 2 }}>~{minsLeft}m</div>
-            )}
-          </div>
-
-          <div style={{ flex: 1 }} />
-
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            {mode !== 'paged' && (
-              <button onClick={() => setAutoScroll(s => !s)}
-                title={autoScroll ? 'Pause Auto-scroll' : 'Start Auto-scroll'}
-                style={{
-                  width: 32, height: 32, borderRadius: 8,
-                  background: autoScroll ? T.accent : 'rgba(0,0,0,0.55)',
-                  backdropFilter: 'blur(20px)',
-                  border: `1px solid ${autoScroll ? T.accent : 'rgba(255,255,255,0.09)'}`,
-                  color: autoScroll ? '#000' : 'rgba(255,255,255,0.55)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  cursor: 'pointer', transition: 'all .15s'
-                }}>
-                {autoScroll ? <Pause size={14} /> : <Play size={14} />}
-              </button>
-            )}
-
-            {mode === 'paged' && (
-              <button onClick={() => setDirection(d => d === 'rtl' ? 'ltr' : 'rtl')}
-                title={direction === 'rtl' ? 'RTL (manga) — tap to switch to LTR' : 'LTR (manhwa) — tap to switch to RTL'}
-                style={{
-                  padding: '6px 10px', borderRadius: 8,
-                  background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(20px)',
-                  border: `1px solid ${direction === 'rtl' ? 'rgba(255,255,255,0.12)' : 'rgba(249,115,22,0.4)'}`,
-                  color: direction === 'rtl' ? 'rgba(255,255,255,0.5)' : 'var(--accent)',
-                  fontSize: 11, fontWeight: 800, cursor: 'pointer', transition: 'all .15s'
-                }}>
-                {direction === 'rtl' ? '←' : '→'}
-              </button>
-            )}
-
-            {mode === 'paged' && (
-              <button onClick={() => setDoublePage(p => !p)}
-                title={doublePage ? 'Double page on' : 'Double page off'}
-                style={{
-                  width: 32, height: 32, borderRadius: 8,
-                  background: doublePage ? `${T.accent}22` : 'rgba(0,0,0,0.55)',
-                  backdropFilter: 'blur(20px)',
-                  border: `1px solid ${doublePage ? T.accent : 'rgba(255,255,255,0.09)'}`,
-                  color: doublePage ? T.accent : 'rgba(255,255,255,0.4)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  cursor: 'pointer', transition: 'all .15s', fontSize: 11, fontWeight: 800
-                }}>
-                2P
-              </button>
-            )}
-
-            <button onClick={() => setPanelOpen(p => !p)}
-              title="Reader Settings"
-              style={{
-                width: 32, height: 32, borderRadius: 8,
-                background: panelOpen ? T.accent : 'rgba(0,0,0,0.55)',
-                backdropFilter: 'blur(20px)',
-                border: `1px solid ${panelOpen ? T.accent : 'rgba(255,255,255,0.09)'}`,
-                color: panelOpen ? '#000' : 'rgba(255,255,255,0.55)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                cursor: 'pointer', transition: 'all .15s'
-              }}>
-              <Settings2 size={16} />
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {panelOpen && (
-        <div style={{
-          position: 'fixed', bottom: 0, left: 0, right: 0, zIndex: 300,
-          background: 'rgba(5,5,8,0.97)', backdropFilter: 'blur(32px)',
-          borderTop: '1px solid rgba(255,255,255,0.07)',
-          borderRadius: '24px 24px 0 0',
-          boxShadow: '0 -20px 60px rgba(0,0,0,.8)',
-          animation: 'fadeUp .22s ease both',
-        }}>
-          <div style={{ padding: '12px 20px 0', display: 'flex', justifyContent: 'center', position: 'relative' }}>
-            <div style={{
-              width: 36, height: 4, borderRadius: 99,
-              background: 'rgba(255,255,255,0.15)', margin: '0 auto'
-            }} />
-            <button onClick={() => setPanelOpen(false)} style={{
-              position: 'absolute', right: 20, top: 12,
-              width: 32, height: 32, borderRadius: 8,
-              border: 'none', background: 'transparent',
-              color: 'rgba(255,255,255,0.5)', cursor: 'pointer',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-            }}><X size={18} /></button>
-          </div>
-
-          <div style={{
-            padding: '24px 28px 40px', display: 'flex', flexDirection: 'column',
-            gap: 28, maxWidth: 600, margin: '0 auto', maxHeight: '70vh', overflowY: 'auto'
-          }}>
-            <PanelSection title="Reading Mode">
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
-                {[
-                  { id: 'scroll', label: 'Scroll', icon: '↕️', desc: 'Standard scroll' },
-                  { id: 'paged', label: 'Paged', icon: '📖', desc: 'Tap to flip' },
-                  { id: 'webtoon', label: 'Strip', icon: '📜', desc: 'No page gaps' }
-                ].map(m => (
-                  <button key={m.id} onClick={() => setMode(m.id)} style={{
-                    padding: '16px 10px', borderRadius: 14, border: `2px solid ${mode === m.id ? T.accent : 'rgba(255,255,255,0.06)'}`,
-                    background: mode === m.id ? `${T.accent}15` : 'rgba(255,255,255,0.03)',
-                    color: mode === m.id ? '#fff' : 'rgba(255,255,255,0.5)',
-                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
-                    cursor: 'pointer', transition: 'all 0.2s', boxShadow: mode === m.id ? `0 4px 12px ${T.accent}40` : 'none'
-                  }}>
-                    <span style={{ fontSize: 24 }}>{m.icon}</span>
-                    <span style={{ fontSize: 13, fontWeight: 800 }}>{m.label}</span>
-                    <span style={{ fontSize: 10, opacity: 0.6 }}>{m.desc}</span>
-                  </button>
-                ))}
-              </div>
-            </PanelSection>
-
-            {mode !== 'paged' && (
-              <PanelSection title="Auto-Scroll">
-                <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-                  <button onClick={() => setAutoScroll(prev => !prev)} style={{
-                    padding: '10px 20px', borderRadius: 12, background: autoScroll ? T.accent : 'rgba(255,255,255,0.08)',
-                    color: autoScroll ? '#000' : '#fff', fontWeight: 'bold', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8
-                  }}>
-                    {autoScroll ? <Pause size={16} /> : <Play size={16} />}
-                    {autoScroll ? 'Stop Auto-scroll' : 'Start Auto-scroll'}
-                  </button>
-                  <div style={{ flex: 1 }}>
-                    <Sl icon={null} min={0.5} max={5} step={0.5} val={scrollSpeed} onChange={setScrollSpeed} fmt={v => `${v}x speed`} />
-                  </div>
-                </div>
-              </PanelSection>
-            )}
-
-            {mode === 'paged' && (
-              <PanelSection title="Reading Direction">
-                <Seg val={direction} onChange={setDirection}
-                  opts={[['rtl', '← RTL (Japanese)'], ['ltr', 'LTR → (Manhwa)']]} />
-              </PanelSection>
-            )}
-
-            {mode !== 'webtoon' && (
-              <PanelSection title="Image Fit">
-                <Seg val={fitMode} onChange={setFitMode}
-                  opts={[['height', 'Fit Height'], ['width', 'Fit Width'], ['original', '1:1 Scale']]} />
-              </PanelSection>
-            )}
-            {mode !== 'paged' && (
-              <PanelSection title="Page Gap">
-                <Sl icon={null} min={0} max={48} val={pageGap} onChange={setPageGap} fmt={v => `${v}px`} />
-              </PanelSection>
-            )}
-
-            <PanelSection title="Image Adjustments">
-              {pages[page] && (
-                <img src={proxyImg(pages[page])} style={{ width: '100%', height: 100, objectFit: 'cover', filter: imgFilter, borderRadius: 12, marginBottom: 16, border: '1px solid rgba(255,255,255,0.1)' }} alt="preview" />
-              )}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-                <Sl icon={Sun} min={40} max={160} val={brightness} onChange={setBrightness} fmt={v => `${v}%`} />
-                <Sl icon={Contrast} min={60} max={160} val={contrast} onChange={setContrast} fmt={v => `${v}%`} />
-                <Sl icon={Droplet} min={0} max={200} val={saturation} onChange={setSaturation} fmt={v => `${v}%`} />
-              </div>
-              {(brightness !== 100 || contrast !== 100 || saturation !== 100) && (
-                <button onClick={() => { setBrightness(100); setContrast(100); setSaturation(100); }}
-                  style={{
-                    marginTop: 16, padding: '8px 20px', borderRadius: 10,
-                    background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)',
-                    color: 'rgba(255,255,255,0.6)', fontSize: 13, fontWeight: 'bold', cursor: 'pointer',
-                    transition: 'all .15s', display: 'block', width: '100%'
-                  }}>
-                  Reset Adjustments
-                </button>
-              )}
-            </PanelSection>
-
-            <PanelSection title="Background Themes">
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5,1fr)', gap: 10 }}>
-                {Object.entries(THEMES).map(([key, t]) => (
-                  <button key={key} onClick={() => setTheme(key)}
-                    style={{
-                      padding: '14px 6px', borderRadius: 14, cursor: 'pointer',
-                      background: t.bg, border: `2px solid ${theme === key ? t.accent : 'rgba(255,255,255,0.07)'}`,
-                      transition: 'all .15s', display: 'flex', flexDirection: 'column',
-                      alignItems: 'center', gap: 8,
-                      transform: theme === key ? 'scale(1.05)' : 'scale(1)',
-                      boxShadow: theme === key ? `0 0 20px ${t.accent}40,0 0 0 1px ${t.accent}30` : '',
-                    }}>
-                    <div style={{
-                      width: 24, height: 24, borderRadius: '50%',
-                      background: t.accent, boxShadow: `0 0 8px ${t.accent}60`
-                    }} />
-                    <span style={{
-                      fontSize: 11, fontWeight: 800, color: t.text,
-                      textAlign: 'center', lineHeight: 1
-                    }}>{t.label}</span>
-                  </button>
-                ))}
-              </div>
-            </PanelSection>
-          </div>
-        </div>
-      )}
-
-      {mode === 'paged' ? (
-        <div onClick={handleTap}
-          onTouchStart={e => setTouchStart(e.touches[0].clientX)}
-          onTouchEnd={e => {
-            if (touchStart != null && zoom <= 1.05) {
-              const d = touchStart - e.changedTouches[0].clientX;
-              if (Math.abs(d) > 48) direction === 'rtl' ? go(d > 0 ? 1 : -1) : go(d > 0 ? -1 : 1);
-            }
-            setTouchStart(null);
-          }}
-          style={{
-            height: '100vh', width: '100vw',
-            overflow: zoom > 1.05 ? 'auto' : 'hidden',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            cursor: zoom > 1.05 ? 'grab' : 'default'
-          }}>
-          <div style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            flexDirection: direction === 'rtl' ? 'row-reverse' : 'row', gap: doublePage ? 2 : 0,
-            minWidth: zoom > 1.05 ? `${zoom * 100}vw` : '100vw',
-            minHeight: zoom > 1.05 ? `${zoom * 100}vh` : '100vh',
-            padding: uiVisible ? '52px 0 72px' : '4px 0'
-          }}>
-            {doublePage && pages[direction === 'rtl' ? page + 1 : page - 1] && (
-              <img key={`d${page}`}
-                src={proxyImg(pages[direction === 'rtl' ? page + 1 : page - 1])}
-                draggable={false} alt=""
-                style={{
-                  display: 'block', userSelect: 'none', flexShrink: 0,
-                  filter: imgFilter, opacity: .88,
-                  maxWidth: '50vw', maxHeight: uiVisible ? 'calc(100vh - 124px)' : '100vh',
-                  height: fitMode === 'height' ? (uiVisible ? 'calc(100vh - 124px)' : '100vh') : 'auto',
-                  width: 'auto', objectFit: 'contain',
-                  animation: 'fadeIn .14s ease both'
-                }} />
-            )}
-            <img key={`p${page}`}
-              src={proxyImg(pages[page])}
-              draggable={false} alt={`Page ${page + 1}`}
-              style={{
-                display: 'block', userSelect: 'none', flexShrink: 0,
-                filter: imgFilter,
-                animation: 'fadeIn .14s ease both',
-                ...(zoom <= 1 ? {
-                  maxWidth: doublePage ? '50vw' : '100vw',
-                  maxHeight: uiVisible ? 'calc(100vh - 124px)' : '100vh',
-                  width: fitMode === 'width' ? (doublePage ? '50vw' : '100vw') : 'auto',
-                  height: fitMode === 'height' ? (uiVisible ? 'calc(100vh - 124px)' : '100vh') : 'auto',
-                  objectFit: 'contain',
-                } : {
-                  maxWidth: 'none', maxHeight: 'none',
-                  width: fitMode === 'width' ? `${zoom * (doublePage ? 50 : 100)}vw` : 'auto',
-                  height: fitMode === 'height' ? `${zoom * 100}vh` : 'auto',
-                  transform: fitMode === 'original' ? `scale(${zoom})` : 'none',
-                  transformOrigin: 'center center',
-                })
-              }} />
-          </div>
-        </div>
-      ) : (
-        <div ref={containerRef} onClick={handleTap}
-          onTouchStart={e => setTouchStart(e.touches[0].clientX)}
-          onTouchEnd={e => { if (touchStart != null) { const d = touchStart - e.changedTouches[0].clientX; if (Math.abs(d) > 60) go(d > 0 ? 1 : -1); } setTouchStart(null); }}
-          style={{
-            height: '100vh', overflowY: 'auto',
-            overflowX: isWebtoon ? 'hidden' : 'auto',
-            paddingTop: uiVisible ? 52 : 0,
-            scrollbarWidth: 'none', msOverflowStyle: 'none',
-            transition: 'padding .2s ease'
-          }}>
-
-          {pages.map((url, i) => (
-            <div key={i} id={`rp-${i}`} data-page={i}
-              style={{
-                display: 'flex', justifyContent: 'center', width: '100%',
-                marginBottom: isWebtoon ? pageGap : Math.max(4, pageGap)
-              }}>
-              <img src={proxyImg(url)} alt={`Page ${i + 1}`} draggable={false}
-                style={{ ...getScrollStyle(isWebtoon, fitMode, zoom) }}
-                loading={i < 3 ? 'eager' : 'lazy'} />
-            </div>
-          ))}
-
-          {hasNext && (
-            <div style={{
-              display: 'flex', flexDirection: 'column', alignItems: 'center',
-              justifyContent: 'center', padding: '60px 24px 80px', gap: 16
-            }}>
-              <div style={{ width: 1, height: 40, background: 'rgba(255,255,255,0.08)' }} />
-              <p style={{
-                fontSize: 11, color: 'rgba(255,255,255,0.3)',
-                letterSpacing: '.18em', textTransform: 'uppercase'
-              }}>
-                End of Chapter {currentChapter?.number}
-              </p>
-              <button onClick={onNextChapter}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '12px 28px', borderRadius: 99,
-                  background: `linear-gradient(135deg,${T.accent},${T.accent}cc)`,
-                  color: T.accent === '#92400e' ? '#fff' : '#000',
-                  fontWeight: 700, fontSize: 14, border: 'none', cursor: 'pointer',
-                  boxShadow: `0 8px 28px ${T.accent}40`,
-                  fontFamily: 'var(--font-display)', transition: 'transform .15s'
-                }}
-                onMouseEnter={e => e.currentTarget.style.transform = 'translateY(-2px) scale(1.02)'}
-                onMouseLeave={e => e.currentTarget.style.transform = ''}>
-                Next Chapter <ChevronRight size={16} />
-              </button>
-            </div>
-          )}
-          <div style={{ height: 80 }} />
-        </div>
-      )}
-
-      {panelOpen && (
-        <div onClick={() => setPanelOpen(false)} style={{
-          position: 'fixed', inset: 0, zIndex: 295, cursor: 'pointer',
-        }} />
-      )}
-    </div>
-  );
-});
-
-// Mock Droplet / Contrast lucide icons for reader settings missing from imports
-const Droplet = ({ size }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"></path></svg>;
-const Contrast = ({ size }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 18a6 6 0 0 0 0-12v12z"></path></svg>;
-
 const RepoAddRow = memo(({ onAdd }) => {
   const [val, setVal] = useState('');
   return (
@@ -1904,6 +1215,7 @@ const SettingsPage = memo(() => {
   const [serviceStatus, setServiceStatus] = useState(null);
   const [serviceWorking, setServiceWorking] = useState(false);
   const [runtimeInfo, setRuntimeInfo] = useState({ javaPath: '', jarPath: '', configPath: '' });
+  const [appUpdateState, setAppUpdateState] = useState({ checking: false, message: '' });
   const installedExtCount = useMemo(() => {
     const seen = new Set();
     extensions.forEach(ext => {
@@ -1970,6 +1282,24 @@ const SettingsPage = memo(() => {
       <div style={{ position: 'absolute', top: 3, left: value ? 22 : 3, width: 20, height: 20, borderRadius: '50%', background: '#fff', transition: 'left 0.3s', boxShadow: '0 2px 6px rgba(0,0,0,0.3)' }} />
     </button>
   );
+
+  const checkAppUpdate = async () => {
+    if (!window.electronAPI?.checkForAppUpdate) {
+      toast('App updater is not available in this build', 'warning');
+      return;
+    }
+    setAppUpdateState({ checking: true, message: 'Checking...' });
+    const result = await window.electronAPI.checkForAppUpdate();
+    if (result?.ok) {
+      const msg = result.version ? `Update ${result.version} found` : 'No update found';
+      setAppUpdateState({ checking: false, message: msg });
+      toast(msg, result.version ? 'success' : 'info');
+    } else {
+      const msg = result?.error || 'Unable to check for updates';
+      setAppUpdateState({ checking: false, message: msg });
+      toast(msg, 'warning');
+    }
+  };
 
   return (
     <div className="page-transition" style={{ maxWidth: 720, margin: '0 auto', padding: '0 0 60px' }}>
@@ -2063,6 +1393,13 @@ const SettingsPage = memo(() => {
             <Btn variant="outline" size="sm" onClick={() => { checkHealth(); fetchSources(); fetchExtensions(); toast('Refreshing...', 'info'); }}><RefreshCw size={14} /> Refresh</Btn>
           </div>
         </Row>
+        {window.electronAPI?.checkForAppUpdate && (
+          <Row label="App Updates" sub={appUpdateState.message || 'Checks GitHub releases and installs from inside akaReader'}>
+            <Btn variant="outline" size="sm" onClick={checkAppUpdate} disabled={appUpdateState.checking}>
+              <RefreshCw size={14} /> {appUpdateState.checking ? 'Checking' : 'Check'}
+            </Btn>
+          </Row>
+        )}
         <Row label="Suwayomi Runtime" sub="The embedded server akaReader manages in the background">
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <div style={{ width: 8, height: 8, borderRadius: '50%', background: suwayomiReady ? '#22c55e' : backendOnline === true ? '#f59e0b' : '#ef4444', boxShadow: `0 0 10px ${suwayomiReady ? '#22c55e' : backendOnline === true ? '#f59e0b' : '#ef4444'}` }} />
@@ -2609,10 +1946,13 @@ async function saveChapterBlobs(mangaId, chapterId, urlsAndBlobs) {
   ));
 
   const db = await openDB();
-  const key = `${mangaId}___${chapterId}`;
+  const key = getDownloadKey(mangaId, chapterId);
   return new Promise((res, rej) => {
     const tx = db.transaction('chapters', 'readwrite');
-    tx.oncomplete = res;
+    tx.oncomplete = () => {
+      window.dispatchEvent(new Event('downloads-updated'));
+      res();
+    };
     tx.onerror = () => rej(tx.error);
     tx.objectStore('chapters').put({ key, pages, savedAt: Date.now() });
   });
@@ -2623,7 +1963,7 @@ async function loadChapterBlobs(mangaId, chapterId) {
     const db = await openDB();
     const tx = db.transaction('chapters', 'readonly');
     const st = tx.objectStore('chapters');
-    const key = `${mangaId}___${chapterId}`;
+    const key = getDownloadKey(mangaId, chapterId);
     return new Promise((res) => {
       const req = st.get(key);
       req.onsuccess = () => {
@@ -2646,9 +1986,15 @@ async function loadChapterBlobs(mangaId, chapterId) {
 async function deleteChapterBlobs(mangaId, chapterId) {
   try {
     const db = await openDB();
-    const tx = db.transaction('chapters', 'readwrite');
-    tx.objectStore('chapters').delete(`${mangaId}___${chapterId}`);
-    tx.oncomplete = () => window.dispatchEvent(new Event('downloads-updated'));
+    return new Promise((res, rej) => {
+      const tx = db.transaction('chapters', 'readwrite');
+      tx.oncomplete = () => {
+        window.dispatchEvent(new Event('downloads-updated'));
+        res();
+      };
+      tx.onerror = () => rej(tx.error);
+      tx.objectStore('chapters').delete(getDownloadKey(mangaId, chapterId));
+    });
   } catch { }
 }
 
@@ -2660,7 +2006,7 @@ async function deleteAllChapterBlobsForManga(mangaId) {
       .map(String)
       .filter(key => key.startsWith(prefix))
       .map(key => {
-        const [, chapterId] = key.split('__');
+        const chapterId = key.slice(prefix.length);
         return deleteChapterBlobs(mangaId, chapterId);
       })
   );
@@ -3040,7 +2386,7 @@ const ServiceErrorModal = memo(({ onRestart }) => {
 });
 
 // ==================== STARTUP SCREEN ====================
-const StartupScreen = memo(({ onProceed, onRetry }) => {
+const StartupScreen = memo(({ onProceed, onRetry, managedStartup = false, backendOnline = null, suwayomiReady = false }) => {
   const [hasFailed, setHasFailed] = useState(false);
   const [phase, setPhase] = useState(0);
   const [statusMsg, setStatusMsg] = useState('Starting services...');
@@ -3052,15 +2398,18 @@ const StartupScreen = memo(({ onProceed, onRetry }) => {
   }, []);
 
   const STATUS_MAP = {
-    'using-system-java': { msg: 'Using installed Java runtime...', bar: 10 },
+    'starting-backend': { msg: 'Starting akaReader proxy...', bar: 12 },
+    'backend-ready': { msg: 'Proxy ready. Preparing Suwayomi...', bar: 24 },
+    'using-system-java': { msg: 'Using installed Java runtime...', bar: 32 },
     'downloading-jre': { msg: 'Downloading Java runtime (first launch only)...', bar: null },
-    'extracting-jre': { msg: 'Extracting Java runtime...', bar: 15 },
-    'installing-bundled-jre': { msg: 'Preparing bundled Java runtime...', bar: 15 },
+    'extracting-jre': { msg: 'Extracting Java runtime...', bar: 34 },
+    'installing-bundled-jre': { msg: 'Preparing bundled Java runtime...', bar: 32 },
+    'using-existing-suwayomi': { msg: 'Using downloaded Suwayomi server...', bar: 42 },
     'downloading-suwayomi': { msg: 'Downloading Suwayomi server (first launch only)...', bar: null },
-    'installing-bundled-suwayomi': { msg: 'Preparing bundled Suwayomi server...', bar: 35 },
-    'suwayomi-starting': { msg: 'Starting Suwayomi server...', bar: 45 },
-    'configuring-suwayomi': { msg: 'Applying background-server settings...', bar: 48 },
-    'starting-suwayomi': { msg: 'Starting Suwayomi — this can take 20–30 seconds...', bar: 50 },
+    'installing-bundled-suwayomi': { msg: 'Preparing bundled Suwayomi server...', bar: 42 },
+    'suwayomi-starting': { msg: 'Starting Suwayomi server...', bar: 50 },
+    'configuring-suwayomi': { msg: 'Applying background-server settings...', bar: 56 },
+    'starting-suwayomi': { msg: 'Opening Suwayomi — this can take 20–30 seconds...', bar: 68 },
     'suwayomi-ready': { msg: 'Suwayomi ready!', bar: 95 },
     'online': { msg: 'Ready!', bar: 100 },
     'offline': { msg: 'Waiting for services...', bar: 40 },
@@ -3087,11 +2436,14 @@ const StartupScreen = memo(({ onProceed, onRetry }) => {
   }, [phase]);
 
   useEffect(() => {
-    // Fail-safe: if we're still here after 20 seconds, show the failure options anyway
+    // Fail-safe: if we're still here after 45 seconds, show recovery options.
     const failSafe = setTimeout(() => {
       setHasFailed(true);
-      setStatusMsg('Startup is taking longer than expected. You can retry or continue offline.');
-    }, 20000);
+      setStatusMsg(managedStartup
+        ? 'Startup is taking longer than expected. You can retry Suwayomi or continue offline.'
+        : 'Suwayomi is not running in this browser preview. Open akaReader desktop or start Suwayomi on port 4567.'
+      );
+    }, managedStartup ? 45000 : 8000);
 
     if (!window.electronAPI?.onServicesStatus) return () => clearTimeout(failSafe);
 
@@ -3129,7 +2481,18 @@ const StartupScreen = memo(({ onProceed, onRetry }) => {
       }
     });
     return () => clearTimeout(failSafe);
-  }, [phase]);
+  }, [phase, managedStartup]);
+
+  useEffect(() => {
+    if (managedStartup || suwayomiReady) return;
+    if (backendOnline === true) {
+      setStatusMsg('Waiting for Suwayomi on port 4567...');
+      setBarW(prev => Math.max(prev, 45));
+    } else if (backendOnline === false) {
+      setStatusMsg('Waiting for the akaReader proxy...');
+      setBarW(prev => Math.max(prev, 18));
+    }
+  }, [backendOnline, managedStartup, suwayomiReady]);
 
   return (
     <div style={{
@@ -3320,6 +2683,7 @@ const DiscoverRow = memo(({ source, query, label, onSelect, progress, rowIndex =
   const [loading, setLoading] = useState(true);
   const [errored, setErrored] = useState(false);
   const scrollRef = useRef(null);
+  const { fetchJSON } = useData();
 
   useEffect(() => {
     let cancelled = false;
@@ -3332,8 +2696,7 @@ const DiscoverRow = memo(({ source, query, label, onSelect, progress, rowIndex =
       return () => { cancelled = true; };
     }
     const timer = setTimeout(() => {
-      fetch(`${CONFIG.API}/source/${source.id}/search?q=${encodeURIComponent(query || '')}&page=1`)
-        .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      fetchJSON(`/source/${source.id}/search?q=${encodeURIComponent(query || '')}&page=1`)
         .then(d => {
           if (!cancelled) {
             const results = (d.results || []).slice(0, 20);
@@ -3349,7 +2712,7 @@ const DiscoverRow = memo(({ source, query, label, onSelect, progress, rowIndex =
         .catch(() => { if (!cancelled) { setErrored(true); setLoading(false); } });
     }, delay);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [source.id, query, rowIndex]);
+  }, [source.id, query, rowIndex, fetchJSON]);
 
   if (errored && !loading) return null;
 
@@ -3420,8 +2783,8 @@ const DiscoverRow = memo(({ source, query, label, onSelect, progress, rowIndex =
   );
 });
 
-const DiscoverTab = memo(({ sources, history, library, progress, onSelect, onSwitchTab }) => {
-  const { getMangaKey } = useData();
+const DiscoverTab = memo(({ sources, history, library, progress, onSelect, onContinue, onSwitchTab }) => {
+  const { fetchJSON, getMangaKey } = useData();
   const installedSources = useMemo(() => Object.values(sources), [sources]);
 
   const [activeGenre, setActiveGenre] = useState(null);
@@ -3458,11 +2821,7 @@ const DiscoverTab = memo(({ sources, history, library, progress, onSelect, onSwi
     await Promise.allSettled(
       installedSources.map(async src => {
         try {
-          const r = await fetch(
-            `${CONFIG.API}/source/${src.id}/search?q=${encodeURIComponent(genre)}&page=1`
-          );
-          if (!r.ok) throw new Error(r.status);
-          const d = await r.json();
+          const d = await fetchJSON(`/source/${src.id}/search?q=${encodeURIComponent(genre)}&page=1`);
           results[src.id] = {
             name: src.name, icon: src.icon,
             metas: (d.results || []).slice(0, 20),
@@ -3474,7 +2833,7 @@ const DiscoverTab = memo(({ sources, history, library, progress, onSelect, onSwi
     );
     setGenreResults(results);
     setGenreLoading(false);
-  }, [installedSources]);
+  }, [installedSources, fetchJSON]);
 
   const clearGenre = () => { setActiveGenre(null); setGenreResults({}); };
 
@@ -3650,7 +3009,7 @@ const DiscoverTab = memo(({ sources, history, library, progress, onSelect, onSwi
                 <CardSlot key={getMangaKey(m.id, m.sourceId)}>
                   <MangaCard
                     manga={{ ...m }}
-                    onClick={onSelect}
+                    onClick={onContinue || onSelect}
                     index={i}
                     eager
                     progress={pct}
@@ -4109,6 +3468,7 @@ const ReadingReceipt = memo(({ chapter, pagesRead, timeSeconds, mangaTitle, hasN
 });
 
 const MoodDiscovery = memo(({ sources, onSelect }) => {
+  const { fetchJSON } = useData();
   const [activeMood, setActiveMood] = useState(null);
   const [results, setResults] = useState({});
   const [searching, setSearching] = useState(false);
@@ -4124,14 +3484,13 @@ const MoodDiscovery = memo(({ sources, onSelect }) => {
     const res = {};
     await Promise.allSettled(installedSources.slice(0, 3).map(async src => {
       try {
-        const r = await fetch(`${CONFIG.API}/source/${src.id}/search?q=${encodeURIComponent(mood.vibe)}&page=1`);
-        const d = await r.json();
+        const d = await fetchJSON(`/source/${src.id}/search?q=${encodeURIComponent(mood.vibe)}&page=1`);
         res[src.id] = { name: src.name, metas: (d.results || []).slice(0, 8) };
       } catch { res[src.id] = { name: src.name, metas: [] }; }
     }));
     setResults(res);
     setSearching(false);
-  }, [installedSources]);
+  }, [installedSources, fetchJSON]);
 
   const allMetas = useMemo(() =>
     Object.values(results).flatMap(r => r.metas).slice(0, 16),
@@ -4293,11 +3652,7 @@ const ShareCardModal = memo(({ library, history, progress, readChapters, setting
               res();
             };
             img.onerror = res;
-            img.src = `http://localhost:3001/api/img?url=${encodeURIComponent(
-              m.cover.startsWith('http://localhost:4567') || m.cover.startsWith('/')
-                ? `http://localhost:4567${m.cover.startsWith('/') ? m.cover : m.cover.replace('http://localhost:4567', '')}`
-                : m.cover
-            )}`;
+            img.src = proxyImg(m.cover);
           });
         } catch { }
       }
@@ -4471,7 +3826,7 @@ const App = memo(() => {
     downloadQueue, setDownloadQueue, overlayHidden, setOverlayHidden, dlCancelRef,
     fetchJSON, checkHealth, fetchSources, fetchExtensions,
     installExt, uninstallExt, updateExt, toggleLibrary, setCategory,
-    addToHistory, removeFromHistory, removeMangaCompletely, updateProgress, inLibrary,
+    addToHistory, removeFromHistory, clearHistory, removeMangaCompletely, updateProgress, inLibrary,
     checkForUpdates, addReadingTime, updateSetting, handleMigrate,
     queueChaptersForDownload,
     suwayomiReady, setSuwayomiReady,
@@ -4483,16 +3838,27 @@ const App = memo(() => {
   const dlProcessingRef = useRef(false);
 
   const [updateAvailable, setUpdateAvailable] = useState(null);
+  const [updateDownloaded, setUpdateDownloaded] = useState(false);
+  const [updateDownloadPct, setUpdateDownloadPct] = useState(null);
 
   const [tab, setTab] = useState('home');
   const [view, setView] = useState('tabs');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => settings?.sidebarCollapsed || false);
+  const [isNarrowViewport, setIsNarrowViewport] = useState(() => window.innerWidth < 760);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
 
   const [showOnboarding, setShowOnboarding] = useState(() => !storage.get('onboardingDone', false));
 
   const [showErrorModal, setShowErrorModal] = useState(false);
   const errorTimerRef = useRef(null);
+  const sidebarIsCollapsed = sidebarCollapsed || isNarrowViewport;
+  const sidebarWidth = sidebarIsCollapsed ? 76 : 248;
+
+  useEffect(() => {
+    const onResize = () => setIsNarrowViewport(window.innerWidth < 760);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   useEffect(() => {
     if (window.electronAPI?.onServicesStatus) {
@@ -4513,17 +3879,36 @@ const App = memo(() => {
           setSuwayomiReady(false);
         } else if (status.startsWith('update-available:')) {
           setUpdateAvailable(status.split(':')[1]);
+          setUpdateDownloaded(false);
+          setUpdateDownloadPct(null);
+        } else if (status.startsWith('update-downloading:')) {
+          setUpdateDownloadPct(status.split(':')[1]);
+        } else if (status === 'update-downloaded') {
+          setUpdateDownloaded(true);
+          setUpdateDownloadPct(null);
+        } else if (status === 'update-not-available') {
+          setUpdateDownloadPct(null);
+        } else if (status.startsWith('update-error:')) {
+          setUpdateDownloadPct(null);
         }
       });
     }
   }, [checkHealth, fetchSources, fetchExtensions]);
+
+  const serviceStartRequestedRef = useRef(false);
+  useEffect(() => {
+    if (serviceStartRequestedRef.current || !window.electronAPI?.ensureServices) return;
+    serviceStartRequestedRef.current = true;
+    window.electronAPI.ensureServices()
+      .then(ok => { if (!ok) checkHealth(); })
+      .catch(() => checkHealth());
+  }, [checkHealth]);
 
   useEffect(() => {
     if (suwayomiReady && extensions.length === 0) {
       const hasRetried = sessionStorage.getItem('aka:ext-retry');
       if (!hasRetried) {
         sessionStorage.setItem('aka:ext-retry', 'true');
-        console.log('Extensions empty on start, performing one-time auto-refresh...');
         setTimeout(() => {
           fetchExtensions();
           fetchSources();
@@ -4596,6 +3981,7 @@ const App = memo(() => {
   const [currentChapter, setCurrentChapter] = useState(null);
   const [pages, setPages] = useState([]);
   const [pagesLoading, setPagesLoading] = useState(false);
+  const [chapterError, setChapterError] = useState('');
   const [readerPage, setReaderPage] = useState(0);
   const chapterAbortRef = useRef(null);
 
@@ -4746,56 +4132,110 @@ const App = memo(() => {
     const defaultPage = (existingProg && existingProg.chapterId === chapter.id) ? existingProg.page : 0;
     const startPage = explicitPage !== undefined ? explicitPage : defaultPage;
 
-    setCurrentChapter(chapter); setPages([]); setReaderPage(startPage); setView('reader'); setPagesLoading(true);
+    setCurrentChapter(chapter); setPages([]); setChapterError(''); setReaderPage(startPage); setView('reader'); setPagesLoading(true);
 
     try {
       const localPages = mKey ? await loadChapterBlobs(mKey, chapter.id) : null;
       if (ac.signal.aborted) return;
 
-      if (localPages && localPages.length > 0) {
-        setPages(localPages);
+      const cachedPages = Array.isArray(localPages) ? localPages.filter(Boolean) : [];
+      if (cachedPages.length > 0) {
+        setPages(cachedPages);
         toast(`Chapter ${chapter.number} (offline)`, 'success');
       } else {
         if (!srcId) throw new Error('Source not available');
         const imgs = await fetchJSON(`/source/${srcId}/chapter/${chapter.id}`, { signal: ac.signal });
         if (ac.signal.aborted) return;
-        setPages(Array.isArray(imgs) ? imgs : []);
+        const nextPages = Array.isArray(imgs) ? imgs.filter(Boolean) : [];
+        if (!nextPages.length) throw new Error('No readable pages were returned for this chapter.');
+        setPages(nextPages);
         toast(`Chapter ${chapter.number} loaded`, 'success');
       }
       updateProgress(mId, chapter.id, chapter.number, startPage, srcId);
     } catch (e) {
       if (ac.signal.aborted) return;
-      toast(`Failed to load chapter: ${e.message}`, 'error');
+      const message = e?.message || 'Failed to load chapter.';
+      setChapterError(message);
+      toast(`Failed to load chapter: ${message}`, 'error');
     } finally {
       if (!ac.signal.aborted) setPagesLoading(false);
     }
-  }, [activeSource, progress, selectedManga, fetchJSON, updateProgress, toast]);
+  }, [activeSource, progress, selectedManga, mangaDetail, fetchJSON, updateProgress, toast, getMangaKey]);
 
   const fetchNextChapter = useCallback(async (afterChapterId, signal) => {
     const idx = chapRef.current.findIndex(c => c.id === afterChapterId);
     const n = chapRef.current[idx - 1];
     if (!n) return null;
-    const srcId = activeSource?.id || selectedManga?.sourceId;
-    if (!srcId) return null;
+    const srcId = activeSource?.id || mangaDetail?.sourceId || selectedManga?.sourceId;
+    if (!srcId) return { error: 'Source not available.' };
     try {
-      const mId = selectedManga?.id;
+      const mId = mangaDetail?.id || selectedManga?.id;
       if (mId) {
         const mKey = getMangaKey(mId, srcId);
         const localPages = await loadChapterBlobs(mKey, n.id);
-        if (localPages && localPages.length > 0) {
-          return { chapter: n, pages: localPages };
+        const cachedPages = Array.isArray(localPages) ? localPages.filter(Boolean) : [];
+        if (cachedPages.length > 0) {
+          return { chapter: n, pages: cachedPages };
         }
       }
       const imgs = await fetchJSON(`/source/${srcId}/chapter/${n.id}`, { signal });
-      return { chapter: n, pages: Array.isArray(imgs) ? imgs : [] };
+      return { chapter: n, pages: Array.isArray(imgs) ? imgs.filter(Boolean) : [] };
     } catch (e) {
-      return null;
+      return { error: e?.message || 'Failed to load the next chapter.' };
     }
-  }, [activeSource, selectedManga, fetchJSON]);
+  }, [activeSource, mangaDetail, selectedManga, fetchJSON, getMangaKey]);
 
   const chIdx = chapRef.current.findIndex(c => c.id === currentChapter?.id);
   const hasNextCh = chIdx > 0;
   const hasPrevCh = chIdx >= 0 && chIdx < chapRef.current.length - 1;
+
+  const handleReaderPositionChange = useCallback((localPage, pageInfo) => {
+    setReaderPage(localPage || 0);
+    if (pageInfo?.chapter?.id && pageInfo.chapter.id !== currentChapter?.id) {
+      setCurrentChapter(pageInfo.chapter);
+    }
+  }, [currentChapter?.id]);
+
+  const handleContinueReading = useCallback(async (m) => {
+    const p = progress[getMangaKey(m.id, m.sourceId)];
+    if (!p?.chapterId) {
+      openManga(m);
+      return;
+    }
+
+    const source = sources[m.sourceId] || Object.values(sources).find(s => s.id === String(m.sourceId));
+    let chId = p.chapterId;
+    let page = p.page || 0;
+    let chapter = { id: chId, number: p.chapterNum };
+
+    if (source) setActiveSource(source);
+    setSelectedManga(m);
+    setMangaDetail(null);
+    setMangaError('');
+    setChapSearch('');
+
+    try {
+      const res = await fetchJSON(`/source/${m.sourceId}/manga/${m.id}`);
+      if (res && res.chapters) {
+        setMangaDetail(res);
+        addToHistory(m, m.sourceId, res);
+        chapRef.current = res.chapters;
+        const isFullyRead = readChapters[getMangaKey(m.id, m.sourceId)]?.includes(String(chId));
+        if (isFullyRead) {
+          const chIdx = res.chapters.findIndex(c => c.id === chId);
+          if (chIdx > 0) {
+            chId = res.chapters[chIdx - 1].id;
+            page = 0;
+          }
+        }
+        chapter = res.chapters.find(c => c.id === chId) || chapter;
+      }
+    } catch {
+      openManga(m);
+    }
+
+    openChapter(chapter, m.sourceId, m.id, page);
+  }, [progress, getMangaKey, sources, openManga, fetchJSON, readChapters, openChapter, addToHistory]);
 
   const handleDownload = useCallback((chapter) => {
     if (!mangaDetail) return;
@@ -4807,7 +4247,8 @@ const App = memo(() => {
     e.preventDefault();
     e.stopPropagation();
     if (!mangaDetail) return;
-    const isRead = ch.read || !!(readChapters[mangaDetail.id]?.includes(String(ch.id)));
+    const mKey = getMangaKey(mangaDetail.id, activeSource?.id);
+    const isRead = ch.read || !!(readChapters[mKey]?.includes(String(ch.id)));
     const allChs = chapRef.current;
     const idx = allChs.findIndex(c => c.id === ch.id);
     const markRange = (from, to, read) => {
@@ -4842,7 +4283,8 @@ const App = memo(() => {
       {
         label: 'Queue from here onwards (unread)', icon: Archive,
         action: () => {
-          const rest = allChs.slice(idx).filter(c => !c.read && !(readChapters[mangaDetail.id]?.includes(String(c.id))));
+          const mKey = getMangaKey(mangaDetail.id, activeSource?.id);
+          const rest = allChs.slice(idx).filter(c => !c.read && !(readChapters[mKey]?.includes(String(c.id))));
           if (!rest.length) { toast('No unread chapters from here', 'warning'); return; }
           queueChaptersForDownload(rest, mangaDetail.id, mangaDetail.title, activeSource?.id);
         }
@@ -5062,13 +4504,14 @@ const App = memo(() => {
 
   const [forceProceed, setForceProceed] = useState(false);
 
-  // Removed premature forceProceed timeout to allow StartupScreen to display until servers are ready
-
   if (!forceProceed && (backendOnline === null || !suwayomiReady) && !showErrorModal) {
     return (
       <StartupScreen
         onProceed={() => setForceProceed(true)}
-        onRetry={() => { window.electronAPI?.restartServices?.(); checkHealth(); }}
+        onRetry={() => { setForceProceed(false); window.electronAPI?.restartServices?.(); checkHealth(); }}
+        managedStartup={!!window.electronAPI?.ensureServices}
+        backendOnline={backendOnline}
+        suwayomiReady={suwayomiReady}
       />
     );
   }
@@ -5080,18 +4523,38 @@ const App = memo(() => {
         <p style={{ color: 'var(--muted)', fontSize: 13 }}>Loading chapter...</p>
       </div>
     );
-    const mKeyForReader = getMangaKey(mangaDetail?.id || selectedManga?.id, mangaDetail?.sourceId || selectedManga?.sourceId || activeSource?.id);
+    if (chapterError) return (
+      <div style={{ position: 'fixed', inset: 0, background: '#0a0a0f', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 16, padding: 24, textAlign: 'center' }}>
+        <div style={{ width: 58, height: 58, borderRadius: 16, background: 'rgba(249,115,22,0.12)', color: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <AlertTriangle size={28} />
+        </div>
+        <h2 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>Chapter did not load</h2>
+        <p style={{ color: 'var(--muted)', fontSize: 13, maxWidth: 420, lineHeight: 1.6, margin: 0 }}>{chapterError}</p>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center', marginTop: 4 }}>
+          <Btn onClick={goBack} icon={ChevronLeft}>Back to Manga</Btn>
+          {currentChapter && (
+            <Btn variant="outline" onClick={() => openChapter(currentChapter, activeSource?.id || selectedManga?.sourceId, mangaDetail?.id || selectedManga?.id, readerPage)} icon={RefreshCw}>
+              Retry
+            </Btn>
+          )}
+        </div>
+      </div>
+    );
+    const readerMangaId = mangaDetail?.id || selectedManga?.id;
+    const readerSourceId = mangaDetail?.sourceId || selectedManga?.sourceId || activeSource?.id;
+    const mKeyForReader = getMangaKey(readerMangaId, readerSourceId);
     return (
       <NewReader
         pages={pages} currentChapter={currentChapter} mangaTitle={mangaDetail?.title}
         onBack={goBack}
-        onNextChapter={() => { const n = chapRef.current[chIdx - 1]; if (n) openChapter(n); }}
-        onPrevChapter={() => { const p = chapRef.current[chIdx + 1]; if (p) openChapter(p); }}
+        onNextChapter={() => { const n = chapRef.current[chIdx - 1]; if (n) openChapter(n, readerSourceId, readerMangaId); }}
+        onPrevChapter={() => { const p = chapRef.current[chIdx + 1]; if (p) openChapter(p, readerSourceId, readerMangaId); }}
         fetchNextChapter={fetchNextChapter}
         hasNext={hasNextCh} hasPrev={hasPrevCh}
-        onPageChange={setReaderPage}
+        onPageChange={handleReaderPositionChange}
         initialPage={progress[mKeyForReader]?.page || 0}
-        mangaId={mKeyForReader}
+        mangaId={readerMangaId}
+        mangaSourceId={readerSourceId}
         mangaCover={mangaDetail?.cover || selectedManga?.cover}
       />
     );
@@ -5100,7 +4563,7 @@ const App = memo(() => {
   return (
     <>
       {showOnboarding && <Onboarding onFinish={() => { setShowOnboarding(false); storage.set('onboardingDone', true); }} />}
-      {catchUpManga && <CatchUpModal manga={catchUpManga} onClose={() => setCatchUpManga(null)} onJumpTo={ch => { setCatchUpManga(null); openChapter(ch, mangaDetail?.sourceId || activeSource?.id); }} />}
+      {catchUpManga && <CatchUpModal manga={catchUpManga} onClose={() => setCatchUpManga(null)} onJumpTo={ch => { setCatchUpManga(null); openChapter(ch, activeSource?.id || mangaDetail?.sourceId, mangaDetail?.id || selectedManga?.id); }} />}
       {showShareCard && <ShareCardModal library={library} history={history} progress={progress} readChapters={readChapters} settings={settings} onClose={() => setShowShareCard(false)} />}
       {showErrorModal && <ServiceErrorModal onRestart={() => { setShowErrorModal(false); checkHealth(); }} />}
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
@@ -5113,9 +4576,15 @@ const App = memo(() => {
       {updateAvailable && (
         <div className="anim-fadeIn" style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 900, background: 'linear-gradient(90deg,rgba(234,179,8,0.95),rgba(251,191,36,0.95))', backdropFilter: 'blur(12px)', padding: '10px 20px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
           <BellRing size={16} style={{ color: '#78350f' }} />
-          <a href={`https://github.com/akawazak/akareader/releases/tag/v${updateAvailable}`} target="_blank" rel="noreferrer" style={{ fontSize: 13, fontWeight: 700, color: '#78350f', textDecoration: 'none', display: 'flex', alignItems: 'center', gap: 8 }}>
-            akaReader v{updateAvailable} is ready — <span style={{ textDecoration: 'underline', fontWeight: 700 }}>view release notes ↗</span>
-          </a>
+          <span style={{ fontSize: 13, fontWeight: 800, color: '#78350f', display: 'flex', alignItems: 'center', gap: 8 }}>
+            {updateDownloaded ? `akaReader v${updateAvailable} is downloaded` : updateDownloadPct ? `Downloading akaReader v${updateAvailable} (${updateDownloadPct}%)` : `akaReader v${updateAvailable} is available`}
+          </span>
+          {updateDownloaded ? (
+            <button onClick={() => window.electronAPI?.installAppUpdate?.()} style={{ background: '#78350f', color: '#fff7ed', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 800, cursor: 'pointer' }}>Restart to update</button>
+          ) : (
+            <button onClick={() => window.electronAPI?.downloadAppUpdate?.()} style={{ background: '#78350f', color: '#fff7ed', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 800, cursor: 'pointer' }}>Download update</button>
+          )}
+          <a href={`https://github.com/akawazak/akareader/releases/tag/v${updateAvailable}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, fontWeight: 700, color: '#78350f', textDecoration: 'underline' }}>Release notes</a>
           <button onClick={() => setUpdateAvailable(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: '#78350f', display: 'flex' }}><X size={16} /></button>
         </div>
       )}
@@ -5162,15 +4631,15 @@ const App = memo(() => {
         </div>
       </div>
 
-      <aside style={{ position: 'fixed', left: 0, top: 38, bottom: 0, width: sidebarCollapsed ? 76 : 248, background: 'var(--bg2)', borderRight: '1px solid var(--border)', zIndex: 50, display: 'flex', flexDirection: 'column', padding: sidebarCollapsed ? '14px 12px 20px' : '0', transition: 'width var(--t-base) var(--ease-spring)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: sidebarCollapsed ? '0 8px' : '18px 22px 16px', marginBottom: sidebarCollapsed ? 16 : 0 }}>
+      <aside style={{ position: 'fixed', left: 0, top: 38, bottom: 0, width: sidebarWidth, background: 'var(--bg2)', borderRight: '1px solid var(--border)', zIndex: 50, display: 'flex', flexDirection: 'column', padding: sidebarIsCollapsed ? '10px 10px 8px' : '0', transition: 'width var(--t-base) var(--ease-spring)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: sidebarIsCollapsed ? '0 6px' : '18px 22px 16px', marginBottom: sidebarIsCollapsed ? 10 : 0 }}>
           <div className="gradient-primary" style={{ width: 42, height: 42, borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxShadow: '0 8px 24px rgba(249,115,22,0.3)', WebkitAppRegion: 'no-drag' }}>
             <BookOpen size={20} color="#fff" />
           </div>
-          {!sidebarCollapsed && <span className="text-gradient" style={{ fontFamily: "'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight: 800, fontSize: 20, WebkitAppRegion: 'no-drag' }}>akaReader</span>}
+          {!sidebarIsCollapsed && <span className="text-gradient" style={{ fontFamily: "'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight: 800, fontSize: 20, WebkitAppRegion: 'no-drag' }}>akaReader</span>}
         </div>
 
-        {!sidebarCollapsed && (
+        {!sidebarIsCollapsed && (
           <div style={{ padding: '0 12px', marginBottom: 16 }}>
             <button onClick={() => setShowGlobalSearch(true)}
               data-onboard="global-search-btn"
@@ -5182,30 +4651,30 @@ const App = memo(() => {
             </button>
           </div>
         )}
-        {sidebarCollapsed && (
+        {sidebarIsCollapsed && (
           <div style={{ padding: '0 8px', marginBottom: 8 }}>
-            <button onClick={() => setShowGlobalSearch(true)} style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '10px', borderRadius: 12, border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--muted)', cursor: 'pointer', transition: 'all 0.2s' }}>
+            <button onClick={() => setShowGlobalSearch(true)} style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '8px', borderRadius: 12, border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--muted)', cursor: 'pointer', transition: 'all 0.2s' }}>
               <Search size={18} />
             </button>
           </div>
         )}
 
-        <nav style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3, padding: sidebarCollapsed ? '0 8px' : '0 10px', overflowY: 'auto', overflowX: 'hidden' }}>
+        <nav style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: sidebarIsCollapsed ? 2 : 3, padding: sidebarIsCollapsed ? '0 8px' : '0 10px', overflowY: 'auto', overflowX: 'hidden' }}>
           {NAV.map(({ id, label, Icon, badge }, i) => {
             const active = tab === id;
             return (
               <button key={id} onClick={() => switchTab(id)} className={`anim-slideLeft delay-${i}`}
-                data-onboard={`nav-${id}`} style={{ display: 'flex', alignItems: 'center', gap: sidebarCollapsed ? 0 : 12, padding: sidebarCollapsed ? '11px' : '11px 14px', borderRadius: 12, border: 'none', background: active ? 'rgba(249,115,22,0.12)' : 'transparent', color: active ? 'var(--accent)' : 'var(--text-dim)', cursor: 'pointer', justifyContent: sidebarCollapsed ? 'center' : 'flex-start', position: 'relative', width: '100%', transition: 'all 0.2s' }}
+                data-onboard={`nav-${id}`} style={{ display: 'flex', alignItems: 'center', gap: sidebarIsCollapsed ? 0 : 12, padding: sidebarIsCollapsed ? '8px' : '11px 14px', borderRadius: 12, border: 'none', background: active ? 'rgba(249,115,22,0.12)' : 'transparent', color: active ? 'var(--accent)' : 'var(--text-dim)', cursor: 'pointer', justifyContent: sidebarIsCollapsed ? 'center' : 'flex-start', position: 'relative', width: '100%', transition: 'all 0.2s' }}
                 onMouseEnter={e => { if (!active) e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; }}
                 onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}>
-                {active && !sidebarCollapsed && <div style={{ position: 'absolute', left: 0, width: 3, height: 22, background: 'var(--accent)', borderRadius: '0 3px 3px 0' }} />}
+                {active && !sidebarIsCollapsed && <div style={{ position: 'absolute', left: 0, width: 3, height: 22, background: 'var(--accent)', borderRadius: '0 3px 3px 0' }} />}
                 <div style={{ position: 'relative' }}>
                   <Icon size={21} style={{ color: active ? 'var(--accent)' : 'var(--muted)', transition: 'color 0.2s' }} />
-                  {badge > 0 && sidebarCollapsed && (
+                  {badge > 0 && sidebarIsCollapsed && (
                     <span style={{ position: 'absolute', top: -4, right: -4, width: 15, height: 15, background: 'var(--accent)', borderRadius: '50%', fontSize: 9, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff' }}>{badge > 9 ? '9+' : badge}</span>
                   )}
                 </div>
-                {!sidebarCollapsed && (
+                {!sidebarIsCollapsed && (
                   <>
                     <span style={{ flex: 1, fontWeight: 600, fontSize: 14, textAlign: 'left' }}>{label}</span>
                     {badge > 0 && <span style={{ background: active ? 'var(--accent)' : 'rgba(255,255,255,0.1)', color: active ? '#fff' : 'var(--text)', borderRadius: 20, fontSize: 11, padding: '2px 9px', fontWeight: 700 }}>{badge}</span>}
@@ -5216,7 +4685,7 @@ const App = memo(() => {
           })}
         </nav>
 
-        {!sidebarCollapsed && (
+        {!sidebarIsCollapsed && (
           <div style={{ padding: '0 14px', marginBottom: 14, marginTop: 'auto', flexShrink: 0 }}>
             <div style={{ padding: '14px 14px 12px', background: 'var(--card)', borderRadius: 12, border: '1px solid var(--border)' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
@@ -5259,25 +4728,25 @@ const App = memo(() => {
           </div>
         )}
 
-        <div style={{ padding: '0 10px 12px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: 10 }}>
+        <div style={{ padding: sidebarIsCollapsed ? '0 8px 6px' : '0 10px 12px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: sidebarIsCollapsed ? 6 : 10 }}>
           <button onClick={() => setSidebarCollapsed(c => !c)}
-            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            title={sidebarIsCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
             style={{
               width: '100%', display: 'flex', alignItems: 'center',
-              justifyContent: sidebarCollapsed ? 'center' : 'flex-end',
+              justifyContent: sidebarIsCollapsed ? 'center' : 'flex-end',
               gap: 6, padding: '7px 8px', borderRadius: 'var(--r-sm)',
               border: 'none', background: 'transparent', cursor: 'pointer',
               color: 'var(--muted)', transition: 'all .15s',
             }}
             onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = 'var(--text-dim)'; }}
             onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--muted)'; }}>
-            {!sidebarCollapsed && <span style={{ fontSize: 11 }}>Collapse</span>}
-            {sidebarCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
+            {!sidebarIsCollapsed && <span style={{ fontSize: 11 }}>Collapse</span>}
+            {sidebarIsCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
           </button>
         </div>
       </aside>
 
-      <main style={{ marginLeft: sidebarCollapsed ? 64 : 232, marginTop: 38, minHeight: 'calc(100vh - 38px)', transition: 'margin-left var(--t-base) var(--ease-spring)' }}>
+      <main style={{ marginLeft: sidebarWidth, marginTop: 38, minHeight: 'calc(100vh - 38px)', transition: 'margin-left var(--t-base) var(--ease-spring)' }}>
         <div className="glass-strong" style={{
           position: 'sticky', top: 0, zIndex: 40,
           padding: view === 'manga' ? '0 20px' : tab === 'home' ? '8px 20px' : view === 'source' ? '10px 24px' : '16px 28px',
@@ -5305,16 +4774,17 @@ const App = memo(() => {
                 {/* QUICK SETTINGS BAR ON MANGA DETAIL */}
                 <div style={{ display: 'flex', background: 'var(--card2)', borderRadius: 99, border: '1px solid var(--border)', overflow: 'hidden', marginRight: 8 }}>
                   {[
-                    { id: 'scroll', icon: '↕️', title: 'Scroll Mode' },
-                    { id: 'paged', icon: '📖', title: 'Paged Mode' },
-                    { id: 'webtoon', icon: '📜', title: 'Strip Mode' }
+                    { id: 'scroll', Icon: Columns, title: 'Scroll Mode' },
+                    { id: 'paged', Icon: BookOpen, title: 'Paged Mode' },
+                    { id: 'webtoon', Icon: AlignJustify, title: 'Strip Mode' }
                   ].map(m => (
                     <button key={m.id} title={m.title} onClick={() => updateSetting('readerMode', m.id)}
                       style={{
                         padding: '6px 10px', background: settings?.readerMode === m.id ? 'var(--accent)' : 'transparent',
-                        border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center'
+                        border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        color: settings?.readerMode === m.id ? '#fff' : 'var(--muted)'
                       }}>
-                      <span style={{ fontSize: 14, filter: settings?.readerMode === m.id ? 'brightness(0) invert(1)' : 'grayscale(1) opacity(0.5)' }}>{m.icon}</span>
+                      <m.Icon size={15} />
                     </button>
                   ))}
                 </div>
@@ -5478,7 +4948,7 @@ const App = memo(() => {
                                   startPage = 0;
                                 }
                               }
-                              openChapter(ch, null, mangaDetail.id, startPage);
+                              openChapter(ch, activeSource?.id || mangaDetail.sourceId, mangaDetail.id, startPage);
                             }} size="lg" icon={Play}>{progress[getMangaKey(mangaDetail.id, activeSource?.id)] ? 'Continue' : 'Start Reading'}</Btn>
                           ) : null}
                         {mangaDetail?.chapters?.length > 10 && (
@@ -5594,30 +5064,37 @@ const App = memo(() => {
                       const mKey = getMangaKey(mangaDetail.id, activeSource?.id);
                       const isCurrent = progress[mKey]?.chapterId === ch.id;
                       const isRead = ch.read || !!(readChapters[mKey]?.includes(String(ch.id)));
-                      const isDownloaded = downloadedKeys.has(`${mangaDetail.id}__${ch.id}`);
+                      const downloadKey = getDownloadKey(mKey, ch.id);
+                      const queuedDownload = downloadQueue.find(d =>
+                        (d.downloadKey || getDownloadKey(getMangaKey(d.mangaId, d.sourceId), d.chapterId)) === downloadKey &&
+                        d.status !== 'done' && d.status !== 'error' && d.status !== 'cancelled'
+                      );
+                      const isDownloaded = downloadedKeys.has(downloadKey);
+                      const hasDownloadState = isDownloaded || queuedDownload;
                       return (
                         <div key={ch.id}
                           className={`anim-fadeInUp delay-${Math.min(i, 14)}`}
-                          onClick={() => openChapter(ch)}
+                          onClick={() => openChapter(ch, activeSource?.id || mangaDetail.sourceId, mangaDetail.id)}
                           onContextMenu={(e) => handleChapterContextMenu(e, ch)}
                           style={{
                             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                             padding: '13px 16px', borderRadius: 12, cursor: 'pointer',
                             background: isCurrent ? 'rgba(249,115,22,0.1)' : isRead ? 'rgba(34,197,94,0.04)' : 'var(--card)',
-                            border: `1.5px solid ${isCurrent ? 'var(--accent)' : isDownloaded ? 'rgba(59,130,246,0.5)' : isRead ? 'rgba(34,197,94,0.2)' : 'var(--border)'}`,
+                            border: `1.5px solid ${isCurrent ? 'var(--accent)' : hasDownloadState ? 'rgba(59,130,246,0.5)' : isRead ? 'rgba(34,197,94,0.2)' : 'var(--border)'}`,
                             transition: 'all 0.2s', position: 'relative', overflow: 'hidden',
                           }}
-                          onMouseEnter={e => { if (!isCurrent) { e.currentTarget.style.borderColor = isDownloaded ? 'rgba(59,130,246,0.85)' : 'var(--border-hover)'; e.currentTarget.style.transform = 'translateX(3px)'; } }}
-                          onMouseLeave={e => { e.currentTarget.style.borderColor = isCurrent ? 'var(--accent)' : isDownloaded ? 'rgba(59,130,246,0.5)' : isRead ? 'rgba(34,197,94,0.2)' : 'var(--border)'; e.currentTarget.style.transform = ''; }}>
+                          onMouseEnter={e => { if (!isCurrent) { e.currentTarget.style.borderColor = hasDownloadState ? 'rgba(59,130,246,0.85)' : 'var(--border-hover)'; e.currentTarget.style.transform = 'translateX(3px)'; } }}
+                          onMouseLeave={e => { e.currentTarget.style.borderColor = isCurrent ? 'var(--accent)' : hasDownloadState ? 'rgba(59,130,246,0.5)' : isRead ? 'rgba(34,197,94,0.2)' : 'var(--border)'; e.currentTarget.style.transform = ''; }}>
                           {isCurrent && <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: 'var(--accent)' }} />}
-                          {isDownloaded && !isCurrent && <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: '#3b82f6', boxShadow: '0 0 8px #3b82f680' }} />}
-                          <div style={{ flex: 1, minWidth: 0, marginLeft: (isCurrent || isDownloaded) ? 8 : 0 }}>
+                          {hasDownloadState && !isCurrent && <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, background: '#3b82f6', boxShadow: '0 0 8px #3b82f680' }} />}
+                          <div style={{ flex: 1, minWidth: 0, marginLeft: (isCurrent || hasDownloadState) ? 8 : 0 }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
                               <p style={{ fontWeight: 600, fontSize: 14, color: isCurrent ? 'var(--accent)' : isRead ? 'var(--muted)' : 'var(--text)', textDecoration: isRead ? 'line-through' : 'none', opacity: isRead ? 0.6 : 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                                 Ch. {ch.number}{ch.title && ch.title !== `Chapter ${ch.number}` && ` — ${ch.title}`}
                               </p>
                               {isRead && <Check size={13} style={{ color: '#4ade80', flexShrink: 0 }} />}
                               {isDownloaded && <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', color: '#60a5fa', background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.25)', borderRadius: 4, padding: '1px 5px', flexShrink: 0 }}>offline</span>}
+                              {queuedDownload && <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', color: '#93c5fd', background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: 4, padding: '1px 5px', flexShrink: 0 }}>{queuedDownload.status === 'downloading' ? `${queuedDownload.progress}%` : 'queued'}</span>}
                             </div>
                             <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
                               {ch.date && <span style={{ fontSize: 11, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 3 }}><Calendar size={10} />{ch.date}</span>}
@@ -5653,40 +5130,12 @@ const App = memo(() => {
               sources={sources} updates={updates}
               getMangaKey={getMangaKey}
               onSelect={openManga}
-              onContinue={async m => {
-                const p = progress[getMangaKey(m.id, m.sourceId)];
-                if (p?.chapterId) {
-                  const source = sources[m.sourceId] || Object.values(sources).find(s => s.id === String(m.sourceId));
-                  if (source) setActiveSource(source);
-                  openManga(m); // Start fetching manga details
-
-                  // We need to fetch the chapter list to determine if we should jump to the next chapter
-                  let chId = p.chapterId;
-                  let page = p.page;
-                  try {
-                    const res = await fetchJSON(`/source/${m.sourceId}/manga/${m.id}`);
-                    if (res && res.chapters) {
-                      const isFullyRead = readChapters[getMangaKey(m.id, m.sourceId)]?.includes(String(chId));
-                      if (isFullyRead) {
-                        const chIdx = res.chapters.findIndex(c => c.id === chId);
-                        if (chIdx > 0) {
-                          chId = res.chapters[chIdx - 1].id;
-                          page = 0;
-                        }
-                      }
-                    }
-                  } catch { }
-
-                  openChapter({ id: chId, number: p.chapterNum }, m.sourceId, m.id, page);
-                } else {
-                  openManga(m);
-                }
-              }}
+              onContinue={handleContinueReading}
               onSwitchTab={switchTab}
             />
           )}
           {tab === 'recommendations' && (
-            <DiscoverTab sources={sources} history={history} library={library} progress={progress} onSelect={openManga} onSwitchTab={switchTab} />
+            <DiscoverTab sources={sources} history={history} library={library} progress={progress} onSelect={openManga} onContinue={handleContinueReading} onSwitchTab={switchTab} />
           )}
           {tab === 'browse' && (
             <div className="page-transition">
@@ -6022,7 +5471,7 @@ const App = memo(() => {
               <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 18 }}>
                 {history.length > 0 && (
                   <Btn variant="danger" onClick={() => {
-                    toastRef.current?.('History cleared', 'warning');
+                    toast('History cleared', 'warning');
                     clearHistory();
                   }}><Trash2 size={15} /> Clear All</Btn>
                 )}

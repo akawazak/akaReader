@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setStartWithWindows: (v) => ipcRenderer.send('set-start-with-windows', v),
 
   // Services
+  ensureServices:   () => ipcRenderer.invoke('ensure-services'),
   restartServices:  () => ipcRenderer.invoke('restart-services'),
   onServicesStatus: (cb) => {
     ipcRenderer.removeAllListeners('services-status');
@@ -33,4 +34,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // App version (reads from package.json via Electron — always accurate)
   getVersion:  () => ipcRenderer.invoke('get-version'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  checkForAppUpdate: () => ipcRenderer.invoke('check-for-app-update'),
+  downloadAppUpdate: () => ipcRenderer.invoke('download-app-update'),
+  installAppUpdate: () => ipcRenderer.invoke('install-app-update'),
 });

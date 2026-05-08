@@ -2,7 +2,7 @@ import { CONFIG } from '../constants';
 
 export const proxyImg = (url) => {
   if (!url) return null;
-  if (url.startsWith('http://localhost:4567') || url.startsWith('/')) {
+  if (url.startsWith(CONFIG.SUWAYOMI) || url.startsWith('/')) {
     const absolute = url.startsWith('/') ? `${CONFIG.SUWAYOMI}${url}` : url;
     return `${CONFIG.API}/img?url=${encodeURIComponent(absolute)}`;
   }
