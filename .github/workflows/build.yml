@@ -106,11 +106,25 @@ jobs:
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
+        with:
+          path: release-assets
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist-*/*
+          files: |
+            release-assets/**/*.exe
+            release-assets/**/*.exe.blockmap
+            release-assets/**/latest.yml
+            release-assets/**/*.dmg
+            release-assets/**/*.dmg.blockmap
+            release-assets/**/latest-mac.yml
+            release-assets/**/*.zip
+            release-assets/**/*.zip.blockmap
+            release-assets/**/*.AppImage
+            release-assets/**/*.AppImage.blockmap
+            release-assets/**/latest-linux.yml
+            release-assets/**/*.deb
           draft: false
           prerelease: false
           generate_release_notes: true
