@@ -16,8 +16,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ensureServices:   () => ipcRenderer.invoke('ensure-services'),
   restartServices:  () => ipcRenderer.invoke('restart-services'),
   onServicesStatus: (cb) => {
-    ipcRenderer.removeAllListeners('services-status');
-    ipcRenderer.on('services-status', (_, status) => cb(status));
+    const listener = (_, status) => cb(status);
+    ipcRenderer.on('services-status', listener);
+    return () => ipcRenderer.removeListener('services-status', listener);
   },
 
   // Windows service management

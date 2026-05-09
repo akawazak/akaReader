@@ -764,26 +764,70 @@ app.whenReady().then(async () => {
   if (autoUpdater && !isDev) {
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
-    autoUpdater.on('checking-for-update', () => sendStatus('update-checking'));
-    autoUpdater.on('update-available',  i => sendStatus('update-available:' + i.version));
-    autoUpdater.on('update-not-available', () => sendStatus('update-not-available'));
-    autoUpdater.on('download-progress', p => sendStatus('update-downloading:' + Math.round(p.percent || 0)));
-    autoUpdater.on('update-downloaded', () => {
-      sendStatus('update-downloaded');
+
+    autoUpdater.on('checking-for-update', () => {
+      console.log('[updater] Checking for updates...');
+      sendStatus('update-checking');
+    });
+
+    autoUpdater.on('update-available', i => {
+      console.log('[updater] Update available:', i.version);
+      sendStatus('update-available:' + i.version);
+      // Native dialog so users see it even if the UI is stuck
       dialog.showMessageBox(mainWindow, {
-        type: 'info', title: 'Update ready',
-        message: 'A new version has been downloaded. Restart to install.',
-        buttons: ['Restart now', 'Later'],
+        type: 'info',
+        title: 'Update Available',
+        message: `akaReader v${i.version} is available and downloading now.`,
+        detail: 'The update will download in the background. You\'ll be prompted to restart when it\'s ready.',
+        buttons: ['OK'],
+      }).catch(() => {});
+    });
+
+    autoUpdater.on('update-not-available', () => {
+      console.log('[updater] No updates available');
+      sendStatus('update-not-available');
+    });
+
+    autoUpdater.on('download-progress', p => {
+      const pct = Math.round(p.percent || 0);
+      sendStatus('update-downloading:' + pct);
+      // Show progress on the Windows taskbar icon
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setProgressBar(pct / 100);
+      }
+    });
+
+    autoUpdater.on('update-downloaded', (i) => {
+      console.log('[updater] Update downloaded:', i?.version);
+      sendStatus('update-downloaded');
+      // Clear taskbar progress
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setProgressBar(-1);
+      }
+      dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: 'Update Ready — akaReader v' + (i?.version || 'new'),
+        message: `akaReader v${i?.version || 'latest'} has been downloaded and is ready to install.`,
+        detail: 'The app will restart to apply the update. Your data and settings are safe.',
+        buttons: ['Restart Now', 'Later'],
+        defaultId: 0,
       }).then(({ response }) => {
         if (response === 0) { isQuitting = true; autoUpdater.quitAndInstall(); }
       });
     });
+
     autoUpdater.on('error', e => {
       console.error('[updater]', e.message);
       sendStatus('update-error:' + (e?.message || 'unknown'));
+      // Clear taskbar progress on error
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setProgressBar(-1);
+      }
     });
+
+    // Check immediately on launch, then every 2 hours
     autoUpdater.checkForUpdates().catch(() => {});
-    setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 4 * 60 * 60 * 1000);
+    setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 2 * 60 * 60 * 1000);
   }
 
   app.on('activate', () => {
