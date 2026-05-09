@@ -70,15 +70,15 @@ app.use(express.json({ limit: '10mb' }));
 // ── Config ─────────────────────────────────────────────────────────────────
 const SUWAYOMI = process.env.SUWAYOMI_URL || 'http://localhost:4567';
 const GQL = `${SUWAYOMI}/api/graphql`;
-const http = axios.create({ timeout: 120000 });
+const http = axios.create({ timeout: 30000 });
 
 // ── Caches ─────────────────────────────────────────────────────────────────
 const caches = {
-  sources:    new LRUCache(50,  30000),   // 30s
-  extensions: new LRUCache(100, 600000),  // 10min
-  search:     new LRUCache(200, 300000),  // 5min
-  manga:      new LRUCache(100, 600000),  // 10min
-  pages:      new LRUCache(50,  1800000), // 30min
+  sources:    new LRUCache(50,  30000),    // 30s
+  extensions: new LRUCache(100, 1800000),  // 30min (extensions rarely change)
+  search:     new LRUCache(200, 300000),   // 5min
+  manga:      new LRUCache(100, 600000),   // 10min
+  pages:      new LRUCache(50,  1800000),  // 30min
 };
 
 // ── Logging ────────────────────────────────────────────────────────────────
@@ -98,8 +98,14 @@ const gql = async (query, variables = {}, retries = 2) => {
       if (r.data.errors) throw new Error(r.data.errors.map(e => e.message).join(', '));
       return r.data.data;
     } catch (e) {
-      if (i === retries) throw e;
-      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+      if (i === retries) {
+        if (e.response && e.response.data) {
+          const msg = typeof e.response.data === 'string' ? e.response.data : JSON.stringify(e.response.data);
+          throw new Error(`[${e.response.status}] ${msg}`);
+        }
+        throw e;
+      }
+      await new Promise(r => setTimeout(r, 300 * (i + 1)));
     }
   }
 };
@@ -122,6 +128,23 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const syncExtensions = async () => {
   await gql('mutation { fetchExtensions(input: {}) { clientMutationId } }', {}, 0);
+};
+
+// Pre-warm extension cache on server start
+let extensionPrewarmDone = false;
+const prewarmExtensions = async () => {
+  if (extensionPrewarmDone) return;
+  try {
+    console.log('[prewarm] Fetching extensions in background...');
+    const result = await queryExtensions();
+    if (result.length > 0) {
+      caches.extensions.set('all', result);
+      console.log(`[prewarm] Cached ${result.length} extensions`);
+    }
+    extensionPrewarmDone = true;
+  } catch (e) {
+    console.log('[prewarm] Extensions not ready yet, will retry...');
+  }
 };
 
 const queryExtensions = async () => {
@@ -169,11 +192,9 @@ app.get('/api/health', async (_, res) => {
 
 // ── Image Proxy ────────────────────────────────────────────────────────────
 app.get('/api/img', async (req, res) => {
-  const raw = req.query.url;
-  if (!raw) return res.status(400).end();
-  let url;
-  try { url = decodeURIComponent(raw); } catch { return res.status(400).end(); }
-  if (!url.startsWith(SUWAYOMI) && !url.startsWith('http://localhost:')) {
+  const url = req.query.url;
+  if (!url) return res.status(400).end();
+  if (!url.startsWith('http')) {
     return res.status(403).end();
   }
 
@@ -187,7 +208,8 @@ app.get('/api/img', async (req, res) => {
       return res.send(Buffer.from(r.data));
     } catch (e) {
       if (i === 1) {
-        console.error('[img-proxy] Final failure:', url, e.message);
+        const errorMsg = e.response ? `[${e.response.status}]` : e.message;
+        console.error('[img-proxy] Final failure:', url, errorMsg);
         return res.status(502).end();
       }
       await sleep(1000); // Wait before retry
@@ -212,7 +234,8 @@ app.get('/api/extensions', async (_, res) => {
     caches.extensions.set('all', result);
     res.json(result);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    console.error('[extensions]', e.message);
+    res.status(500).json({ error: e.message || 'Unknown error fetching extensions' });
   }
 });
 
@@ -242,7 +265,10 @@ app.post('/api/extensions/install/:pkgName', async (req, res) => {
     caches.sources.clear();
     caches.extensions.clear();
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { 
+    console.error('[extensions/install]', e.message);
+    res.status(500).json({ error: e.message || 'Unknown error' }); 
+  }
 });
 
 app.post('/api/extensions/uninstall/:pkgName', async (req, res) => {
@@ -438,4 +464,11 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`✓ akaReader proxy → http://localhost:${PORT}`);
   console.log(`  Suwayomi        → ${SUWAYOMI}`);
+  // Pre-warm extension cache in background after Suwayomi has time to start
+  const warmup = () => {
+    prewarmExtensions().catch(() => {});
+  };
+  setTimeout(warmup, 3000);
+  setTimeout(warmup, 8000);
+  setTimeout(warmup, 15000);
 });

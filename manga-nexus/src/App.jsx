@@ -55,8 +55,8 @@ const CONFIG = {
 const IMG_CACHE_KEY = Date.now();
 const proxyImg = (url) => {
   if (!url) return null;
-  if (url.startsWith(CONFIG.SUWAYOMI) || url.startsWith('/')) {
-    const absolute = url.startsWith('/') ? `${CONFIG.SUWAYOMI}${url}` : url;
+  const absolute = url.startsWith('/') ? `${CONFIG.SUWAYOMI}${url}` : url;
+  if (absolute.startsWith('http')) {
     return `${CONFIG.API}/img?url=${encodeURIComponent(absolute)}&_v=${IMG_CACHE_KEY}`;
   }
   return url;
