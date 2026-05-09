@@ -810,14 +810,14 @@ app.whenReady().then(async () => {
       responseHeaders: {
         ...details.responseHeaders,
         'Content-Security-Policy': [
-          "default-src 'self' 'unsafe-inline' http://localhost:* file:;",
-          "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;",
-          "style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com;",
-          "font-src 'self' https://fonts.gstatic.com data:;",
-          "img-src 'self' data: blob: http://localhost:* file:;",
-          "script-src 'self' 'unsafe-inline' http://localhost:*;",
-          "connect-src 'self' http://localhost:* ws://localhost:*;"
-        ].join(' ')
+          "default-src 'self' 'unsafe-inline' http://localhost:* file:",
+          "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+          "style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com",
+          "font-src 'self' https://fonts.gstatic.com data:",
+          "img-src 'self' data: blob: http://localhost:* file:",
+          "script-src 'self' 'unsafe-inline' http://localhost:*",
+          "connect-src 'self' http://localhost:* ws://localhost:*"
+        ].join('; ')
       }
     });
   });

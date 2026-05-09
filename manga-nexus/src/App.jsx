@@ -441,6 +441,7 @@ const getMangaKey = (id, sourceId) => {
 };
 
 const DataProvider = memo(({ children }) => {
+  const toast = useToast();
   const [backendOnline, setBackendOnlineRaw] = useState(null);
   const backendOnlineRef = useRef(null);
   const offlineTimer = useRef(null);
@@ -599,8 +600,11 @@ const DataProvider = memo(({ children }) => {
         };
       });
       if (JSON.stringify(map) !== JSON.stringify(sourcesRef.current)) { sourcesRef.current = map; setSources(map); }
-    } catch { }
-  }, [fetchJSON]);
+    } catch (e) {
+      console.error('fetchSources error:', e);
+      toast('Failed to load sources from backend.', 'error');
+    }
+  }, [fetchJSON, toast]);
 
   const fetchExtensions = useCallback(async () => {
     try {
@@ -618,8 +622,12 @@ const DataProvider = memo(({ children }) => {
       }));
       if (JSON.stringify(normalized) !== JSON.stringify(extRef.current)) { extRef.current = normalized; setExtensions(normalized); }
       return normalized;
-    } catch { return []; }
-  }, [fetchJSON]);
+    } catch (e) {
+      console.error('fetchExtensions error:', e);
+      toast('Failed to load extensions from backend.', 'error');
+      return []; 
+    }
+  }, [fetchJSON, toast]);
 
   const installExt = useCallback(async (pkgName) => {
     setInstalling(s => new Set([...s, pkgName]));

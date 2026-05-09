@@ -55,6 +55,7 @@ export const MangaCard = memo(({ manga, onClick, index = 0, badge, progress, cat
         ) : (
           <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg,rgba(255,255,255,0.03),transparent)', gap: 10 }}>
             <BookOpen size={36} style={{ color: 'var(--muted)', opacity: 0.4 }} />
+            {imageError && <span style={{ fontSize: 11, color: 'var(--muted)', opacity: 0.6, textAlign: 'center', padding: '0 8px' }}>Unavailable<br/><span style={{ fontSize: 9, opacity: 0.7 }}>Missing Extension?</span></span>}
           </div>
         )}
 
