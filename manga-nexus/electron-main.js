@@ -97,16 +97,15 @@ function flushStatusQueue() {
 // ── HTTPS download with progress ──────────────────────────────────────────────
 function download(url, dest, onProgress) {
   return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(dest);
     const doGet = (u) => {
       https.get(u, { headers: { 'User-Agent': 'akaReader/3.0' } }, res => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          file.close(); return doGet(res.headers.location);
+          return doGet(res.headers.location);
         }
         if (res.statusCode !== 200) {
-          file.close(); fs.unlink(dest, () => {});
           return reject(new Error('HTTP ' + res.statusCode + ' — ' + u));
         }
+        const file = fs.createWriteStream(dest);
         const total = parseInt(res.headers['content-length'] || '0', 10);
         let received = 0;
         res.on('data', chunk => {
@@ -116,7 +115,7 @@ function download(url, dest, onProgress) {
         res.pipe(file);
         file.on('finish', () => file.close(resolve));
         file.on('error', e => { fs.unlink(dest, () => {}); reject(e); });
-      }).on('error', e => { fs.unlink(dest, () => {}); reject(e); });
+      }).on('error', e => { reject(e); });
     };
     doGet(url);
   });
