@@ -1615,6 +1615,19 @@ const SettingsPage = memo(() => {
           <Btn variant="outline" size="sm" icon={Archive} onClick={() => { const i = document.createElement('input'); i.type = 'file'; i.accept = '.json'; i.onchange = async (e) => { const f = e.target.files[0]; if (!f) return; try { const t = await f.text(); const d = JSON.parse(t); if (d.library) storage.set('library', d.library); if (d.history) storage.set('history', d.history); if (d.progress) storage.set('progress', d.progress); toast('Restored! Reloading…', 'success'); setTimeout(() => window.location.reload(), 1200); } catch (err) { toast('Import failed: ' + err.message, 'error'); } }; document.body.appendChild(i); i.click(); document.body.removeChild(i); }}>Import</Btn>
         </Row>
       </Section>
+
+      <Section title="⚠️ Advanced">
+        <Row label="Reinstall Backend" description="Deletes the backend files and redownloads them. Keeps your library.">
+          <Btn variant="outline" style={{ borderColor: 'rgba(245,158,11,0.3)', color: '#f59e0b' }} size="sm" onClick={() => { if (confirm('Delete backend files and redownload? Your manga will be saved.')) window.electronAPI?.reinstallBackend?.(); }}>
+            <RotateCcw size={14} /> Reinstall
+          </Btn>
+        </Row>
+        <Row label="Factory Reset" description="Deletes EVERYTHING. Wipes your downloaded manga, history, and settings.">
+          <Btn variant="outline" style={{ borderColor: 'rgba(239,68,68,0.3)', color: '#ef4444' }} size="sm" onClick={() => { if (confirm('WARNING: This will delete EVERYTHING including your downloaded manga, history, and settings. Proceed?')) window.electronAPI?.factoryReset?.(); }}>
+            <Trash2 size={14} /> Factory Reset
+          </Btn>
+        </Row>
+      </Section>
       <Section title="☕ Support Development">
         <div style={{ padding: '20px', background: 'var(--card)', borderRadius: 14, border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
           <div>
@@ -2412,14 +2425,24 @@ const ServiceErrorModal = memo(({ onRestart }) => {
         <p style={{ color: 'var(--muted)', fontSize: 14, lineHeight: 1.8, marginBottom: 28 }}>
           The akaReader backend has stopped responding. This can happen if the server process exited unexpectedly.
         </p>
-        <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
-          <Btn variant="outline" onClick={onRestart}>Dismiss</Btn>
-          <Btn variant="outline" onClick={() => window.electronAPI?.openDataDir?.()}>View Logs</Btn>
-          {window.electronAPI?.restartServices && (
-            <Btn onClick={handleRestart} disabled={restarting}>
-              {restarting ? <><Spin size={14} /> Restarting...</> : <><RotateCcw size={15} /> Restart Services</>}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
+            <Btn variant="outline" onClick={onRestart}>Dismiss</Btn>
+            <Btn variant="outline" onClick={() => window.electronAPI?.openDataDir?.()}>View Logs</Btn>
+            {window.electronAPI?.restartServices && (
+              <Btn onClick={handleRestart} disabled={restarting}>
+                {restarting ? <><Spin size={14} /> Restarting...</> : <><RotateCcw size={15} /> Restart</>}
+              </Btn>
+            )}
+          </div>
+          <div style={{ borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: 12, marginTop: 4, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <Btn variant="outline" style={{ borderColor: 'rgba(245,158,11,0.3)', color: '#f59e0b' }} onClick={() => { if (confirm('Delete backend files and redownload? Your manga will be saved.')) window.electronAPI?.reinstallBackend?.(); }}>
+              Reinstall Backend (Keep Data)
             </Btn>
-          )}
+            <Btn variant="outline" style={{ borderColor: 'rgba(239,68,68,0.3)', color: '#ef4444' }} onClick={() => { if (confirm('WARNING: This will delete EVERYTHING including your downloaded manga, history, and settings. Proceed?')) window.electronAPI?.factoryReset?.(); }}>
+              Factory Reset (Wipe Everything)
+            </Btn>
+          </div>
         </div>
       </div>
     </div>

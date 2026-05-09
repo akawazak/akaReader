@@ -38,4 +38,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   checkForAppUpdate: () => ipcRenderer.invoke('check-for-app-update'),
   downloadAppUpdate: () => ipcRenderer.invoke('download-app-update'),
   installAppUpdate: () => ipcRenderer.invoke('install-app-update'),
+  reinstallBackend: () => ipcRenderer.invoke('reinstall-backend'),
+  factoryReset: () => ipcRenderer.invoke('factory-reset')
 });

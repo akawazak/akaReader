@@ -728,6 +728,37 @@ ipcMain.handle('install-app-update', () => {
   return { ok: true };
 });
 
+ipcMain.handle('reinstall-backend', async () => {
+  if (suwayomiProc) { try { suwayomiProc.kill('SIGKILL'); } catch {} }
+  if (serverProc) { try { serverProc.kill('SIGKILL'); } catch {} }
+  await new Promise(r => setTimeout(r, 1000));
+  try {
+    if (fs.existsSync(jarPath)) fs.rmSync(jarPath, { force: true });
+    if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true, force: true });
+  } catch (e) {
+    console.error('Failed to delete backend files:', e);
+    return { ok: false, error: e.message };
+  }
+  app.relaunch();
+  app.exit(0);
+});
+
+ipcMain.handle('factory-reset', async () => {
+  if (suwayomiProc) { try { suwayomiProc.kill('SIGKILL'); } catch {} }
+  if (serverProc) { try { serverProc.kill('SIGKILL'); } catch {} }
+  await new Promise(r => setTimeout(r, 1000));
+  try {
+    if (fs.existsSync(jarPath)) fs.rmSync(jarPath, { force: true });
+    if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true, force: true });
+    if (fs.existsSync(suwayomiRoot)) fs.rmSync(suwayomiRoot, { recursive: true, force: true });
+  } catch (e) {
+    console.error('Failed to delete backend/data files:', e);
+    return { ok: false, error: e.message };
+  }
+  app.relaunch();
+  app.exit(0);
+});
+
 // ── Tray ──────────────────────────────────────────────────────────────────────
 function createTray() {
   if (tray) { try { tray.destroy(); } catch {} }
