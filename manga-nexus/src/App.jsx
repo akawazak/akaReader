@@ -1302,12 +1302,16 @@ const SettingsPage = memo(() => {
       toast('App updater is not available in this build', 'warning');
       return;
     }
-    setAppUpdateState({ checking: true, message: 'Checking...' });
+    setAppUpdateState({ checking: true, message: 'Checking...', version: null });
     const result = await window.electronAPI.checkForAppUpdate();
     if (result?.ok) {
-      const msg = result.version ? `Update ${result.version} found` : 'No update found';
-      setAppUpdateState({ checking: false, message: msg, version: result.version || null });
-      toast(msg, result.version ? 'success' : 'info');
+      if (result.version) {
+        setAppUpdateState({ checking: false, message: `Update v${result.version} available!`, version: result.version });
+        toast(`Update v${result.version} found!`, 'success');
+      } else {
+        setAppUpdateState({ checking: false, message: `You're on the latest version (v${result.currentVersion || '?'})`, version: null });
+        toast('You\'re already up to date!', 'info');
+      }
     } else {
       const msg = result?.error || 'Unable to check for updates';
       setAppUpdateState({ checking: false, message: msg, version: null });
@@ -1409,9 +1413,10 @@ const SettingsPage = memo(() => {
         </Row>
         {window.electronAPI?.checkForAppUpdate && (
           <Row label="App Updates" sub={appUpdateState.message || 'Checks GitHub releases and installs from inside akaReader'}>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              {appUpdateState.message?.includes('latest') && <Check size={16} style={{ color: '#22c55e' }} />}
               <Btn variant="outline" size="sm" onClick={checkAppUpdate} disabled={appUpdateState.checking}>
-                <RefreshCw size={14} className={appUpdateState.checking ? 'anim-spin' : ''} /> {appUpdateState.checking ? 'Checking' : 'Check'}
+                <RefreshCw size={14} className={appUpdateState.checking ? 'anim-spin' : ''} /> {appUpdateState.checking ? 'Checking' : 'Check for Updates'}
               </Btn>
               {appUpdateState.version && (
                 <Btn variant="success" size="sm" onClick={() => {

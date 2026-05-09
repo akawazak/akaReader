@@ -706,7 +706,11 @@ ipcMain.handle('check-for-app-update', async () => {
   if (isDev) return { ok: false, error: 'Updater only runs in a packaged app.' };
   try {
     const result = await autoUpdater.checkForUpdates();
-    return { ok: true, version: result?.updateInfo?.version || null };
+    const remoteVersion = result?.updateInfo?.version || null;
+    const localVersion = app.getVersion();
+    // Only report an update if remote is actually newer
+    const hasUpdate = remoteVersion && remoteVersion !== localVersion;
+    return { ok: true, version: hasUpdate ? remoteVersion : null, currentVersion: localVersion };
   } catch (e) {
     return { ok: false, error: e?.message || 'Failed to check for updates.' };
   }
