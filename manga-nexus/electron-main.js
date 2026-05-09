@@ -382,7 +382,7 @@ async function uninstallWindowsService() {
 function killPid(pid) {
   if (!pid) return;
   if (process.platform === 'win32') {
-    try { cp.spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], { windowsHide: true, timeout: 5000 }); } catch {}
+    try { cp.spawn('taskkill', ['/F', '/T', '/PID', String(pid)], { windowsHide: true, stdio: 'ignore' }); } catch {}
   } else {
     try { process.kill(-pid, 'SIGKILL'); } catch {
       try { process.kill(pid, 'SIGKILL'); } catch {}
@@ -576,7 +576,7 @@ async function ensureManagedServices({ restart = false } = {}) {
         if (suwayomiProc) killSuwayomi();
         killServer();
         serviceMode = false;
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 100));
       }
 
       sendStatus('starting-backend');
