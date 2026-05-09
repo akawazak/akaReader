@@ -1216,7 +1216,7 @@ const SettingsPage = memo(() => {
   const [serviceStatus, setServiceStatus] = useState(null);
   const [serviceWorking, setServiceWorking] = useState(false);
   const [runtimeInfo, setRuntimeInfo] = useState({ javaPath: '', jarPath: '', configPath: '' });
-  const [appUpdateState, setAppUpdateState] = useState({ checking: false, message: '' });
+  const [appUpdateState, setAppUpdateState] = useState({ checking: false, message: '', version: null });
   const installedExtCount = useMemo(() => {
     const seen = new Set();
     extensions.forEach(ext => {
@@ -1293,11 +1293,11 @@ const SettingsPage = memo(() => {
     const result = await window.electronAPI.checkForAppUpdate();
     if (result?.ok) {
       const msg = result.version ? `Update ${result.version} found` : 'No update found';
-      setAppUpdateState({ checking: false, message: msg });
+      setAppUpdateState({ checking: false, message: msg, version: result.version || null });
       toast(msg, result.version ? 'success' : 'info');
     } else {
       const msg = result?.error || 'Unable to check for updates';
-      setAppUpdateState({ checking: false, message: msg });
+      setAppUpdateState({ checking: false, message: msg, version: null });
       toast(msg, 'warning');
     }
   };
@@ -1396,9 +1396,20 @@ const SettingsPage = memo(() => {
         </Row>
         {window.electronAPI?.checkForAppUpdate && (
           <Row label="App Updates" sub={appUpdateState.message || 'Checks GitHub releases and installs from inside akaReader'}>
-            <Btn variant="outline" size="sm" onClick={checkAppUpdate} disabled={appUpdateState.checking}>
-              <RefreshCw size={14} /> {appUpdateState.checking ? 'Checking' : 'Check'}
-            </Btn>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <Btn variant="outline" size="sm" onClick={checkAppUpdate} disabled={appUpdateState.checking}>
+                <RefreshCw size={14} className={appUpdateState.checking ? 'anim-spin' : ''} /> {appUpdateState.checking ? 'Checking' : 'Check'}
+              </Btn>
+              {appUpdateState.version && (
+                <Btn variant="success" size="sm" onClick={() => {
+                  toast('Downloading update...', 'info');
+                  window.electronAPI.downloadAppUpdate().then(res => {
+                    if (res.ok) toast('Update downloaded. Restarting...', 'success');
+                    else toast(`Download failed: ${res.error}`, 'error');
+                  });
+                }} icon={Download}>Download & Install</Btn>
+              )}
+            </div>
           </Row>
         )}
         <Row label="Suwayomi Runtime" sub="The embedded server akaReader manages in the background">
@@ -1520,7 +1531,15 @@ const SettingsPage = memo(() => {
             {serviceStatus === 'running' ? (
               <Btn variant="danger" size="sm" disabled={serviceWorking} onClick={async () => {
                 setServiceWorking(true);
-                try { await window.electronAPI.uninstallService(); setServiceStatus('stopped'); toast('Service uninstalled', 'warning'); }
+                try {
+                  const res = await window.electronAPI.uninstallService();
+                  if (res?.ok) {
+                    setServiceStatus('stopped');
+                    toast('Service uninstalled', 'warning');
+                  } else {
+                    toast(`Uninstall failed: ${res?.error || 'Unknown error'}`, 'error');
+                  }
+                }
                 catch (e) { toast(`Failed: ${e.message}`, 'error'); }
                 finally { setServiceWorking(false); }
               }}>
@@ -1529,7 +1548,15 @@ const SettingsPage = memo(() => {
             ) : (
               <Btn size="sm" disabled={serviceWorking} onClick={async () => {
                 setServiceWorking(true);
-                try { await window.electronAPI.installService(); setServiceStatus('running'); toast('Service installed and started', 'success'); }
+                try {
+                  const res = await window.electronAPI.installService();
+                  if (res?.ok) {
+                    setServiceStatus('running');
+                    toast('Service installed and started', 'success');
+                  } else {
+                    toast(`Install failed: ${res?.error || 'Unknown error'}`, 'error');
+                  }
+                }
                 catch (e) { toast(`Failed: ${e.message}`, 'error'); }
                 finally { setServiceWorking(false); }
               }}>

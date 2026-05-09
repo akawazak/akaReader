@@ -351,6 +351,11 @@ async function installWindowsService() {
   const java     = findJava();
   const dataRoot = path.join(userData, 'suwayomi-data');
   ensureSuwayomiConfig(dataRoot);
+  
+  // Clean up any existing service first to avoid "service already exists" errors
+  try { cp.execSync(`"${nssmExe}" stop AkaReaderSuwayomi`, { windowsHide: true, timeout: 5000 }); } catch {}
+  try { cp.execSync(`"${nssmExe}" remove AkaReaderSuwayomi confirm`, { windowsHide: true, timeout: 5000 }); } catch {}
+
   const cmds = [
     `"${nssmExe}" install AkaReaderSuwayomi "${java}"`,
     `"${nssmExe}" set AkaReaderSuwayomi AppParameters "-Dsuwayomi.tachidesk.config.server.rootDir=\\"${dataRoot}\\" -jar \\"${jarPath}\\" --server.port=4567"`,
@@ -358,9 +363,13 @@ async function installWindowsService() {
     `"${nssmExe}" set AkaReaderSuwayomi Start SERVICE_AUTO_START`,
     `"${nssmExe}" set AkaReaderSuwayomi AppStdout "${path.join(userData, 'suwayomi.log')}"`,
     `"${nssmExe}" set AkaReaderSuwayomi AppStderr "${path.join(userData, 'suwayomi-err.log')}"`,
-    `net start AkaReaderSuwayomi`,
+    `"${nssmExe}" start AkaReaderSuwayomi`,
   ];
-  for (const cmd of cmds) cp.execSync(cmd, { windowsHide: true });
+  
+  for (const cmd of cmds) {
+    console.log('[service] Executing:', cmd);
+    cp.execSync(cmd, { windowsHide: true, timeout: 10000 });
+  }
 }
 
 async function uninstallWindowsService() {
@@ -445,6 +454,7 @@ async function startSuwayomi() {
 
   const java     = findJava();
   const dataRoot = path.join(userData, 'suwayomi-data');
+  let lastError = '';
   sendStatus('configuring-suwayomi');
   ensureSuwayomiConfig(dataRoot);
   sendStatus('starting-suwayomi');
@@ -459,6 +469,10 @@ async function startSuwayomi() {
     windowsHide: true, detached: false,
   });
 
+  if (!suwayomiProc || !suwayomiProc.pid) {
+    throw new Error('Failed to spawn Suwayomi process. Check if Java is installed correctly.');
+  }
+
   // FIX: write PID immediately so cleanup works even after forced kill
   fs.writeFileSync(suwayomiPidFile, String(suwayomiProc.pid));
 
@@ -468,13 +482,19 @@ async function startSuwayomi() {
   });
   suwayomiProc.stderr.on('data', d => {
     const l = d.toString().trim();
-    if (l) console.error('[suwayomi:err]', l.slice(0, 120));
+    if (l) {
+      console.error('[suwayomi:err]', l.slice(0, 120));
+      lastError = l.slice(0, 200); // Keep last error for status report
+    }
   });
   suwayomiProc.on('exit', code => {
     console.log('[suwayomi] exited', code);
     suwayomiProc = null;
     try { fs.unlinkSync(suwayomiPidFile); } catch {}
-    if (!isQuitting) sendStatus('crashed');
+    if (!isQuitting) {
+      const msg = code !== 0 ? `crashed (code ${code}): ${lastError}` : 'crashed';
+      sendStatus(msg);
+    }
   });
 
   try {
@@ -614,8 +634,27 @@ ipcMain.handle('ensure-services', () => ensureManagedServices());
 ipcMain.handle('restart-services', () => ensureManagedServices({ restart: true }));
 
 ipcMain.handle('check-service',     ()    => isServiceRunning());
-ipcMain.handle('install-service',   async () => { await installWindowsService(); return true; });
-ipcMain.handle('uninstall-service', async () => { await uninstallWindowsService(); return true; });
+ipcMain.handle('install-service',   async () => {
+  try {
+    await installWindowsService();
+    return { ok: true };
+  } catch (e) {
+    console.error('[service] Install error:', e.message);
+    let msg = e.message;
+    if (msg.includes('Access is denied') || msg.includes('exit code 1')) {
+      msg = 'Access denied. Please run akaReader as Administrator to install the service.';
+    }
+    return { ok: false, error: msg };
+  }
+});
+ipcMain.handle('uninstall-service', async () => {
+  try {
+    await uninstallWindowsService();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
 ipcMain.handle('open-data-dir',     ()    => shell.openPath(userData));
 ipcMain.handle('get-version',       ()    => app.getVersion());
 ipcMain.handle('get-java-path',     ()    => findJava());
