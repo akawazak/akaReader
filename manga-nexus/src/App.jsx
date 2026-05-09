@@ -577,7 +577,8 @@ const DataProvider = memo(({ children }) => {
       if (d.ok && d.suwayomi !== undefined) setSuwayomiReady(d.suwayomi);
     }
     catch {
-      if (backendOnlineRef.current !== null) setBackendOnline(false);
+      setBackendOnline(false);
+      setSuwayomiReady(false);
     }
   }, [fetchJSON]);
 
@@ -2447,7 +2448,7 @@ const StartupScreen = memo(({ onProceed, onRetry, managedStartup = false, backen
 
     if (!window.electronAPI?.onServicesStatus) return () => clearTimeout(failSafe);
 
-    window.electronAPI.onServicesStatus((status) => {
+    const unsub = window.electronAPI.onServicesStatus((status) => {
       if (status.includes(':') && !status.startsWith('update-available')) {
         const [code, val] = status.split(':');
         const pct = parseInt(val);
@@ -2480,7 +2481,10 @@ const StartupScreen = memo(({ onProceed, onRetry, managedStartup = false, backen
         }
       }
     });
-    return () => clearTimeout(failSafe);
+    return () => {
+      clearTimeout(failSafe);
+      if (typeof unsub === 'function') unsub();
+    };
   }, [phase, managedStartup]);
 
   useEffect(() => {
@@ -3850,6 +3854,7 @@ const App = memo(() => {
   const [showOnboarding, setShowOnboarding] = useState(() => !storage.get('onboardingDone', false));
 
   const [showErrorModal, setShowErrorModal] = useState(false);
+  const [forceProceed, setForceProceed] = useState(false);
   const errorTimerRef = useRef(null);
   const sidebarIsCollapsed = sidebarCollapsed || isNarrowViewport;
   const sidebarWidth = sidebarIsCollapsed ? 76 : 248;
@@ -3857,16 +3862,15 @@ const App = memo(() => {
   useEffect(() => {
     const onResize = () => setIsNarrowViewport(window.innerWidth < 760);
     window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
-
-  useEffect(() => {
+    let unsub = null;
     if (window.electronAPI?.onServicesStatus) {
-      window.electronAPI.onServicesStatus((status) => {
+      unsub = window.electronAPI.onServicesStatus((status) => {
         if (status === 'crashed' || status === 'offline') {
           setShowErrorModal(true);
         } else if (status === 'online') {
           setShowErrorModal(false);
+          setForceProceed(true);
+          setSuwayomiReady(true);
           checkHealth().then(() => { fetchSources(); fetchExtensions(); });
         } else if (status === 'suwayomi-starting') {
           setSuwayomiReady(false);
@@ -3893,6 +3897,10 @@ const App = memo(() => {
         }
       });
     }
+    return () => {
+      window.removeEventListener('resize', onResize);
+      if (typeof unsub === 'function') unsub();
+    };
   }, [checkHealth, fetchSources, fetchExtensions]);
 
   const serviceStartRequestedRef = useRef(false);
@@ -4502,14 +4510,15 @@ const App = memo(() => {
     { id: 'settings', label: 'Settings', Icon: Settings },
   ], [installedExts, library.length, history.length, updates.length, downloadQueue]);
 
-  const [forceProceed, setForceProceed] = useState(false);
+  const managedStartup = !!window.electronAPI?.ensureServices;
+  const canUseShellOffline = !managedStartup && backendOnline !== null;
 
-  if (!forceProceed && (backendOnline === null || !suwayomiReady) && !showErrorModal) {
+  if (!forceProceed && !canUseShellOffline && (backendOnline === null || !suwayomiReady) && !showErrorModal) {
     return (
       <StartupScreen
         onProceed={() => setForceProceed(true)}
         onRetry={() => { setForceProceed(false); window.electronAPI?.restartServices?.(); checkHealth(); }}
-        managedStartup={!!window.electronAPI?.ensureServices}
+        managedStartup={managedStartup}
         backendOnline={backendOnline}
         suwayomiReady={suwayomiReady}
       />
@@ -4567,7 +4576,7 @@ const App = memo(() => {
       {showShareCard && <ShareCardModal library={library} history={history} progress={progress} readChapters={readChapters} settings={settings} onClose={() => setShowShareCard(false)} />}
       {showErrorModal && <ServiceErrorModal onRestart={() => { setShowErrorModal(false); checkHealth(); }} />}
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
-      {backendOnline && !suwayomiReady && !showErrorModal && forceProceed && (
+      {backendOnline && !suwayomiReady && !showErrorModal && (forceProceed || canUseShellOffline) && (
         <div className="anim-slideDown" style={{ position: 'fixed', top: 38, left: 0, right: 0, zIndex: 800, background: 'rgba(15,15,24,0.96)', backdropFilter: 'blur(12px)', borderBottom: '1px solid rgba(249,115,22,0.25)', padding: '9px 20px', display: 'flex', alignItems: 'center', gap: 10 }}>
           <div className="anim-spin" style={{ width: 13, height: 13, border: '2px solid rgba(249,115,22,0.3)', borderTopColor: 'var(--accent)', borderRadius: '50%', flexShrink: 0 }} />
           <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 500 }}>Suwayomi is starting… browse and extensions will load shortly</span>
