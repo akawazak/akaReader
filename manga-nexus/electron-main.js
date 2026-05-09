@@ -765,15 +765,24 @@ app.whenReady().then(async () => {
     autoUpdater.autoDownload = true;
     autoUpdater.autoInstallOnAppQuit = true;
 
+    // Track whether this is a manual check (from settings) or automatic
+    let isManualCheck = false;
+
     autoUpdater.on('checking-for-update', () => {
       console.log('[updater] Checking for updates...');
       sendStatus('update-checking');
+      // Show a native notification so the user knows it's checking
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setProgressBar(0.05, { mode: 'indeterminate' });
+      }
     });
 
     autoUpdater.on('update-available', i => {
       console.log('[updater] Update available:', i.version);
       sendStatus('update-available:' + i.version);
-      // Native dialog so users see it even if the UI is stuck
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setProgressBar(0.1);
+      }
       dialog.showMessageBox(mainWindow, {
         type: 'info',
         title: 'Update Available',
@@ -786,12 +795,24 @@ app.whenReady().then(async () => {
     autoUpdater.on('update-not-available', () => {
       console.log('[updater] No updates available');
       sendStatus('update-not-available');
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.setProgressBar(-1);
+      }
+      // Only show the "up to date" dialog on manual checks, not every 2h auto-check
+      if (isManualCheck) {
+        isManualCheck = false;
+        dialog.showMessageBox(mainWindow, {
+          type: 'info',
+          title: 'You\'re Up to Date',
+          message: `akaReader v${app.getVersion()} is the latest version.`,
+          buttons: ['OK'],
+        }).catch(() => {});
+      }
     });
 
     autoUpdater.on('download-progress', p => {
       const pct = Math.round(p.percent || 0);
       sendStatus('update-downloading:' + pct);
-      // Show progress on the Windows taskbar icon
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.setProgressBar(pct / 100);
       }
@@ -800,7 +821,6 @@ app.whenReady().then(async () => {
     autoUpdater.on('update-downloaded', (i) => {
       console.log('[updater] Update downloaded:', i?.version);
       sendStatus('update-downloaded');
-      // Clear taskbar progress
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.setProgressBar(-1);
       }
@@ -819,7 +839,6 @@ app.whenReady().then(async () => {
     autoUpdater.on('error', e => {
       console.error('[updater]', e.message);
       sendStatus('update-error:' + (e?.message || 'unknown'));
-      // Clear taskbar progress on error
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.setProgressBar(-1);
       }
@@ -828,6 +847,12 @@ app.whenReady().then(async () => {
     // Check immediately on launch, then every 2 hours
     autoUpdater.checkForUpdates().catch(() => {});
     setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 2 * 60 * 60 * 1000);
+
+    // Allow manual check from renderer
+    ipcMain.handle('manual-check-update', async () => {
+      isManualCheck = true;
+      try { await autoUpdater.checkForUpdates(); } catch {}
+    });
   }
 
   app.on('activate', () => {
