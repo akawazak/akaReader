@@ -42,8 +42,9 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+const isElectron = navigator.userAgent.toLowerCase().includes('electron');
 const CONFIG = {
-  API: import.meta.env.VITE_API_BASE_URL || '/api',
+  API: isElectron ? 'http://localhost:3001/api' : (import.meta.env.VITE_API_BASE_URL || '/api'),
   SUWAYOMI: import.meta.env.VITE_SUWAYOMI_BASE_URL || 'http://localhost:4567',
   DEBOUNCE_DELAY: 300,
   UPDATE_INTERVAL: 3600000,

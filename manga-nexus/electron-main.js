@@ -724,7 +724,7 @@ ipcMain.handle('download-app-update', async () => {
 ipcMain.handle('install-app-update', () => {
   if (!autoUpdater || isDev) return { ok: false };
   isQuitting = true;
-  autoUpdater.quitAndInstall();
+  autoUpdater.quitAndInstall(false, true);
   return { ok: true };
 });
 
@@ -941,7 +941,7 @@ app.whenReady().then(async () => {
         buttons: ['Restart Now', 'Later'],
         defaultId: 0,
       }).then(({ response }) => {
-        if (response === 0) { isQuitting = true; autoUpdater.quitAndInstall(); }
+        if (response === 0) { isQuitting = true; autoUpdater.quitAndInstall(false, true); }
       });
     });
 
