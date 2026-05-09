@@ -529,6 +529,9 @@ async function startSuwayomi() {
 // ── Backend server ────────────────────────────────────────────────────────────
 function startServer() {
   if (serverProc) return;
+  const logFile = path.join(userData, 'backend-startup.log');
+  try { fs.writeFileSync(logFile, `--- Backend Startup ${new Date().toISOString()} ---\n`); } catch {}
+
   console.log('[server] starting');
   serverProc = utilityProcess.fork(serverPath, [], {
     cwd: backendDir,
@@ -536,9 +539,24 @@ function startServer() {
     stdio: 'pipe',
     serviceName: 'akaReader-backend',
   });
+
+  serverProc.stdout.on('data', d => {
+    const l = d.toString();
+    try { fs.appendFileSync(logFile, l); } catch {}
+    if (l.trim()) console.log('[server]', l.trim());
+  });
+
+  serverProc.stderr.on('data', d => {
+    const l = d.toString();
+    try { fs.appendFileSync(logFile, '[ERR] ' + l); } catch {}
+    if (l.trim()) console.error('[server:err]', l.trim());
+  });
+
   serverProc.on('spawn', () => console.log('[server] spawned'));
   serverProc.on('exit', code => {
-    console.log('[server] exited', code);
+    const msg = `[server] exited with code ${code}`;
+    console.log(msg);
+    try { fs.appendFileSync(logFile, msg + '\n'); } catch {}
     serverProc = null;
     if (!isQuitting) setTimeout(startServer, 3000);
   });
@@ -625,7 +643,11 @@ async function ensureManagedServices({ restart = false } = {}) {
       return true;
     } catch (e) {
       console.error('[startup] Service error:', e.message);
-      sendStatus('suwayomi-failed:' + e.message);
+      const detail = e.message || 'Unknown startup error';
+      sendStatus('suwayomi-failed:' + detail);
+      
+      // Fallback: If Suwayomi fails but backend proxy is up, 
+      // we could technically proceed offline, but it's better to show the error first.
       return false;
     } finally {
       servicesPromise = null;
