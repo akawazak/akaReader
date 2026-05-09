@@ -43,6 +43,7 @@ class ErrorBoundary extends React.Component {
 }
 
 const isElectron = navigator.userAgent.toLowerCase().includes('electron');
+const APP_VERSION = import.meta.env.PACKAGE_VERSION || '?';
 const CONFIG = {
   API: isElectron ? 'http://localhost:3001/api' : (import.meta.env.VITE_API_BASE_URL || '/api'),
   SUWAYOMI: import.meta.env.VITE_SUWAYOMI_BASE_URL || 'http://localhost:4567',
@@ -50,11 +51,13 @@ const CONFIG = {
   UPDATE_INTERVAL: 3600000,
 };
 
+// Session-level cache key so images reload on every app restart but stay cached within a session
+const IMG_CACHE_KEY = Date.now();
 const proxyImg = (url) => {
   if (!url) return null;
   if (url.startsWith(CONFIG.SUWAYOMI) || url.startsWith('/')) {
     const absolute = url.startsWith('/') ? `${CONFIG.SUWAYOMI}${url}` : url;
-    return `${CONFIG.API}/img?url=${encodeURIComponent(absolute)}`;
+    return `${CONFIG.API}/img?url=${encodeURIComponent(absolute)}&_v=${IMG_CACHE_KEY}`;
   }
   return url;
 };
@@ -4665,18 +4668,25 @@ const App = memo(() => {
         </div>
       )}
       {updateAvailable && (
-        <div className="anim-fadeIn" style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 900, background: 'linear-gradient(90deg,rgba(234,179,8,0.95),rgba(251,191,36,0.95))', backdropFilter: 'blur(12px)', padding: '10px 20px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
-          <BellRing size={16} style={{ color: '#78350f' }} />
-          <span style={{ fontSize: 13, fontWeight: 800, color: '#78350f', display: 'flex', alignItems: 'center', gap: 8 }}>
-            {updateDownloaded ? `akaReader v${updateAvailable} is downloaded` : updateDownloadPct ? `Downloading akaReader v${updateAvailable} (${updateDownloadPct}%)` : `akaReader v${updateAvailable} is available`}
-          </span>
+        <div className="anim-fadeIn" style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 900, background: 'linear-gradient(90deg,rgba(234,179,8,0.95),rgba(251,191,36,0.95))', backdropFilter: 'blur(12px)', padding: '10px 20px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+            <BellRing size={16} style={{ color: '#78350f' }} />
+            <span style={{ fontSize: 13, fontWeight: 800, color: '#78350f', display: 'flex', alignItems: 'center', gap: 8 }}>
+              {updateDownloaded ? `akaReader v${updateAvailable} is ready to install!` : updateDownloadPct ? `Downloading akaReader v${updateAvailable}…` : `akaReader v${updateAvailable} is available`}
+            </span>
           {updateDownloaded ? (
             <button onClick={() => window.electronAPI?.installAppUpdate?.()} style={{ background: '#78350f', color: '#fff7ed', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 800, cursor: 'pointer' }}>Restart to update</button>
           ) : (
             <button onClick={() => window.electronAPI?.downloadAppUpdate?.()} style={{ background: '#78350f', color: '#fff7ed', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 800, cursor: 'pointer' }}>Download update</button>
           )}
           <a href={`https://github.com/akawazak/akareader/releases/tag/v${updateAvailable}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, fontWeight: 700, color: '#78350f', textDecoration: 'underline' }}>Release notes</a>
-          <button onClick={() => setUpdateAvailable(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: '#78350f', display: 'flex' }}><X size={16} /></button>
+            <button onClick={() => setUpdateAvailable(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: '#78350f', display: 'flex' }}><X size={16} /></button>
+          </div>
+          {typeof updateDownloadPct === 'number' && (
+            <div style={{ width: '100%', height: 4, background: 'rgba(120,53,15,0.25)', borderRadius: 4, overflow: 'hidden' }}>
+              <div style={{ width: `${updateDownloadPct}%`, height: '100%', background: '#78350f', borderRadius: 4, transition: 'width 0.3s ease' }} />
+            </div>
+          )}
         </div>
       )}
 
@@ -4820,6 +4830,7 @@ const App = memo(() => {
         )}
 
         <div style={{ padding: sidebarIsCollapsed ? '0 8px 6px' : '0 10px 12px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: sidebarIsCollapsed ? 6 : 10 }}>
+          {!sidebarIsCollapsed && <div style={{ fontSize: 10, color: 'var(--muted)', opacity: 0.5, textAlign: 'center', marginBottom: 6, fontWeight: 600 }}>v{APP_VERSION}</div>}
           <button onClick={() => setSidebarCollapsed(c => !c)}
             title={sidebarIsCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
             style={{
