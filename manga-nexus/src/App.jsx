@@ -485,6 +485,7 @@ const DataProvider = memo(({ children }) => {
   const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [suwayomiReady, setSuwayomiReady] = useState(false);
   const [downloadedKeys, setDownloadedKeys] = useState(new Set());
+  const [appUpdateProgress, setAppUpdateProgress] = useState(null); // null | number | 'downloaded' | 'error'
 
   const refreshDownloads = useCallback(async () => {
     try {
@@ -901,6 +902,22 @@ const DataProvider = memo(({ children }) => {
       return () => clearInterval(interval);
     }
   }, [library, backendOnline, checkForUpdates]);
+
+  useEffect(() => {
+    if (!window.electronAPI?.onServicesStatus) return;
+    const unsub = window.electronAPI.onServicesStatus((status) => {
+      if (status.startsWith('update-downloading:')) {
+        const pct = parseInt(status.split(':')[1]);
+        if (!isNaN(pct)) setAppUpdateProgress(pct);
+      } else if (status === 'update-downloaded') {
+        setAppUpdateProgress('downloaded');
+      } else if (status.startsWith('update-error:')) {
+        setAppUpdateProgress('error');
+        setTimeout(() => setAppUpdateProgress(null), 5000);
+      }
+    });
+    return () => { if (typeof unsub === 'function') unsub(); };
+  }, []);
 
   useEffect(() => {
     checkHealth();
@@ -5549,6 +5566,48 @@ const App = memo(() => {
           {tab === 'settings' && <SettingsPage />}
           {migrateManga && <SourceMigrationModal manga={migrateManga} sources={sources} onClose={() => setMigrateManga(null)} onMigrate={handleMigrate} />}
         </>}
+        {/* App Update Overlay */}
+        {appUpdateProgress !== null && (
+          <div style={{
+            position: 'fixed', bottom: downloadQueue.some(d => d.status === 'downloading' || d.status === 'pending') && !overlayHidden ? 100 : 24,
+            left: '50%', transform: 'translateX(-50%)', zIndex: 1001,
+            background: 'rgba(15,15,22,0.98)', backdropFilter: 'blur(20px)', border: '1px solid var(--border)',
+            borderRadius: 24, padding: '14px 22px', display: 'flex', alignItems: 'center', gap: 18,
+            boxShadow: '0 25px 60px rgba(0,0,0,0.6)', width: 'min(480px, 92vw)',
+            animation: 'slideUp 0.5s cubic-bezier(0.16, 1, 0.3, 1)',
+            borderLeft: appUpdateProgress === 'downloaded' ? '4px solid #22c55e' : appUpdateProgress === 'error' ? '4px solid #ef4444' : '1px solid var(--border)'
+          }}>
+            <div style={{ position: 'relative', width: 48, height: 48, flexShrink: 0 }}>
+              <svg viewBox="0 0 36 36" style={{ transform: 'rotate(-90deg)', width: '100%', height: '100%' }}>
+                <circle cx="18" cy="18" r="16" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="3.5" />
+                <circle cx="18" cy="18" r="16" fill="none" stroke={appUpdateProgress === 'downloaded' ? '#22c55e' : 'var(--accent)'} strokeWidth="3.5"
+                  strokeDasharray={`${(typeof appUpdateProgress === 'number' ? appUpdateProgress : appUpdateProgress === 'downloaded' ? 100 : 0) * 1.005} 100`}
+                  style={{ transition: 'stroke-dasharray 0.4s ease' }} />
+              </svg>
+              <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                {appUpdateProgress === 'downloaded' ? <Check size={18} style={{ color: '#22c55e' }} /> : <BellRing size={18} style={{ color: 'var(--accent)' }} className={typeof appUpdateProgress === 'number' ? 'anim-pulse' : ''} />}
+              </div>
+            </div>
+
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <p style={{ margin: 0, fontSize: 14, fontWeight: 800, color: 'var(--text)' }}>
+                {appUpdateProgress === 'downloaded' ? 'Update Ready' : appUpdateProgress === 'error' ? 'Update Failed' : 'Downloading Update'}
+              </p>
+              <p style={{ margin: 0, fontSize: 11, color: 'var(--muted)', marginTop: 2, fontWeight: 600 }}>
+                {appUpdateProgress === 'downloaded' ? 'akaReader is ready to install the latest version' : appUpdateProgress === 'error' ? 'Something went wrong during the update' : `Fetching new features... ${appUpdateProgress}%`}
+              </p>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8 }}>
+              {appUpdateProgress === 'downloaded' ? (
+                <Btn variant="success" size="sm" onClick={() => window.electronAPI.installAppUpdate()}>Restart</Btn>
+              ) : typeof appUpdateProgress === 'number' ? (
+                <button onClick={() => setAppUpdateProgress(null)} style={{ background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: 12, padding: '6px 12px', fontSize: 11, fontWeight: 700, color: 'var(--muted)', cursor: 'pointer' }}>Dismiss</button>
+              ) : null}
+            </div>
+          </div>
+        )}
+
         {/* Live Download Overlay */}
         {downloadQueue.some(d => d.status === 'downloading' || d.status === 'pending') && !overlayHidden && (
           <div style={{
