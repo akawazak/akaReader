@@ -5,12 +5,12 @@ import React, {
 } from 'react';
 import {
   BookOpen, Library, History, Puzzle, Search, X,
-  ChevronLeft, ChevronRight, Bell, Globe, Download, Trash2, RefreshCw,
+  ChevronLeft, ChevronRight, Bell, BellRing, Globe, Download, Trash2, RefreshCw,
   Heart, Check, AlertTriangle, ArrowRight, Clock, Loader2, Play,
   SkipForward, SkipBack, Sun, Moon, Maximize, LayoutGrid, List,
   Columns, Filter, Tag, TrendingUp, Calendar, Eye, EyeOff, Zap,
   MoreVertical, Share2, ExternalLink, Archive, Star, Flame, Activity,
-  ChevronUp, ChevronDown, ZoomIn, ZoomOut, Settings, Sliders, BellRing,
+  ChevronUp, ChevronDown, ZoomIn, ZoomOut, Settings, Sliders,
   SlidersHorizontal, Coffee, AlertCircle, RotateCcw, ChevronRightCircle,
   Pen, Sparkles, Bookmark, Award, StickyNote, Pencil, Pause, Settings2, Plus,
   AlignJustify
@@ -903,21 +903,7 @@ const DataProvider = memo(({ children }) => {
     }
   }, [library, backendOnline, checkForUpdates]);
 
-  useEffect(() => {
-    if (!window.electronAPI?.onServicesStatus) return;
-    const unsub = window.electronAPI.onServicesStatus((status) => {
-      if (status.startsWith('update-downloading:')) {
-        const pct = parseInt(status.split(':')[1]);
-        if (!isNaN(pct)) setAppUpdateProgress(pct);
-      } else if (status === 'update-downloaded') {
-        setAppUpdateProgress('downloaded');
-      } else if (status.startsWith('update-error:')) {
-        setAppUpdateProgress('error');
-        setTimeout(() => setAppUpdateProgress(null), 5000);
-      }
-    });
-    return () => { if (typeof unsub === 'function') unsub(); };
-  }, []);
+
 
   useEffect(() => {
     checkHealth();
@@ -947,6 +933,7 @@ const DataProvider = memo(({ children }) => {
     backendOnline, sources, extensions, library, history, progress,
     mangaCategories, installing, readingTime, settings, updates, checkingUpdates,
     readChapters, suwayomiReady, setSuwayomiReady,
+    appUpdateProgress, setAppUpdateProgress,
     downloadQueue, setDownloadQueue, overlayHidden, setOverlayHidden, dlCancelRef,
     fetchJSON, checkHealth, fetchSources, fetchExtensions,
     installExt, uninstallExt, updateExt,
@@ -956,7 +943,7 @@ const DataProvider = memo(({ children }) => {
     addCategory, removeCategory, categories,
     getMangaKey, downloadedKeys, refreshDownloads,
     inLibrary: (id, sourceId) => library.some(m => String(m.id) === String(id) && (sourceId ? String(m.sourceId) === String(sourceId) : true))
-  }), [backendOnline, sources, extensions, library, history, progress, mangaCategories, installing, readingTime, settings, updates, checkingUpdates, readChapters, suwayomiReady, setSuwayomiReady, downloadQueue, overlayHidden, fetchJSON, checkHealth, fetchSources, fetchExtensions, installExt, uninstallExt, updateExt, toggleLibrary, setCategory, addToHistory, removeFromHistory, removeMangaCompletely, updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates, handleMigrate, addCategory, removeCategory, categories, downloadedKeys, refreshDownloads]);
+  }), [backendOnline, sources, extensions, library, history, progress, mangaCategories, installing, readingTime, settings, updates, checkingUpdates, readChapters, suwayomiReady, setSuwayomiReady, appUpdateProgress, setAppUpdateProgress, downloadQueue, overlayHidden, fetchJSON, checkHealth, fetchSources, fetchExtensions, installExt, uninstallExt, updateExt, toggleLibrary, setCategory, addToHistory, removeFromHistory, removeMangaCompletely, updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates, handleMigrate, addCategory, removeCategory, categories, downloadedKeys, refreshDownloads]);
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 });
@@ -3878,6 +3865,7 @@ const App = memo(() => {
     checkForUpdates, addReadingTime, updateSetting, handleMigrate,
     queueChaptersForDownload,
     suwayomiReady, setSuwayomiReady,
+    appUpdateProgress, setAppUpdateProgress,
     categories, getMangaKey,
   } = data;
 
@@ -3888,6 +3876,7 @@ const App = memo(() => {
   const [updateAvailable, setUpdateAvailable] = useState(null);
   const [updateDownloaded, setUpdateDownloaded] = useState(false);
   const [updateDownloadPct, setUpdateDownloadPct] = useState(null);
+
 
   const [tab, setTab] = useState('home');
   const [view, setView] = useState('tabs');
@@ -3930,14 +3919,19 @@ const App = memo(() => {
           setUpdateDownloaded(false);
           setUpdateDownloadPct(null);
         } else if (status.startsWith('update-downloading:')) {
-          setUpdateDownloadPct(status.split(':')[1]);
+          const pct = parseInt(status.split(':')[1]);
+          setUpdateDownloadPct(pct);
+          if (!isNaN(pct)) setAppUpdateProgress(pct);
         } else if (status === 'update-downloaded') {
           setUpdateDownloaded(true);
           setUpdateDownloadPct(null);
+          setAppUpdateProgress('downloaded');
         } else if (status === 'update-not-available') {
           setUpdateDownloadPct(null);
         } else if (status.startsWith('update-error:')) {
           setUpdateDownloadPct(null);
+          setAppUpdateProgress('error');
+          setTimeout(() => setAppUpdateProgress(null), 5000);
         }
       });
     }
