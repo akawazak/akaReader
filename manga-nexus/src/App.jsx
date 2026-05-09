@@ -2406,6 +2406,7 @@ const ServiceErrorModal = memo(({ onRestart }) => {
         </p>
         <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
           <Btn variant="outline" onClick={onRestart}>Dismiss</Btn>
+          <Btn variant="outline" onClick={() => window.electronAPI?.openDataDir?.()}>View Logs</Btn>
           {window.electronAPI?.restartServices && (
             <Btn onClick={handleRestart} disabled={restarting}>
               {restarting ? <><Spin size={14} /> Restarting...</> : <><RotateCcw size={15} /> Restart Services</>}
@@ -2668,6 +2669,12 @@ const StartupScreen = memo(({ onProceed, onRetry, managedStartup = false, backen
 
           {hasFailed && (
             <div className="anim-fadeInUp" style={{ display: 'flex', gap: 12, marginTop: 24, justifyContent: 'center' }}>
+              <button
+                onClick={() => window.electronAPI?.openDataDir?.()}
+                style={{ padding: '8px 16px', borderRadius: 8, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#cbd5e1', fontSize: 13, cursor: 'pointer', transition: 'all 0.2s' }}
+              >
+                View Logs
+              </button>
               <button
                 onClick={onProceed}
                 style={{ padding: '8px 16px', borderRadius: 8, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', color: '#cbd5e1', fontSize: 13, cursor: 'pointer', transition: 'all 0.2s' }}

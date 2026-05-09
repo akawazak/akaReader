@@ -152,7 +152,7 @@ function getJreUrl() {
 function extractZip(zipPath, destDir) {
   return new Promise((resolve, reject) => {
     cp.exec(
-      `powershell -NoProfile -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${destDir}' -Force"`,
+      `powershell -NoProfile -Command "Expand-Archive -Path \\"${zipPath}\\" -DestinationPath \\"${destDir}\\" -Force"`,
       { windowsHide: true },
       err => err ? reject(err) : resolve()
     );
@@ -418,6 +418,7 @@ function waitForSuwayomi(timeoutMs = 90000) {
       if (Date.now() - start > timeoutMs) return reject(new Error('Suwayomi timeout'));
       const req = http.request('http://localhost:4567/api/graphql', {
         method: 'POST',
+        timeout: 2000,
         headers: { 'Content-Type': 'application/json' },
       }, res => {
         let body = '';
@@ -429,11 +430,11 @@ function waitForSuwayomi(timeoutMs = 90000) {
               if (parsed?.data?.aboutServer?.version) return resolve(true);
             } catch {}
           }
-          setTimeout(attempt, 1500);
+          setTimeout(attempt, 2000);
         });
       });
-      req.on('error', () => setTimeout(attempt, 1500));
-      req.setTimeout(3000, () => req.destroy());
+      req.on('error', () => setTimeout(attempt, 2000));
+      req.setTimeout(2000, () => req.destroy());
       req.write(JSON.stringify({ query: 'query { aboutServer { version } }' }));
       req.end();
     };
@@ -442,58 +443,76 @@ function waitForSuwayomi(timeoutMs = 90000) {
 }
 
 async function startSuwayomi() {
+  const logFile = path.join(userData, 'suwayomi-startup.log');
+  try { fs.writeFileSync(logFile, `--- Startup ${new Date().toISOString()} ---\n`); } catch {}
+
   try {
-    await Promise.race([
-      waitForSuwayomi(2000),
-      new Promise((_, r) => setTimeout(() => r(new Error('timeout')), 2500))
+    const isRunning = await Promise.race([
+      waitForSuwayomi(3000),
+      new Promise(r => setTimeout(() => r(false), 3500))
     ]);
-    console.log('[suwayomi] Already running');
-    serviceMode = true;
-    return true;
+    if (isRunning) {
+      console.log('[suwayomi] Already running');
+      serviceMode = true;
+      return true;
+    }
   } catch {}
 
-  const java     = findJava();
+  const java = findJava();
   const dataRoot = path.join(userData, 'suwayomi-data');
   let lastError = '';
-  sendStatus('configuring-suwayomi');
-  ensureSuwayomiConfig(dataRoot);
-  sendStatus('starting-suwayomi');
-  console.log('[suwayomi] Launching…');
+  
+  if (!fs.existsSync(jarPath) || fs.statSync(jarPath).size < 1000) {
+    throw new Error('Suwayomi JAR is missing or corrupted. Please try checking for updates.');
+  }
 
-  suwayomiProc = cp.spawn(java, [
+  sendStatus('starting-suwayomi');
+  console.log('[suwayomi] Launching from:', userData);
+
+  const args = [
     `-Dsuwayomi.tachidesk.config.server.rootDir=${dataRoot}`,
-    '-Xmx512m', '-jar', jarPath,
-    '--server.port=4567',
-  ], {
-    cwd: userData, stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true, detached: false,
+    '-Xmx512m', 
+    '-jar', jarPath,
+    '--server.port=4567'
+  ];
+
+  try { fs.appendFileSync(logFile, `Command: "${java}" ${args.join(' ')}\n\n`); } catch {}
+
+  suwayomiProc = cp.spawn(java, args, {
+    cwd: userData,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    detached: false
   });
 
   if (!suwayomiProc || !suwayomiProc.pid) {
-    throw new Error('Failed to spawn Suwayomi process. Check if Java is installed correctly.');
+    throw new Error('Failed to spawn Suwayomi. Check if Java is installed correctly.');
   }
 
-  // FIX: write PID immediately so cleanup works even after forced kill
   fs.writeFileSync(suwayomiPidFile, String(suwayomiProc.pid));
 
   suwayomiProc.stdout.on('data', d => {
-    const l = d.toString().trim();
-    if (l) console.log('[suwayomi]', l.slice(0, 120));
+    const l = d.toString();
+    try { fs.appendFileSync(logFile, l); } catch {}
+    if (l.trim()) console.log('[suwayomi]', l.trim().slice(0, 120));
   });
+
   suwayomiProc.stderr.on('data', d => {
-    const l = d.toString().trim();
-    if (l) {
-      console.error('[suwayomi:err]', l.slice(0, 120));
-      lastError = l.slice(0, 200); // Keep last error for status report
+    const l = d.toString();
+    try { fs.appendFileSync(logFile, '[ERR] ' + l); } catch {}
+    if (l.trim()) {
+      console.error('[suwayomi:err]', l.trim().slice(0, 120));
+      lastError = l.trim().slice(0, 200);
     }
   });
-  suwayomiProc.on('exit', code => {
-    console.log('[suwayomi] exited', code);
+
+  suwayomiProc.on('exit', (code, signal) => {
+    console.log('[suwayomi] exited', code, signal);
     suwayomiProc = null;
     try { fs.unlinkSync(suwayomiPidFile); } catch {}
     if (!isQuitting) {
-      const msg = code !== 0 ? `crashed (code ${code}): ${lastError}` : 'crashed';
-      sendStatus(msg);
+      const msg = code !== 0 ? `Suwayomi crashed (code ${code}). ${lastError}` : 'Suwayomi stopped unexpectedly.';
+      sendStatus('suwayomi-failed:' + msg);
     }
   });
 
@@ -502,9 +521,8 @@ async function startSuwayomi() {
     console.log('[suwayomi] Ready!');
     return true;
   } catch (e) {
-    console.error('[suwayomi] Failed:', e.message);
-    sendStatus('suwayomi-failed:' + e.message);
-    return false;
+    console.error('[suwayomi] Failed to become ready:', e.message);
+    throw new Error(`Suwayomi started but didn't respond in time. ${lastError}`);
   }
 }
 
