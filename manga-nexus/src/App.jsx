@@ -5339,8 +5339,8 @@ const App = memo(() => {
               ) : (
                 <>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    {filteredExts.slice(0, extDisplayCount).map((ext, i) => (
-                      <div key={ext.pkgName} className={`anim-fadeInUp delay-${Math.min(i, 10)}`}>
+                    {filteredExts.slice(0, extDisplayCount).map((ext) => (
+                      <div key={ext.pkgName}>
                         <ExtCard ext={ext} onInstall={installExt} onUninstall={uninstallExt} onUpdate={updateExt} installing={installing} />
                       </div>
                     ))}
