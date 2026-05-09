@@ -1,6 +1,6 @@
 {
   "name": "akareader",
-  "version": "2.0.18",
+  "version": "2.0.19",
   "description": "Manga reader powered by Suwayomi",
   "main": "electron-main.js",
   "author": {
@@ -69,8 +69,9 @@
           "!node_modules/**/*.map"
         ]
       }
-    ],
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "win": {
+      "artifactName": "${productName}-Setup-${version}.${ext}",
       "target": [
         {
           "target": "nsis",
