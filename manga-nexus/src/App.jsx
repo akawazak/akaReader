@@ -42,8 +42,13 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+const DEFAULT_API_BASE =
+  typeof window !== 'undefined' && window.location.protocol === 'file:'
+    ? 'http://localhost:3001/api'
+    : '/api';
+
 const CONFIG = {
-  API: import.meta.env.VITE_API_BASE_URL || '/api',
+  API: import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE,
   SUWAYOMI: import.meta.env.VITE_SUWAYOMI_BASE_URL || 'http://localhost:4567',
   DEBOUNCE_DELAY: 300,
   UPDATE_INTERVAL: 3600000,
@@ -51,7 +56,8 @@ const CONFIG = {
 
 const proxyImg = (url) => {
   if (!url) return null;
-  if (url.startsWith(CONFIG.SUWAYOMI) || url.startsWith('/')) {
+  const isLoopback = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\//i.test(url);
+  if (url.startsWith(CONFIG.SUWAYOMI) || url.startsWith('/') || isLoopback) {
     const absolute = url.startsWith('/') ? `${CONFIG.SUWAYOMI}${url}` : url;
     return `${CONFIG.API}/img?url=${encodeURIComponent(absolute)}`;
   }
@@ -582,9 +588,9 @@ const DataProvider = memo(({ children }) => {
     }
   }, [fetchJSON]);
 
-  const fetchSources = useCallback(async () => {
+  const fetchSources = useCallback(async (force = false) => {
     try {
-      const data = await fetchJSON('/sources');
+      const data = await fetchJSON(`/sources${force ? '?force=1' : ''}`);
       if (!Array.isArray(data)) return;
       const map = {};
       data.forEach(s => {
@@ -601,9 +607,9 @@ const DataProvider = memo(({ children }) => {
     } catch { }
   }, [fetchJSON]);
 
-  const fetchExtensions = useCallback(async () => {
+  const fetchExtensions = useCallback(async (force = false) => {
     try {
-      const data = await fetchJSON('/extensions');
+      const data = await fetchJSON(`/extensions${force ? '?force=1' : ''}`);
       if (!Array.isArray(data)) return [];
       const normalized = data.map(e => ({
         ...e,
@@ -624,8 +630,8 @@ const DataProvider = memo(({ children }) => {
     setInstalling(s => new Set([...s, pkgName]));
     try {
       await fetchJSON(`/extensions/install/${encodeURIComponent(pkgName)}`, { method: 'POST' });
-      const exts = await fetchExtensions();
-      await fetchSources();
+      const exts = await fetchExtensions(true);
+      await fetchSources(true);
       const found = exts.find(e => e.pkgName === pkgName || e.id === pkgName);
       toastRef.current?.(`${found?.name || pkgName} installed`, 'success');
     } catch (e) { toastRef.current?.(`Install failed: ${e.message}`, 'error'); }
@@ -634,14 +640,20 @@ const DataProvider = memo(({ children }) => {
 
   const uninstallExt = useCallback(async (pkgName) => {
     setInstalling(s => new Set([...s, pkgName]));
-    try { await fetchJSON(`/extensions/uninstall/${encodeURIComponent(pkgName)}`, { method: 'POST' }); await fetchExtensions(); await fetchSources(); toastRef.current?.('Extension removed', 'warning'); }
+    try {
+      const result = await fetchJSON(`/extensions/uninstall/${encodeURIComponent(pkgName)}`, { method: 'POST' });
+      await fetchExtensions(true);
+      await fetchSources(true);
+      const removedCount = Array.isArray(result?.removedFiles) ? result.removedFiles.length : 0;
+      toastRef.current?.(removedCount ? `Extension removed (${removedCount} leftover file${removedCount === 1 ? '' : 's'} cleaned)` : 'Extension removed', 'warning');
+    }
     catch (e) { toastRef.current?.(`Uninstall failed: ${e.message}`, 'error'); }
     finally { setInstalling(s => { const n = new Set(s); n.delete(pkgName); return n; }); }
   }, [fetchJSON, fetchExtensions, fetchSources]);
 
   const updateExt = useCallback(async (pkgName) => {
     setInstalling(s => new Set([...s, pkgName]));
-    try { await fetchJSON(`/extensions/update/${encodeURIComponent(pkgName)}`, { method: 'POST' }); await fetchExtensions(); await fetchSources(); toastRef.current?.('Extension updated', 'success'); }
+    try { await fetchJSON(`/extensions/update/${encodeURIComponent(pkgName)}`, { method: 'POST' }); await fetchExtensions(true); await fetchSources(true); toastRef.current?.('Extension updated', 'success'); }
     catch (e) { toastRef.current?.(`Update failed: ${e.message}`, 'error'); }
     finally { setInstalling(s => { const n = new Set(s); n.delete(pkgName); return n; }); }
   }, [fetchJSON, fetchExtensions, fetchSources]);
@@ -1292,9 +1304,17 @@ const SettingsPage = memo(() => {
     setAppUpdateState({ checking: true, message: 'Checking...' });
     const result = await window.electronAPI.checkForAppUpdate();
     if (result?.ok) {
-      const msg = result.version ? `Update ${result.version} found` : 'No update found';
+      const msg = result.downloaded
+        ? `Update ${result.version || 'latest'} is ready to install`
+        : result.downloading
+          ? `Update ${result.version || 'latest'} is downloading`
+          : result.checking
+            ? 'Update check already running'
+            : result.version
+              ? `Update ${result.version} found`
+              : 'No update found';
       setAppUpdateState({ checking: false, message: msg });
-      toast(msg, result.version ? 'success' : 'info');
+      toast(msg, result.version || result.downloaded || result.downloading ? 'success' : 'info');
     } else {
       const msg = result?.error || 'Unable to check for updates';
       setAppUpdateState({ checking: false, message: msg });

@@ -2,7 +2,8 @@ import { CONFIG } from '../constants';
 
 export const proxyImg = (url) => {
   if (!url) return null;
-  if (url.startsWith(CONFIG.SUWAYOMI) || url.startsWith('/')) {
+  const isLoopback = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\//i.test(url);
+  if (url.startsWith(CONFIG.SUWAYOMI) || url.startsWith('/') || isLoopback) {
     const absolute = url.startsWith('/') ? `${CONFIG.SUWAYOMI}${url}` : url;
     return `${CONFIG.API}/img?url=${encodeURIComponent(absolute)}`;
   }

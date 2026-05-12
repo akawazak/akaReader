@@ -1,7 +1,12 @@
 import { BookOpen, Check, Calendar, X, Star } from 'lucide-react';
 
+const DEFAULT_API_BASE =
+  typeof window !== 'undefined' && window.location.protocol === 'file:'
+    ? 'http://localhost:3001/api'
+    : '/api';
+
 export const CONFIG = {
-  API: import.meta.env.VITE_API_BASE_URL || '/api',
+  API: import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE,
   SUWAYOMI: import.meta.env.VITE_SUWAYOMI_BASE_URL || 'http://localhost:4567',
   DEBOUNCE_DELAY: 300,
   UPDATE_INTERVAL: 3600000,

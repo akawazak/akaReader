@@ -23,6 +23,13 @@ let serverProc   = null;
 let suwayomiProc = null;
 let isQuitting   = false;
 let serviceMode  = false;
+let updateState  = {
+  checking: false,
+  downloading: false,
+  downloaded: false,
+  version: null,
+  lastCheckAt: 0,
+};
 
 // ── Single instance ──────────────────────────────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();
@@ -494,7 +501,12 @@ function startServer() {
   console.log('[server] starting');
   serverProc = utilityProcess.fork(serverPath, [], {
     cwd: backendDir,
-    env: { ...process.env, PORT: '3001', EXT_DIR: userExtDir },
+    env: {
+      ...process.env,
+      PORT: '3001',
+      EXT_DIR: userExtDir,
+      SUWAYOMI_EXT_DIR: path.join(userData, 'suwayomi-data', 'extensions'),
+    },
     stdio: 'pipe',
     serviceName: 'akaReader-backend',
   });
@@ -626,25 +638,38 @@ ipcMain.handle('open-external',      (_, url) => shell.openExternal(url));
 ipcMain.handle('check-for-app-update', async () => {
   if (!autoUpdater) return { ok: false, error: 'Updater is not available in this build.' };
   if (isDev) return { ok: false, error: 'Updater only runs in a packaged app.' };
+  if (updateState.downloaded) return { ok: true, downloaded: true, version: updateState.version };
+  if (updateState.checking) return { ok: true, checking: true, version: updateState.version };
+  if (updateState.downloading) return { ok: true, downloading: true, version: updateState.version };
   try {
+    updateState.checking = true;
+    updateState.lastCheckAt = Date.now();
     const result = await autoUpdater.checkForUpdates();
-    return { ok: true, version: result?.updateInfo?.version || null };
+    return { ok: true, version: result?.updateInfo?.version || null, downloaded: updateState.downloaded };
   } catch (e) {
     return { ok: false, error: e?.message || 'Failed to check for updates.' };
+  } finally {
+    updateState.checking = false;
   }
 });
 ipcMain.handle('download-app-update', async () => {
   if (!autoUpdater) return { ok: false, error: 'Updater is not available in this build.' };
   if (isDev) return { ok: false, error: 'Updater only runs in a packaged app.' };
+  if (updateState.downloaded) return { ok: true, downloaded: true, version: updateState.version };
+  if (updateState.downloading) return { ok: true, downloading: true, version: updateState.version };
   try {
+    updateState.downloading = true;
     await autoUpdater.downloadUpdate();
-    return { ok: true };
+    return { ok: true, version: updateState.version };
   } catch (e) {
     return { ok: false, error: e?.message || 'Failed to download update.' };
+  } finally {
+    updateState.downloading = false;
   }
 });
 ipcMain.handle('install-app-update', () => {
-  if (!autoUpdater || isDev) return { ok: false };
+  if (!autoUpdater || isDev) return { ok: false, error: 'Updater is not available in this build.' };
+  if (!updateState.downloaded) return { ok: false, error: 'No downloaded update is ready to install.' };
   isQuitting = true;
   autoUpdater.quitAndInstall();
   return { ok: true };
@@ -767,11 +792,17 @@ app.whenReady().then(async () => {
 
     autoUpdater.on('checking-for-update', () => {
       console.log('[updater] Checking for updates...');
+      updateState.checking = true;
+      updateState.lastCheckAt = Date.now();
       sendStatus('update-checking');
     });
 
     autoUpdater.on('update-available', i => {
       console.log('[updater] Update available:', i.version);
+      updateState.checking = false;
+      updateState.downloading = autoUpdater.autoDownload;
+      updateState.downloaded = false;
+      updateState.version = i.version || null;
       sendStatus('update-available:' + i.version);
       // Native dialog so users see it even if the UI is stuck
       dialog.showMessageBox(mainWindow, {
@@ -785,11 +816,17 @@ app.whenReady().then(async () => {
 
     autoUpdater.on('update-not-available', () => {
       console.log('[updater] No updates available');
+      updateState.checking = false;
+      updateState.downloading = false;
+      updateState.downloaded = false;
+      updateState.version = null;
       sendStatus('update-not-available');
     });
 
     autoUpdater.on('download-progress', p => {
       const pct = Math.round(p.percent || 0);
+      updateState.checking = false;
+      updateState.downloading = true;
       sendStatus('update-downloading:' + pct);
       // Show progress on the Windows taskbar icon
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -799,6 +836,10 @@ app.whenReady().then(async () => {
 
     autoUpdater.on('update-downloaded', (i) => {
       console.log('[updater] Update downloaded:', i?.version);
+      updateState.checking = false;
+      updateState.downloading = false;
+      updateState.downloaded = true;
+      updateState.version = i?.version || updateState.version;
       sendStatus('update-downloaded');
       // Clear taskbar progress
       if (mainWindow && !mainWindow.isDestroyed()) {
@@ -818,6 +859,8 @@ app.whenReady().then(async () => {
 
     autoUpdater.on('error', e => {
       console.error('[updater]', e.message);
+      updateState.checking = false;
+      updateState.downloading = false;
       sendStatus('update-error:' + (e?.message || 'unknown'));
       // Clear taskbar progress on error
       if (mainWindow && !mainWindow.isDestroyed()) {

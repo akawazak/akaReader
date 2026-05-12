@@ -6,6 +6,8 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 
 // Optional middleware - gracefully skip if not installed
 let rateLimit, helmet, compression;
@@ -106,6 +108,18 @@ const gql = async (query, variables = {}, retries = 2) => {
 
 const fixUrl = url => (!url ? null : url.startsWith('http') ? url : `${SUWAYOMI}${url}`);
 
+const isAllowedImageUrl = value => {
+  try {
+    const candidate = new URL(value);
+    const suwayomi = new URL(SUWAYOMI);
+    const isConfiguredSuwayomi = candidate.origin === suwayomi.origin;
+    const isLoopback = ['localhost', '127.0.0.1', '::1'].includes(candidate.hostname);
+    return isConfiguredSuwayomi || isLoopback;
+  } catch {
+    return false;
+  }
+};
+
 const fmtNum = n => {
   if (n == null) return null;
   const f = parseFloat(n);
@@ -119,6 +133,63 @@ const fmtDate = value => {
 };
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+const clearMangaCaches = () => {
+  caches.sources.clear();
+  caches.search.clear();
+  caches.manga.clear();
+  caches.pages.clear();
+};
+
+const getExtensionDir = () => {
+  if (process.env.SUWAYOMI_EXT_DIR) return process.env.SUWAYOMI_EXT_DIR;
+  if (process.env.APPDATA) return path.join(process.env.APPDATA, 'akareader', 'suwayomi-data', 'extensions');
+  return null;
+};
+
+const extensionTokens = pkg => {
+  const normalized = String(pkg || '').toLowerCase();
+  const shortName = normalized
+    .replace(/^eu\.kanade\.tachiyomi\.extension\./, '')
+    .replace(/^tachiyomi\./, '');
+  const parts = shortName.split('.').filter(Boolean);
+  return [
+    shortName,
+    parts.length >= 2 ? `${parts[parts.length - 2]}.${parts[parts.length - 1]}` : '',
+    parts.at(-1) || '',
+  ].filter(Boolean);
+};
+
+const removeExtensionFiles = async pkg => {
+  const dir = getExtensionDir();
+  if (!dir) return [];
+  let entries = [];
+  try {
+    entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const tokens = extensionTokens(pkg);
+  const removed = [];
+  await Promise.all(entries
+    .filter(entry => entry.isFile())
+    .filter(entry => /\.(apk|jar)$/i.test(entry.name))
+    .filter(entry => {
+      const name = entry.name.toLowerCase();
+      return tokens.some(token => token.length >= 3 && name.includes(token));
+    })
+    .map(async entry => {
+      const file = path.join(dir, entry.name);
+      try {
+        await fs.promises.unlink(file);
+        removed.push(entry.name);
+      } catch (e) {
+        console.warn('[extensions] Could not remove file:', file, e.message);
+      }
+    }));
+  return removed;
+};
 
 const syncExtensions = async () => {
   await gql('mutation { fetchExtensions(input: {}) { clientMutationId } }', {}, 0);
@@ -173,7 +244,7 @@ app.get('/api/img', async (req, res) => {
   if (!raw) return res.status(400).end();
   let url;
   try { url = decodeURIComponent(raw); } catch { return res.status(400).end(); }
-  if (!url.startsWith(SUWAYOMI) && !url.startsWith('http://localhost:')) {
+  if (!isAllowedImageUrl(url)) {
     return res.status(403).end();
   }
 
@@ -198,8 +269,12 @@ app.get('/api/img', async (req, res) => {
 // ── Extensions ─────────────────────────────────────────────────────────────
 app.get('/api/extensions', async (_, res) => {
   try {
-    const cached = caches.extensions.get('all');
+    const force = ['1', 'true'].includes(String(_.query.force || '').toLowerCase());
+    const cached = !force && caches.extensions.get('all');
     if (cached) return res.json(cached);
+    if (force) {
+      await syncExtensions().catch(() => {});
+    }
     let result = await queryExtensions();
     if (!result.length) {
       await syncExtensions();
@@ -239,8 +314,10 @@ app.post('/api/extensions/install/:pkgName', async (req, res) => {
   try {
     const pkg = decodeURIComponent(req.params.pkgName);
     await extAction('install', pkg);
-    caches.sources.clear();
     caches.extensions.clear();
+    clearMangaCaches();
+    await sleep(500);
+    syncExtensions().catch(() => {});
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -249,9 +326,12 @@ app.post('/api/extensions/uninstall/:pkgName', async (req, res) => {
   try {
     const pkg = decodeURIComponent(req.params.pkgName);
     await extAction('uninstall', pkg);
-    caches.sources.clear();
+    const removedFiles = await removeExtensionFiles(pkg);
     caches.extensions.clear();
-    res.json({ ok: true });
+    clearMangaCaches();
+    await sleep(500);
+    syncExtensions().catch(() => {});
+    res.json({ ok: true, removedFiles });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -260,14 +340,18 @@ app.post('/api/extensions/update/:pkgName', async (req, res) => {
     const pkg = decodeURIComponent(req.params.pkgName);
     await extAction('update', pkg);
     caches.extensions.clear();
+    clearMangaCaches();
+    await sleep(500);
+    syncExtensions().catch(() => {});
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Sources ────────────────────────────────────────────────────────────────
-app.get('/api/sources', async (_, res) => {
+app.get('/api/sources', async (req, res) => {
   try {
-    const cached = caches.sources.get('all');
+    const force = ['1', 'true'].includes(String(req.query.force || '').toLowerCase());
+    const cached = !force && caches.sources.get('all');
     if (cached) return res.json(cached);
     const data = await gql(`query { sources { nodes { id name lang iconUrl displayName isNsfw } } }`);
     const result = data.sources?.nodes || [];
