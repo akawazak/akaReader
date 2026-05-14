@@ -271,14 +271,17 @@ export const Reader = memo(({
 
   useEffect(() => {
     setLoadedChapters(initialChapter ? [{ chapter: initialChapter, pages: safeInitialPages }] : []);
-    setLocalHasNext(hasNext);
     setNextChapterError('');
     startPageRef.current = Math.max(0, initialPage || 0);
     markedReadRef.current = new Set();
     pendingPersistRef.current = null;
     clearTimeout(persistTimerRef.current);
     initialPositionKeyRef.current = null;
-  }, [initialChapter?.id, safeInitialPages, hasNext]);
+  }, [safeInitialPages, initialPage]);
+
+  useEffect(() => {
+    setLocalHasNext(hasNext);
+  }, [hasNext]);
 
   const allPages = useMemo(() => {
     let indexOffset = 0;
