@@ -3,7 +3,7 @@
  * Fixes: instant window, full process-tree kill, async service check
  */
 const {
-  app, BrowserWindow, Menu, shell, dialog,
+  app, BrowserWindow, Menu, shell,
   Tray, globalShortcut, ipcMain, screen, utilityProcess
 } = require('electron');
 const path  = require('path');
@@ -671,7 +671,7 @@ ipcMain.handle('install-app-update', () => {
   if (!autoUpdater || isDev) return { ok: false, error: 'Updater is not available in this build.' };
   if (!updateState.downloaded) return { ok: false, error: 'No downloaded update is ready to install.' };
   isQuitting = true;
-  autoUpdater.quitAndInstall();
+  autoUpdater.quitAndInstall(true, true);
   return { ok: true };
 });
 
@@ -804,14 +804,6 @@ app.whenReady().then(async () => {
       updateState.downloaded = false;
       updateState.version = i.version || null;
       sendStatus('update-available:' + i.version);
-      // Native dialog so users see it even if the UI is stuck
-      dialog.showMessageBox(mainWindow, {
-        type: 'info',
-        title: 'Update Available',
-        message: `akaReader v${i.version} is available and downloading now.`,
-        detail: 'The update will download in the background. You\'ll be prompted to restart when it\'s ready.',
-        buttons: ['OK'],
-      }).catch(() => {});
     });
 
     autoUpdater.on('update-not-available', () => {
@@ -845,16 +837,6 @@ app.whenReady().then(async () => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.setProgressBar(-1);
       }
-      dialog.showMessageBox(mainWindow, {
-        type: 'info',
-        title: 'Update Ready — akaReader v' + (i?.version || 'new'),
-        message: `akaReader v${i?.version || 'latest'} has been downloaded and is ready to install.`,
-        detail: 'The app will restart to apply the update. Your data and settings are safe.',
-        buttons: ['Restart Now', 'Later'],
-        defaultId: 0,
-      }).then(({ response }) => {
-        if (response === 0) { isQuitting = true; autoUpdater.quitAndInstall(); }
-      });
     });
 
     autoUpdater.on('error', e => {
