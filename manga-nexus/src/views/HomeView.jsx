@@ -35,7 +35,7 @@ const HeroRow = memo(({ title, icon: Icon, items, progress, getMangaKey, onSelec
         <div ref={scrollRef} style={{ display: 'flex', gap: 20, overflowX: 'auto', paddingBottom: 16, scrollbarWidth: 'none', msOverflowStyle: 'none', scrollSnapType: 'x mandatory' }}>
           {items.map((m, i) => (
             <div key={getMangaKey(m.id, m.sourceId)} style={{ width: 180, minWidth: 180, flexShrink: 0, scrollSnapAlign: 'start' }}>
-              <MangaCard manga={m} onClick={onSelect} index={i} eager badge={showTime && m.lastRead ? timeAgo(m.lastRead) : null} category={m.categoryId} progress={(progress[getMangaKey(m.id, m.sourceId)]?.chapterNum / (m.totalChapters || null)) * 100 || 0} />
+              <MangaCard manga={m} onClick={onSelect} index={i} eager badge={showTime && m.lastRead ? timeAgo(m.lastRead) : null} category={m.categoryId} progress={(progress[getMangaKey(m.id, m.sourceId)]?.chapterNum / (m.totalChapters || 100)) * 100 || 0} />
             </div>
           ))}
         </div>

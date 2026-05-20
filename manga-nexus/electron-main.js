@@ -104,16 +104,16 @@ function flushStatusQueue() {
 // ── HTTPS download with progress ──────────────────────────────────────────────
 function download(url, dest, onProgress) {
   return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(dest);
+    let file = null;
     const doGet = (u) => {
       https.get(u, { headers: { 'User-Agent': 'akaReader/3.0' } }, res => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          file.close(); return doGet(res.headers.location);
+          return doGet(res.headers.location);
         }
         if (res.statusCode !== 200) {
-          file.close(); fs.unlink(dest, () => {});
           return reject(new Error('HTTP ' + res.statusCode + ' — ' + u));
         }
+        file = fs.createWriteStream(dest);
         const total = parseInt(res.headers['content-length'] || '0', 10);
         let received = 0;
         res.on('data', chunk => {
@@ -123,7 +123,7 @@ function download(url, dest, onProgress) {
         res.pipe(file);
         file.on('finish', () => file.close(resolve));
         file.on('error', e => { fs.unlink(dest, () => {}); reject(e); });
-      }).on('error', e => { fs.unlink(dest, () => {}); reject(e); });
+      }).on('error', e => { if (file) fs.unlink(dest, () => {}); reject(e); });
     };
     doGet(url);
   });
@@ -266,8 +266,9 @@ async function ensureJre() {
     console.log('[jre] Found bundled JRE, copying...');
     sendStatus('installing-bundled-jre');
     fs.mkdirSync(jreDir, { recursive: true });
-    // Note: Simple copy for directories is complex in Node, so we just use it directly if possible
-    // or tell findJava to use it. Actually, better to just let findJava use it.
+    // Copy the bundled JRE recursively into the target directory
+    fs.cpSync(bundledJre, jreDir, { recursive: true });
+    console.log('[jre] Bundled JRE copied to', jreDir);
     return; 
   }
 
@@ -510,6 +511,14 @@ function startServer() {
     stdio: 'pipe',
     serviceName: 'akaReader-backend',
   });
+  serverProc.stdout.on('data', d => {
+    const l = d.toString().trim();
+    if (l) console.log('[server]', l);
+  });
+  serverProc.stderr.on('data', d => {
+    const l = d.toString().trim();
+    if (l) console.error('[server:err]', l);
+  });
   serverProc.on('spawn', () => console.log('[server] spawned'));
   serverProc.on('exit', code => {
     console.log('[server] exited', code);
@@ -581,8 +590,15 @@ async function ensureManagedServices({ restart = false } = {}) {
       sendStatus('backend-ready');
 
       sendStatus('suwayomi-starting');
-      await ensureJre();
-      await ensureJar();
+      // Wrap JRE/JAR setup in try/catch to avoid unhandled rejections
+      try {
+        await ensureJre();
+        await ensureJar();
+      } catch (e) {
+        console.error('[startup] JRE/JAR setup failed:', e.message);
+        sendStatus('setup-failed:' + e.message);
+        throw e;
+      }
 
       if (await isServiceRunning()) {
         console.log('[startup] Service already running, waiting for it to be ready...');

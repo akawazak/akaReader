@@ -4191,8 +4191,11 @@ const App = memo(() => {
   }, [activeSource, progress, selectedManga, mangaDetail, fetchJSON, updateProgress, toast, getMangaKey]);
 
   const fetchNextChapter = useCallback(async (afterChapterId, signal) => {
+    if (!chapRef.current?.length) return null;
     const idx = chapRef.current.findIndex(c => c.id === afterChapterId);
-    const n = chapRef.current[idx - 1];
+    if (idx === -1) return null;
+    const isDesc = (parseFloat(chapRef.current[0]?.number) || 0) > (parseFloat(chapRef.current.at(-1)?.number) || 0);
+    const n = isDesc ? chapRef.current[idx - 1] : chapRef.current[idx + 1];
     if (!n) return null;
     const srcId = activeSource?.id || mangaDetail?.sourceId || selectedManga?.sourceId;
     if (!srcId) return { error: 'Source not available.' };
@@ -4213,9 +4216,17 @@ const App = memo(() => {
     }
   }, [activeSource, mangaDetail, selectedManga, fetchJSON, getMangaKey]);
 
-  const chIdx = chapRef.current.findIndex(c => c.id === currentChapter?.id);
-  const hasNextCh = chIdx > 0;
-  const hasPrevCh = chIdx >= 0 && chIdx < chapRef.current.length - 1;
+  const { chIdx, isDesc, hasNextCh, hasPrevCh } = useMemo(() => {
+    const list = chapRef.current || [];
+    const idx = list.findIndex(c => c.id === currentChapter?.id);
+    const desc = list.length > 0 && (parseFloat(list[0]?.number) || 0) > (parseFloat(list.at(-1)?.number) || 0);
+    return {
+      chIdx: idx,
+      isDesc: desc,
+      hasNextCh: desc ? idx > 0 : (idx >= 0 && idx < list.length - 1),
+      hasPrevCh: desc ? (idx >= 0 && idx < list.length - 1) : idx > 0
+    };
+  }, [currentChapter?.id, mangaDetail?.chapters]);
 
   const handleReaderPositionChange = useCallback((localPage, pageInfo) => {
     setReaderPage(localPage || 0);
@@ -4258,8 +4269,8 @@ const App = memo(() => {
         }
         chapter = res.chapters.find(c => c.id === chId) || chapter;
       }
-    } catch {
-      openManga(m);
+    } catch (e) {
+      setMangaError(e.message || 'Failed to fetch manga details');
     }
 
     openChapter(chapter, m.sourceId, m.id, page);
@@ -4572,19 +4583,39 @@ const App = memo(() => {
     const readerMangaId = mangaDetail?.id || selectedManga?.id;
     const readerSourceId = mangaDetail?.sourceId || selectedManga?.sourceId || activeSource?.id;
     const mKeyForReader = getMangaKey(readerMangaId, readerSourceId);
+
+    // DEBUG:
+    if (view === 'reader') toast(`Ch Index: ${chIdx}, Desc: ${isDesc}, Total: ${chapRef.current?.length || 0}`, 'info');
+
     return (
       <NewReader
         pages={pages} currentChapter={currentChapter} mangaTitle={mangaDetail?.title}
         onBack={goBack}
-        onNextChapter={() => { const n = chapRef.current[chIdx - 1]; if (n) openChapter(n, readerSourceId, readerMangaId); }}
-        onPrevChapter={() => { const p = chapRef.current[chIdx + 1]; if (p) openChapter(p, readerSourceId, readerMangaId); }}
+        onNextChapter={() => {
+          const n = isDesc ? chapRef.current[chIdx - 1] : chapRef.current[chIdx + 1];
+          if (n) {
+            toast(`Navigating to Ch. ${n.number}...`, 'info');
+            openChapter(n, readerSourceId, readerMangaId);
+          } else {
+            toast('No next chapter found in list', 'warning');
+          }
+        }}
+        onPrevChapter={() => {
+          const p = isDesc ? chapRef.current[chIdx + 1] : chapRef.current[chIdx - 1];
+          if (p) {
+            toast(`Navigating back to Ch. ${p.number}...`, 'info');
+            openChapter(p, readerSourceId, readerMangaId);
+          } else {
+            toast('No previous chapter found in list', 'warning');
+          }
+        }}
         fetchNextChapter={fetchNextChapter}
         hasNext={hasNextCh} hasPrev={hasPrevCh}
         onPageChange={handleReaderPositionChange}
         initialPage={progress[mKeyForReader]?.page || 0}
         mangaId={readerMangaId}
         mangaSourceId={readerSourceId}
-        mangaCover={mangaDetail?.cover || selectedManga?.cover}
+        mangaCover={mangaDetail?.cover || selectedManga?.cover} isLoading={pagesLoading}
       />
     );
   }

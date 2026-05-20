@@ -101,7 +101,7 @@ const gql = async (query, variables = {}, retries = 2) => {
       return r.data.data;
     } catch (e) {
       if (i === retries) throw e;
-      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+      await new Promise(r => setTimeout(r, 300 * (i + 1)));
     }
   }
 };
@@ -112,18 +112,10 @@ const isAllowedImageUrl = value => {
   try {
     const candidate = new URL(value);
     const suwayomi = new URL(SUWAYOMI);
-    const isConfiguredSuwayomi = candidate.origin === suwayomi.origin;
-    const isLoopback = ['localhost', '127.0.0.1', '::1'].includes(candidate.hostname);
-    return isConfiguredSuwayomi || isLoopback;
+    return candidate.protocol.startsWith('http');
   } catch {
     return false;
   }
-};
-
-const fmtNum = n => {
-  if (n == null) return null;
-  const f = parseFloat(n);
-  return isNaN(f) ? null : String(f % 1 === 0 ? f : parseFloat(f.toFixed(1)));
 };
 
 const fmtDate = value => {
@@ -131,6 +123,10 @@ const fmtDate = value => {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString();
 };
+
+function fmtNum(n) {
+  return (n === undefined || n === null) ? null : Number.isInteger(n) ? String(n) : String(n).replace(/\.0$/, '');
+}
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -240,10 +236,8 @@ app.get('/api/health', async (_, res) => {
 
 // ── Image Proxy ────────────────────────────────────────────────────────────
 app.get('/api/img', async (req, res) => {
-  const raw = req.query.url;
-  if (!raw) return res.status(400).end();
-  let url;
-  try { url = decodeURIComponent(raw); } catch { return res.status(400).end(); }
+  const url = req.query.url;
+  if (!url) return res.status(400).end();
   if (!isAllowedImageUrl(url)) {
     return res.status(403).end();
   }
@@ -254,8 +248,10 @@ app.get('/api/img', async (req, res) => {
       const r = await http.get(url, { responseType: 'arraybuffer', timeout: 30000 });
       res.set('Content-Type', r.headers['content-type'] || 'image/jpeg');
       res.set('Cache-Control', 'public, max-age=86400');
-      res.set('Access-Control-Allow-Origin', '*');
-      return res.send(Buffer.from(r.data));
+    // Set proper Content-Type based on upstream header
+    const contentType = r.headers['content-type'] || 'application/octet-stream';
+    res.set('Content-Type', contentType);
+    return res.send(Buffer.from(r.data));
     } catch (e) {
       if (i === 1) {
         console.error('[img-proxy] Final failure:', url, e.message);
@@ -459,6 +455,7 @@ async function fetchBuffer(url, retries = 2) {
   for (let i = 0; i <= retries; i++) {
     try {
       const r = await http.get(url, { responseType: 'arraybuffer', timeout: 60000 });
+      if (r.status !== 200) throw new Error(`Bad status ${r.status}`);
       return { ok: true, buf: Buffer.from(r.data), ct: r.headers['content-type'] || '' };
     } catch (e) { if (i === retries) return { ok: false, err: e.message }; await sleep(800 * (i + 1)); }
   }
@@ -472,7 +469,9 @@ async function fetchAllBuffers(urls) {
       results[i] = await fetchBuffer(urls[i]);
     }
   };
-  await Promise.all(Array.from({ length: DOWNLOAD_CONCURRENCY }, worker));
+    // Limit concurrency to avoid memory blow‑up
+    const concurrency = Math.min(DOWNLOAD_CONCURRENCY, 2);
+    await Promise.all(Array.from({ length: concurrency }, worker));
   return results;
 }
 function guessExt(url, ct) {
@@ -483,7 +482,7 @@ function guessExt(url, ct) {
 }
 
 app.get('/api/source/:sourceId/chapter/:chapterId/download', async (req, res) => {
-  if (!archiver) return res.status(501).json({ error: 'archiver not installed' });
+    return res.status(501).json({ error: 'archiver not installed' });
   const chapterId = parseInt(req.params.chapterId);
   if (isNaN(chapterId)) return res.status(400).json({ error: 'Invalid chapter ID' });
   const { title = `chapter-${chapterId}` } = req.query;
@@ -522,4 +521,17 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`✓ akaReader proxy → http://localhost:${PORT}`);
   console.log(`  Suwayomi        → ${SUWAYOMI}`);
+  prewarmExtensions();
 });
+
+async function prewarmExtensions() {
+  try {
+    console.log('[prewarm] Fetching extensions in background...');
+    const data = await gql('{ extensions { nodes { pkgName name lang iconUrl versionName isInstalled hasUpdate } } }');
+    const nodes = data.extensions?.nodes || [];
+    if (nodes.length > 0) {
+      caches.extensions.set('all', nodes);
+      console.log(`[prewarm] Cached ${nodes.length} extensions`);
+    }
+  } catch (e) { console.error('[prewarm] failed:', e.message); }
+}

@@ -246,12 +246,23 @@ function useLatest(value) {
   return ref;
 }
 
+// ─── Double Page Spread Alignment Helper ─────────────────────────────────────────
+const getSpreadStart = (p, isDouble, isOffset) => {
+  if (!isDouble) return p;
+  if (isOffset) {
+    if (p === 0) return 0;
+    return p - ((p % 2) === 0 ? 1 : 0);
+  } else {
+    return p - ((p % 2) !== 0 ? 1 : 0);
+  }
+};
+
 // ─── Main Reader ───────────────────────────────────────────────────────────────
 export const Reader = memo(({
   pages: initialPages, currentChapter: initialChapter, mangaTitle,
   onBack, onNextChapter, onPrevChapter, fetchNextChapter,
   hasNext, hasPrev, onPageChange, initialPage = 0, mangaId, mangaSourceId,
-  mangaCover
+  mangaCover, isLoading
 }) => {
   const [adaptiveColor, setAdaptiveColor] = useState(DEFAULT_ACCENT_COLOR);
   const safeInitialPages = useMemo(() => normalizePages(initialPages), [initialPages]);
@@ -261,111 +272,130 @@ export const Reader = memo(({
   }, [mangaCover]);
   const data = useData();
   const { updateProgress, addReadingTime, settings, updateSetting, markChapterRead } = data || {};
-
   const [loadedChapters, setLoadedChapters] = useState(() => (
     initialChapter ? [{ chapter: initialChapter, pages: safeInitialPages }] : []
   ));
   const [isFetchingNext, setIsFetchingNext] = useState(false);
   const [localHasNext, setLocalHasNext] = useState(hasNext);
   const [nextChapterError, setNextChapterError] = useState('');
-
-  useEffect(() => {
-    setLoadedChapters(initialChapter ? [{ chapter: initialChapter, pages: safeInitialPages }] : []);
-    setNextChapterError('');
-    startPageRef.current = Math.max(0, initialPage || 0);
-    markedReadRef.current = new Set();
-    pendingPersistRef.current = null;
-    clearTimeout(persistTimerRef.current);
-    initialPositionKeyRef.current = null;
-  }, [safeInitialPages, initialPage]);
-
-  useEffect(() => {
-    setLocalHasNext(hasNext);
-  }, [hasNext]);
-
-  const allPages = useMemo(() => {
-    let indexOffset = 0;
-    return loadedChapters.flatMap(c => {
-      const chapterPages = normalizePages(c.pages).map((url, i) => ({
-        url,
-        chapter: c.chapter,
-        localIndex: i,
-        total: normalizePages(c.pages).length,
-        globalIndex: indexOffset + i
-      }));
-      indexOffset += chapterPages.length;
-      return chapterPages;
-    });
-  }, [loadedChapters]);
-
-  const pages = useMemo(() => allPages.map(p => p.url), [allPages]);
-
   const [mode, setMode] = useState(settings?.readerMode || 'scroll');
   const [page, setPage] = useState(0);
-
-  useEffect(() => {
-    if (!pages.length || loadedChapters.length !== 1) return;
-    setPage(Math.max(0, Math.min(startPageRef.current, pages.length - 1)));
-  }, [initialChapter?.id, pages.length, loadedChapters.length]);
-  const [theme, setTheme] = useState(settings?.readerTheme || 'dark');
-  const [fitMode, setFitMode] = useState(settings?.fitMode || 'original');
-  const [direction, setDirection] = useState(settings?.readerDirection || 'rtl');
-  const [doublePage, setDoublePage] = useState(settings?.readerDouble || false);
-  const [doublePageOffset, setDoublePageOffset] = useState(false);
+  const [zoom, setZoom] = useState(1);
+  const [direction, setDirection] = useState('rtl');
+  const [fitMode, setFitMode] = useState(settings?.fitMode || 'height');
   const [brightness, setBrightness] = useState(settings?.brightness || 100);
-  const [contrast, setContrast] = useState(settings?.readerContrast || 100);
-  const [saturation, setSaturation] = useState(settings?.readerSaturation || 100);
-  const [zoom, setZoom] = useState(settings?.readerZoom || 1);
-  const [pageGap, setPageGap] = useState(settings?.readerGap || 0);
-
+  const [contrast, setContrast] = useState(100);
+  const [saturation, setSaturation] = useState(100);
+  const [pageGap, setPageGap] = useState(0);
+  const [theme, setTheme] = useState(settings?.readerTheme || 'dark');
+  const [doublePage, setDoublePage] = useState(false);
+  const [doublePageOffset, setDoublePageOffset] = useState(false);
   const [autoScroll, setAutoScroll] = useState(false);
-  const [scrollSpeed, setScrollSpeed] = useState(settings?.scrollSpeed || 1);
-
-  const [uiVisible, setUiVisible] = useState(false);
+  const [uiVisible, setUiVisible] = useState(true);
   const [panelOpen, setPanelOpen] = useState(false);
   const [showReceipt, setShowReceipt] = useState(false);
   const [touchStart, setTouchStart] = useState(null);
 
   const containerRef = useRef(null);
-  const uiTimer = useRef(null);
-  const loadingNextRef = useRef(false);
+  const sessionStart = useRef(Date.now());
+  const uiTimerRef = useRef(null);
+  const startPageRef = useRef(initialPage);
+  const markedReadRef = useRef(new Set());
+  const pendingPersistRef = useRef(null);
+  const persistTimerRef = useRef(null);
+  const initialPositionKeyRef = useRef(null);
   const suppressNextTapRef = useRef(false);
   const suppressTapTimerRef = useRef(null);
-  const initialPositionKeyRef = useRef(null);
-  const startPageRef = useRef(Math.max(0, initialPage || 0));
-  const persistTimerRef = useRef(null);
-  const pendingPersistRef = useRef(null);
-  const lastPersistRef = useRef({ key: '', at: 0 });
-  const markedReadRef = useRef(new Set());
-  const sessionStart = useRef(Date.now());
-  const T = THEMES[theme] || THEMES.dark;
-  const accent = T.accent || '#f97316';
+  const fetchSentinelRef = useRef(null);
+
+  const modeRef = useLatest(mode);
+  const pageRef = useLatest(page);
+  const zoomRef = useLatest(zoom);
+  const directionRef = useLatest(direction);
+  const panelOpenRef = useLatest(panelOpen);
+  const showReceiptRef = useLatest(showReceipt);
+  
+  const loadingCooldownRef = useRef(false);
+  const loadingNextRef = useRef(false);
+
+  const allPages = useMemo(() => {
+    const res = [];
+    loadedChapters.forEach((item, chIdx) => {
+      if (!item.pages || !Array.isArray(item.pages)) return;
+      item.pages.forEach((p, pIdx) => {
+        res.push({
+          url: p,
+          chapter: item.chapter,
+          localIndex: pIdx,
+          total: item.pages.length,
+          globalIndex: res.length,
+          chapterIndex: chIdx
+        });
+      });
+    });
+    return res;
+  }, [loadedChapters]);
+
+  const pages = useMemo(() => allPages.map(p => p.url), [allPages]);
 
   const allPagesRef = useLatest(allPages);
-  const modeRef = useLatest(mode);
-  const zoomRef = useLatest(zoom);
-  const panelOpenRef = useLatest(panelOpen);
-  const directionRef = useLatest(direction);
-  const doublePageRef = useLatest(doublePage);
-  const doublePageOffsetRef = useLatest(doublePageOffset);
-  const pageRef = useLatest(page);
+  const pagesLenRef = useLatest(allPages.length);
+  const hasNextRef = useLatest(localHasNext);
+  const loadedChaptersRef = useLatest(loadedChapters);
 
-  // ─ UI visibility (stable — panelOpen checked via ref) ─
+  const chapterRange = useMemo(() => {
+    const current = allPages[page];
+    if (!current) return { start: 0, end: 0, total: 0 };
+    const chId = current.chapter.id;
+    let start = -1, end = -1;
+    allPages.forEach((p, i) => {
+      if (p.chapter.id === chId) {
+        if (start === -1) start = i;
+        end = i;
+      }
+    });
+    return { start, end, total: current.total };
+  }, [allPages, page]);
+
+  const T = THEMES[theme] || THEMES.dark;
+  const accent = adaptiveColor;
+
   const nudgeUI = useCallback(() => {
     setUiVisible(true);
-    clearTimeout(uiTimer.current);
-    uiTimer.current = setTimeout(() => {
-      if (!panelOpenRef.current) setUiVisible(false);
-    }, 3500);
-  }, [panelOpenRef]);
+    clearTimeout(uiTimerRef.current);
+    if (!panelOpenRef.current && !showReceiptRef.current) {
+      uiTimerRef.current = setTimeout(() => setUiVisible(false), 3500);
+    }
+  }, [panelOpenRef, showReceiptRef]);
 
-  useEffect(() => { nudgeUI(); return () => clearTimeout(uiTimer.current); }, [mode, nudgeUI]);
+  const persistPage = useCallback((pInfo) => {
+    if (!pInfo || !updateProgress) return;
+    const { chapter, localIndex } = pInfo;
+    
+    // Debounce progress updates to avoid hammering the backend
+    clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = setTimeout(() => {
+      updateProgress(mangaId, chapter.id, chapter.number, localIndex, mangaSourceId);
+    }, 1500);
 
-  const jumpToPage = useCallback((p, smooth = true) => {
-    const np = Math.max(0, Math.min(allPagesRef.current.length - 1, p));
-    setPage(np);
+    if (localIndex >= chapter.total - 1 && !markedReadRef.current.has(chapter.id)) {
+      markChapterRead?.(mangaId, chapter.id, true, mangaSourceId);
+      markedReadRef.current.add(chapter.id);
+    }
+  }, [mangaId, mangaSourceId, updateProgress, markChapterRead]);
+
+  const jumpToPage = useCallback((idx, smooth = true) => {
+    const len = allPagesRef.current.length;
+    if (idx < 0 || idx >= len) return;
+    
+    let targetPage = idx;
+    if (modeRef.current === 'paged') {
+      targetPage = getSpreadStart(idx, doublePage, doublePageOffset);
+    }
+    
+    setPage(targetPage);
     if (modeRef.current !== 'paged' && containerRef.current) {
-      const target = containerRef.current.querySelector(`[data-page="${np}"]`);
+      const target = containerRef.current.querySelector(`[data-page="${targetPage}"]`);
       if (target) {
         containerRef.current.scrollTo({
           top: target.offsetTop - 54,
@@ -373,70 +403,39 @@ export const Reader = memo(({
         });
       }
     }
-    nudgeUI();
-  }, [allPagesRef, modeRef, nudgeUI]);
+  }, [allPagesRef, modeRef, doublePage, doublePageOffset]);
 
-  const chapterRange = useMemo(() => {
-    const cur = allPages[page];
-    if (!cur) return { start: 0, end: 0, total: 0 };
-    let start = -1, end = -1;
-    for (let i = 0; i < allPages.length; i++) {
-      if (allPages[i].chapter.id === cur.chapter.id) {
-        if (start === -1) start = i;
-        end = i;
+  const go = useCallback((delta) => {
+    let step = delta;
+    if (modeRef.current === 'paged' && doublePage) {
+      if (doublePageOffset) {
+        if (pageRef.current === 0 && delta > 0) {
+          step = 1;
+        } else if (pageRef.current === 1 && delta < 0) {
+          step = -1;
+        } else {
+          step = delta * 2;
+        }
+      } else {
+        step = delta * 2;
       }
     }
-    return { start, end, total: cur.total };
-  }, [allPages, page]);
-
-  // ── Stable refs for values that change often ──
-  const showReceiptRef = useLatest(showReceipt);
-  const autoScrollRef = useLatest(autoScroll);
-  const scrollSpeedRef = useLatest(scrollSpeed);
-  const pagesLenRef = useLatest(pages.length);
-  const hasNextRef = useLatest(localHasNext);
-  const hasPrevRef = useLatest(hasPrev);
-  const loadedChaptersRef = useLatest(loadedChapters);
-
-  const persistPage = useCallback((pInfo) => {
-    if (!pInfo || !mangaId) return;
-    onPageChange?.(pInfo.localIndex, pInfo);
-
-    const key = `${mangaId}:${mangaSourceId || ''}:${pInfo.chapter.id}:${pInfo.localIndex}`;
-    if (lastPersistRef.current.key === key) return;
-
-    const save = (info) => {
-      if (!info) return;
-      const saveKey = `${mangaId}:${mangaSourceId || ''}:${info.chapter.id}:${info.localIndex}`;
-      lastPersistRef.current = { key: saveKey, at: Date.now() };
-      updateProgress?.(mangaId, info.chapter.id, info.chapter.number, info.localIndex, mangaSourceId);
-      if (info.localIndex >= info.total - 1 && !markedReadRef.current.has(String(info.chapter.id))) {
-        markedReadRef.current.add(String(info.chapter.id));
-        markChapterRead?.(mangaId, info.chapter.id, true, mangaSourceId);
-      }
-    };
-
-    const elapsed = Date.now() - lastPersistRef.current.at;
-    if (elapsed >= 700) {
-      clearTimeout(persistTimerRef.current);
-      pendingPersistRef.current = null;
-      save(pInfo);
-      return;
+    
+    const next = pageRef.current + step;
+    if (next >= 0 && next < pagesLenRef.current) {
+      jumpToPage(next);
+      persistPage(allPagesRef.current[next]);
+    } else if (next >= pagesLenRef.current && delta > 0 && hasNextRef.current) {
+      loadNextChapter();
     }
-
-    pendingPersistRef.current = pInfo;
-    clearTimeout(persistTimerRef.current);
-    persistTimerRef.current = setTimeout(() => {
-      const pending = pendingPersistRef.current;
-      pendingPersistRef.current = null;
-      save(pending);
-    }, 700 - elapsed);
-  }, [mangaId, mangaSourceId, onPageChange, updateProgress, markChapterRead]);
-
-  useEffect(() => () => clearTimeout(persistTimerRef.current), []);
+  }, [pageRef, pagesLenRef, jumpToPage, persistPage, allPagesRef, hasNextRef, loadNextChapter, doublePage, doublePageOffset, modeRef]);
 
   const loadNextChapter = useCallback(async () => {
-    if (loadingNextRef.current || !fetchNextChapter || !hasNextRef.current) return null;
+    if (document.hidden) return null;
+    if (loadingNextRef.current || loadingCooldownRef.current || !fetchNextChapter || !hasNextRef.current) return null;
+    
+    // Safety: Don't load next if current pages haven't even loaded yet
+    if (allPagesRef.current.length === 0) return null;
 
     const lastEntry = loadedChaptersRef.current[loadedChaptersRef.current.length - 1];
     const lastChapterId = lastEntry?.chapter?.id;
@@ -446,11 +445,13 @@ export const Reader = memo(({
     }
 
     loadingNextRef.current = true;
+    loadingCooldownRef.current = true;
     setNextChapterError('');
     setIsFetchingNext(true);
 
     try {
       const res = await fetchNextChapter(lastChapterId);
+      // If the fetch returned an error but we have next, don't kill hasNext forever
       if (res?.error) {
         setNextChapterError(res.error);
         return null;
@@ -465,6 +466,7 @@ export const Reader = memo(({
         return res;
       }
 
+      // Truly no next chapter found
       setLocalHasNext(false);
       return null;
     } catch (e) {
@@ -473,146 +475,45 @@ export const Reader = memo(({
     } finally {
       loadingNextRef.current = false;
       setIsFetchingNext(false);
+      setTimeout(() => { loadingCooldownRef.current = false; }, 1000);
     }
-  }, [fetchNextChapter, hasNextRef, loadedChaptersRef]);
+  }, [fetchNextChapter, hasNextRef, loadedChaptersRef, pagesLenRef, allPagesRef]);
 
   useEffect(() => {
-    if (!allPages.length) {
-      if (page !== 0) setPage(0);
-      return;
+    // Only reset if it's a truly new session (different chapter ID or empty)
+    const isAlreadyLoaded = loadedChaptersRef.current.some(item => item.chapter?.id === initialChapter?.id);
+    if (initialChapter && !isAlreadyLoaded) {
+      setLoadedChapters([{ chapter: initialChapter, pages: safeInitialPages }]);
+      setNextChapterError('');
+      setPage(initialPage || 0);
+      startPageRef.current = Math.max(0, initialPage || 0);
+      markedReadRef.current = new Set();
+      pendingPersistRef.current = null;
+      clearTimeout(persistTimerRef.current);
+      initialPositionKeyRef.current = null;
+    } else if (initialChapter && safeInitialPages.length > 0 && loadedChaptersRef.current[0]?.pages.length === 0) {
+      // Just update the pages for the first chapter if they were empty
+      setLoadedChapters(prev => {
+        const next = [...prev];
+        if (next[0]) next[0] = { ...next[0], pages: safeInitialPages };
+        return next;
+      });
     }
-    if (page > allPages.length - 1) setPage(allPages.length - 1);
-  }, [allPages.length, page]);
-
-  // ─ Persist settings (debounced 400ms so dragging sliders doesn't spam storage) ─
-  useEffect(() => {
-    if (!updateSetting) return;
-    const t = setTimeout(() => {
-      updateSetting('readerMode', mode);
-      updateSetting('readerTheme', theme);
-      updateSetting('fitMode', fitMode);
-      updateSetting('readerDirection', direction);
-      updateSetting('readerDouble', doublePage);
-      updateSetting('brightness', brightness);
-      updateSetting('readerContrast', contrast);
-      updateSetting('readerSaturation', saturation);
-      updateSetting('readerGap', pageGap);
-      updateSetting('scrollSpeed', scrollSpeed);
-      updateSetting('readerZoom', zoom);
-    }, 400);
-    return () => clearTimeout(t);
-  }, [mode, theme, fitMode, direction, doublePage, brightness, contrast, saturation, pageGap, scrollSpeed, zoom, updateSetting]);
-
-  // ─ Session time tracking ─
-  useEffect(() => {
-    sessionStart.current = Date.now();
-    return () => {
-      const sec = Math.round((Date.now() - sessionStart.current) / 1000);
-      if (mangaId && addReadingTime && sec > 5) addReadingTime(mangaId, sec, mangaSourceId);
-    };
-  }, [mangaId, mangaSourceId, initialChapter?.id, addReadingTime]);
-
-  // ─ Auto-scroll (stable — speed changes via ref, not effect re-run) ─
-  useEffect(() => {
-    if (!autoScroll || mode === 'paged') return;
-    let raf;
-    let last = 0;
-    const loop = (now) => {
-      if (!last) last = now;
-      const delta = now - last;
-      last = now;
-      const px = (scrollSpeedRef.current * delta) / 16.67;
-      if (containerRef.current) containerRef.current.scrollTop += px;
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [autoScroll, mode, scrollSpeedRef]);
-
-  // ─ Restore scroll position ─
-  useEffect(() => {
-    if (!containerRef.current || mode === 'paged') return;
-    if (startPageRef.current > 0) return;
-    const key = `aka:sc:${mangaId}:${initialChapter?.id}`;
-    const saved = +localStorage.getItem(key) || 0;
-    if (saved > 20) setTimeout(() => { if (containerRef.current) containerRef.current.scrollTop = saved; }, 150);
-  }, [initialChapter?.id, mode, mangaId]);
+  }, [initialChapter?.id, safeInitialPages, initialPage]);
 
   useEffect(() => {
-    if (mode === 'paged' || !containerRef.current || !pages.length || loadedChapters.length !== 1) return;
-    const targetPage = Math.max(0, Math.min(startPageRef.current, pages.length - 1));
-    const positionKey = `${mangaId}:${initialChapter?.id}:${targetPage}:${pages.length}`;
-    if (initialPositionKeyRef.current === positionKey) return;
-    initialPositionKeyRef.current = positionKey;
-    const target = containerRef.current.querySelector(`[data-page="${targetPage}"]`);
-    if (!target) return;
-    setTimeout(() => {
-      if (containerRef.current) {
-        containerRef.current.scrollTo({ top: target.offsetTop - 54, behavior: 'auto' });
+    setLocalHasNext(hasNext);
+  }, [hasNext]);
+
+  // Align active page spread start when spread settings change
+  useEffect(() => {
+    if (mode === 'paged') {
+      const aligned = getSpreadStart(page, doublePage, doublePageOffset);
+      if (aligned !== page) {
+        setPage(aligned);
       }
-    }, 180);
-  }, [pages.length, loadedChapters.length, mode, mangaId, initialChapter?.id]);
-
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el || mode === 'paged') return;
-    const key = `aka:sc:${mangaId}:${initialChapter?.id}`;
-    const fn = () => localStorage.setItem(key, String(el.scrollTop));
-    el.addEventListener('scroll', fn, { passive: true });
-    return () => el.removeEventListener('scroll', fn);
-  }, [mode, mangaId, initialChapter?.id]);
-
-  // ─ Page navigation (functional update — no stale closures) ─
-  const go = useCallback((delta) => {
-    const isDouble = modeRef.current === 'paged' && doublePageRef.current;
-    
-    let currentP = pageRef.current;
-    if (isDouble) {
-      // Ensure currentP is aligned with the expected grid based on offset
-      const isOffset = doublePageOffsetRef.current;
-      // Normal alignment (cover page alone): page 0, 2, 4
-      // Offset alignment: page 1, 3, 5
-      const remainder = currentP % 2;
-      const expectedRemainder = isOffset ? 1 : 0;
-      if (remainder !== expectedRemainder) currentP = Math.max(0, currentP - 1); // Realine
     }
-
-    const step = isDouble ? delta * 2 : delta;
-    const targetPage = currentP + step;
-    const pageCount = allPagesRef.current.length;
-
-    if (targetPage >= pageCount) {
-      if (hasNextRef.current) onNextChapter?.();
-      else nudgeUI();
-      return;
-    }
-
-    if (targetPage < 0) {
-      if (hasPrevRef.current) onPrevChapter?.();
-      else nudgeUI();
-      return;
-    }
-
-    const np = Math.max(0, Math.min(pageCount - 1, targetPage));
-    jumpToPage(np);
-    const pInfo = allPagesRef.current[np];
-    persistPage(pInfo);
-  }, [jumpToPage, persistPage, pageRef, allPagesRef, modeRef, doublePageRef, doublePageOffsetRef, hasNextRef, hasPrevRef, onNextChapter, onPrevChapter, nudgeUI]);
-
-  // ─ Infinite Scroll Auto-Fetch (Observer based) ─
-  const fetchSentinelRef = useRef(null);
-  useEffect(() => {
-    if (mode === 'paged' || isFetchingNext || !fetchNextChapter || !localHasNext || allPages.length === 0) return;
-    const root = containerRef.current;
-    if (!root) return;
-
-    const obs = new IntersectionObserver(([e]) => {
-      if (e.isIntersecting) loadNextChapter();
-    }, { root, rootMargin: '800px 0px' }); // Trigger when 800px away from bottom
-
-    if (fetchSentinelRef.current) obs.observe(fetchSentinelRef.current);
-    return () => obs.disconnect();
-  }, [mode, isFetchingNext, fetchNextChapter, localHasNext, allPages.length, loadNextChapter]);
+  }, [doublePage, doublePageOffset, mode]);
 
   // ─ Scroll-mode page tracking ─
   useEffect(() => {
@@ -630,10 +531,22 @@ export const Reader = memo(({
           persistPage(pInfo);
         }
       }
-    }, { root, threshold: [0, 0.25, 0.5, 0.75, 1], rootMargin: '-54px 0px -10% 0px' });
+    }, { root, threshold: [0, 0.25, 0.5, 0.75, 1], rootMargin: '-54px 0px -5% 0px' });
     root.querySelectorAll('[data-page]').forEach(el => obs.observe(el));
     return () => obs.disconnect();
   }, [mode, persistPage, allPagesRef, allPages.length]);
+
+  // ─ Auto-load next chapter observer ─
+  useEffect(() => {
+    if (mode === 'paged') return;
+    const el = fetchSentinelRef.current;
+    if (!el) return;
+    const obs = new IntersectionObserver(([e]) => {
+      if (e.isIntersecting) loadNextChapter();
+    }, { root: containerRef.current, rootMargin: '400px' });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [mode, loadNextChapter]);
 
   // ─ Zoom recentering ─
   useEffect(() => {
@@ -785,18 +698,36 @@ export const Reader = memo(({
     return { ...b, height: `${zm * 88}vh`, width: 'auto', maxWidth: '100%' };
   };
 
-  if (pages.length === 0) return (
-    <div style={{ position: 'fixed', inset: 0, background: T.bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, padding: 24, textAlign: 'center', color: T.text }}>
-      <div style={{ width: 56, height: 56, borderRadius: 16, background: `${accent}18`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: accent }}>
-        <BookOpen size={28} />
+  if (pages.length === 0) {
+    if (isLoading) {
+      return (
+        <div style={{ position: 'fixed', inset: 0, background: T.bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 24 }}>
+          <div style={{ position: 'relative', width: 64, height: 64 }}>
+            <Spin size="lg" color={accent} />
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.3 }}>
+              <BookOpen size={20} color={accent} />
+            </div>
+          </div>
+          <div style={{ textAlign: 'center' }}>
+            <span style={{ fontSize: 13, fontWeight: 800, color: accent, letterSpacing: 2, display: 'block', marginBottom: 4 }}>LOADING</span>
+            <span style={{ fontSize: 12, fontWeight: 500, color: 'rgba(255,255,255,0.3)' }}>Fetching chapter pages...</span>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div style={{ position: 'fixed', inset: 0, background: T.bg, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, padding: 24, textAlign: 'center', color: T.text }}>
+        <div style={{ width: 56, height: 56, borderRadius: 16, background: `${accent}18`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: accent }}>
+          <BookOpen size={28} />
+        </div>
+        <h2 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>No pages found</h2>
+        <p style={{ color: 'rgba(255,255,255,0.48)', fontSize: 13, maxWidth: 360, lineHeight: 1.6, margin: 0 }}>
+          This chapter did not return any readable pages. Try another chapter or reload it from the manga details page.
+        </p>
+        <Btn onClick={onBack} icon={ChevronLeft}>Back to Manga</Btn>
       </div>
-      <h2 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>No pages found</h2>
-      <p style={{ color: 'rgba(255,255,255,0.48)', fontSize: 13, maxWidth: 360, lineHeight: 1.6, margin: 0 }}>
-        This chapter did not return any readable pages. Try another chapter or reload it from the manga details page.
-      </p>
-      <Btn onClick={onBack} icon={ChevronLeft}>Back to Manga</Btn>
-    </div>
-  );
+    );
+  }
 
   return (
     <div
@@ -1067,12 +998,12 @@ export const Reader = memo(({
           style={{ height: '100vh', width: '100vw', overflow: zoom > 1.05 ? 'auto' : 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: zoom > 1.05 ? 'grab' : 'default' }}
         >
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: direction === 'rtl' ? 'row-reverse' : 'row', gap: doublePage ? 2 : 0, minWidth: zoom > 1.05 ? `${zoom * 100}vw` : '100vw', minHeight: zoom > 1.05 ? `${zoom * 100}vh` : '100vh', padding: uiVisible ? '54px 0 100px' : '4px 0' }}>
-            {doublePage && pages[direction === 'rtl' ? page + 1 : (page - 1)] !== undefined && (
-              <PageImage url={pages[direction === 'rtl' ? page + 1 : (page - 1)]} alt="" style={{ display: 'block', userSelect: 'none', flexShrink: 0, filter: imgFilter, opacity: .88, maxWidth: '50vw', maxHeight: uiVisible ? 'calc(100vh - 154px)' : '100vh', height: fitMode === 'height' ? (uiVisible ? 'calc(100vh - 154px)' : '100vh') : 'auto', width: 'auto', objectFit: 'contain', animation: 'fadeIn .14s ease both' }} />
-            )}
             <PageImage url={pages[page]} alt={`Page ${page + 1}`}
               style={{ display: 'block', userSelect: 'none', flexShrink: 0, filter: imgFilter, animation: 'fadeIn .14s ease both', ...(zoom <= 1 ? { maxWidth: doublePage ? '50vw' : '100vw', maxHeight: uiVisible ? 'calc(100vh - 154px)' : '100vh', width: fitMode === 'width' ? (doublePage ? '50vw' : '100vw') : 'auto', height: fitMode === 'height' ? (uiVisible ? 'calc(100vh - 154px)' : '100vh') : 'auto', objectFit: 'contain' } : { maxWidth: 'none', maxHeight: 'none', width: fitMode === 'width' ? `${zoom * (doublePage ? 50 : 100)}vw` : 'auto', height: fitMode === 'height' ? `${zoom * 100}vh` : 'auto', zoom: fitMode === 'original' && zoom !== 1 ? zoom : undefined }) }}
             />
+            {doublePage && !(doublePageOffset && page === 0) && pages[page + 1] !== undefined && (
+              <PageImage url={pages[page + 1]} alt={`Page ${page + 2}`} style={{ display: 'block', userSelect: 'none', flexShrink: 0, filter: imgFilter, opacity: .88, maxWidth: '50vw', maxHeight: uiVisible ? 'calc(100vh - 154px)' : '100vh', height: fitMode === 'height' ? (uiVisible ? 'calc(100vh - 154px)' : '100vh') : 'auto', width: 'auto', objectFit: 'contain', animation: 'fadeIn .14s ease both' }} />
+            )}
           </div>
         </div>
       ) : (
@@ -1131,25 +1062,34 @@ export const Reader = memo(({
             </React.Fragment>
           ))}
           {isFetchingNext && <div style={{ padding: '60px 0', display: 'flex', justifyContent: 'center' }}><Spin size={34} /></div>}
-          {localHasNext && <div ref={fetchSentinelRef} style={{ height: 1, width: '100%' }} />}
-          {nextChapterError && (
-            <div style={{ maxWidth: 520, margin: '54px auto 0', padding: '18px 20px', borderRadius: 14, border: `1px solid ${accent}45`, background: `${accent}12`, color: 'rgba(255,255,255,0.78)', textAlign: 'center', fontSize: 13, lineHeight: 1.5 }}>
-              {nextChapterError}
+          {/* Sentinel / Next Chapter Loading */}
+          {localHasNext && <div ref={fetchSentinelRef} style={{ height: 2, width: '100%' }} />}
+          
+          {(isFetchingNext || nextChapterError || !localHasNext) && (
+            <div style={{ padding: '60px 24px 120px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 24 }}>
+              {isFetchingNext && (
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16, opacity: 0.8 }}>
+                  <Spin size="lg" color={accent} />
+                  <span style={{ fontSize: 13, fontWeight: 700, color: 'rgba(255,255,255,0.4)', letterSpacing: 1 }}>FETCHING NEXT CHAPTER</span>
+                </div>
+              )}
+
+              {nextChapterError && (
+                <div style={{ maxWidth: 400, width: '100%', background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.2)', padding: '24px', borderRadius: 24, textAlign: 'center' }}>
+                  <div style={{ color: '#ef4444', fontSize: 14, fontWeight: 800, marginBottom: 16 }}>{nextChapterError}</div>
+                  <Btn onClick={loadNextChapter} icon={RefreshCw} variant="default" style={{ background: '#ef4444', margin: '0 auto' }}>Retry Chapter</Btn>
+                </div>
+              )}
+
+              {!localHasNext && pages.length > 0 && (
+                <div style={{ opacity: 0.3, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+                  <Activity size={32} />
+                  <span style={{ fontSize: 12, fontWeight: 900, letterSpacing: 2 }}>END OF MANGA</span>
+                </div>
+              )}
             </div>
           )}
-          {localHasNext && !isFetchingNext && (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '80px 24px 120px', gap: 16 }}>
-              <button onClick={loadNextChapter} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '16px 40px', borderRadius: 99, background: `linear-gradient(135deg,${accent},${accent}cc)`, color: '#fff', fontWeight: 800, fontSize: 16, border: 'none', cursor: 'pointer', boxShadow: `0 15px 40px ${accent}40`, transition: 'all 0.3s ease' }}>
-                {nextChapterError ? 'Retry Next Chapter' : 'Load Next Chapter'} <ChevronDown size={20} />
-              </button>
-            </div>
-          )}
-          {!localHasNext && (
-            <div style={{ padding: '100px 0', textAlign: 'center', color: 'rgba(255,255,255,0.3)', fontWeight: 600, letterSpacing: 1 }}>
-              END OF CHAPTERS
-            </div>
-          )}
-          <div style={{ height: 160 }} />
+          <div style={{ height: 100 }} />
         </div>
       )}
     </div>

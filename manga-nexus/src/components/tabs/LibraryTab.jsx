@@ -7,7 +7,9 @@ import { Badge } from '../ui/Badge';
 import { EmptyState } from '../ui/EmptyState';
 import { CATEGORIES } from '../../constants';
 
-export const LibraryTab = memo(({ onSelect }) => {
+const getMangaKey = (id, sourceId) => `${sourceId}__${id}`;
+
+export const LibraryTab = memo(({ onSelect, onSwitchTab }) => {
   const { 
     library, history, progress, mangaCategories, toggleLibrary, 
     libraryView, updateSetting, readChapters, librarySearch, setLibrarySearch,
@@ -21,7 +23,7 @@ export const LibraryTab = memo(({ onSelect }) => {
   const filteredLibrary = useMemo(() => {
     let result = library.filter(m => {
       const matchesSearch = m.title.toLowerCase().includes(librarySearch.toLowerCase());
-      const matchesCategory = activeCategory === 'all' || mangaCategories[m.id] === activeCategory;
+      const matchesCategory = activeCategory === 'all' || mangaCategories[getMangaKey(m.id, m.sourceId)] === activeCategory;
       return matchesSearch && matchesCategory;
     });
 
@@ -37,7 +39,7 @@ export const LibraryTab = memo(({ onSelect }) => {
       <div style={{ display: 'flex', gap: 8, marginBottom: 16, overflowX: 'auto', paddingBottom: 4 }}>
         <button onClick={() => setActiveCategory('all')} style={{ padding: '9px 18px', borderRadius: 20, border: 'none', background: activeCategory === 'all' ? 'var(--accent)' : 'var(--card)', color: activeCategory === 'all' ? '#fff' : 'var(--text-dim)', fontWeight: 600, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', boxShadow: activeCategory === 'all' ? '0 4px 16px rgba(249,115,22,0.3)' : 'none', transition: 'all 0.2s' }}>All ({library.length})</button>
         {CATEGORIES.map(cat => {
-          const count = library.filter(m => mangaCategories[m.id] === cat.id).length;
+          const count = library.filter(m => mangaCategories[getMangaKey(m.id, m.sourceId)] === cat.id).length;
           return <button key={cat.id} onClick={() => setActiveCategory(cat.id)} style={{ padding: '9px 18px', borderRadius: 20, border: 'none', background: activeCategory === cat.id ? cat.color : 'var(--card)', color: activeCategory === cat.id ? '#fff' : 'var(--text-dim)', fontWeight: 600, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', opacity: count === 0 ? 0.5 : 1, boxShadow: activeCategory === cat.id ? `0 4px 16px ${cat.color}40` : 'none', transition: 'all 0.2s' }}>{cat.name} ({count})</button>;
         })}
       </div>
@@ -74,17 +76,17 @@ export const LibraryTab = memo(({ onSelect }) => {
       </div>
 
       {filteredLibrary.length === 0 ? (
-        <EmptyState icon={Library} title="Library empty" sub="Browse manga to add to your library" action={<Btn onClick={() => {}}>Go to Browse</Btn>} />
+        <EmptyState icon={Library} title="Library empty" sub="Browse manga to add to your library" action={<Btn onClick={() => onSwitchTab?.('browse')}>Go to Browse</Btn>} />
       ) : libraryView === 'list' ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {filteredLibrary.map((m, i) => (
-            <MangaListCard key={m.id} manga={m} onClick={onSelect} index={i} category={mangaCategories[m.id]} progress={progress[m.id] ? Math.round((parseInt(progress[m.id].chapterNum) || (m.totalChapters || 100)) / Math.max(m.totalChapters || 1, 1) * 100) : 0} />
+            <MangaListCard key={getMangaKey(m.id, m.sourceId)} manga={m} onClick={onSelect} index={i} category={mangaCategories[getMangaKey(m.id, m.sourceId)]} progress={progress[getMangaKey(m.id, m.sourceId)] ? Math.round((parseInt(progress[getMangaKey(m.id, m.sourceId)].chapterNum) || (m.totalChapters || 100)) / Math.max(m.totalChapters || 1, 1) * 100) : 0} />
           ))}
         </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 18 }}>
           {filteredLibrary.map((m, i) => (
-            <MangaCard key={m.id} manga={m} onClick={onSelect} index={i} category={mangaCategories[m.id]} progress={progress[m.id] ? Math.round((parseInt(progress[m.id].chapterNum) || (m.totalChapters || 100)) / Math.max(m.totalChapters || 1, 1) * 100) : 0} />
+            <MangaCard key={getMangaKey(m.id, m.sourceId)} manga={m} onClick={onSelect} index={i} category={mangaCategories[getMangaKey(m.id, m.sourceId)]} progress={progress[getMangaKey(m.id, m.sourceId)] ? Math.round((parseInt(progress[getMangaKey(m.id, m.sourceId)].chapterNum) || (m.totalChapters || 100)) / Math.max(m.totalChapters || 1, 1) * 100) : 0} />
           ))}
         </div>
       )}
