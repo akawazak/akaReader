@@ -113,10 +113,8 @@ const getChapterPagesCacheKey = (sourceId, chapterId) => `pages-${sourceId}-${ch
 const isAllowedImageUrl = value => {
   try {
     const candidate = new URL(value);
-    const suwayomi = new URL(SUWAYOMI);
     if (!['http:', 'https:'].includes(candidate.protocol)) return false;
-    const allowedHosts = new Set([suwayomi.hostname, '127.0.0.1', 'localhost', '::1', '[::1]']);
-    return allowedHosts.has(candidate.hostname);
+    return true;
   } catch {
     return false;
   }

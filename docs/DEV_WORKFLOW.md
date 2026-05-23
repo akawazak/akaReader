@@ -57,6 +57,12 @@ npm run build
 Builds the renderer into `manga-nexus/dist`.
 
 ```powershell
+npm run check:hook-order
+```
+
+Checks React hook dependency arrays in the high-risk renderer files for callbacks referenced before they are declared. Run this after moving callbacks in `App.jsx` or `Reader.jsx`.
+
+```powershell
 npm run electron:build
 ```
 
@@ -106,6 +112,7 @@ Check in order:
 2. `/api/sources`
 3. `/api/source/:sourceId/search`
 4. whether the extension is actually installed and visible in Suwayomi
+5. `src/components/extensions/ExtensionsTab.jsx` if the issue is only in the extension list UI
 
 ### Manga detail / chapter loading issues
 
@@ -116,6 +123,7 @@ Check:
 3. `openManga()` and `openChapter()` in `src/App.jsx`
 4. `fetchNextChapter()` in `src/App.jsx` if the failure happens while chaining chapters
 5. `Reader.jsx` if the failure is inside the reading session
+6. `npm run check:hook-order` if the error says `Cannot access '<name>' before initialization`
 
 ### Offline download issues
 

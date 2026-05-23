@@ -24,6 +24,8 @@ akareader/
    |- electron-main.js
    |- preload.js
    |- index.html
+   |- scripts/
+   |  `- check-hook-order.mjs
    |- public/
    |  |- icon.ico
    |  |- icon.icns
@@ -42,6 +44,8 @@ akareader/
       |- views/
       |  `- HomeView.jsx
       `- components/
+         |- extensions/
+         |  `- ExtensionsTab.jsx
          |- manga/
          |  `- MangaCard.jsx
          |- reader/
@@ -104,6 +108,8 @@ akareader/
   Current lint rules.
 - `manga-nexus/index.html`
   Renderer HTML entry.
+- `manga-nexus/scripts/check-hook-order.mjs`
+  Local guard for React hook dependency arrays that reference same-component `const` callbacks before declaration.
 
 ### Renderer Core
 
@@ -132,6 +138,11 @@ akareader/
   - progress persistence
   - next-chapter loading
   - keyboard/touch interaction
+- `manga-nexus/src/components/extensions/ExtensionsTab.jsx`
+  Extension management UI:
+  - search/filter/sort controls
+  - incremental extension list rendering
+  - install/update/remove row actions
 - `manga-nexus/src/components/manga/MangaCard.jsx`
   Shared card/list-card presentation used by library, browse, and history surfaces.
 - `manga-nexus/src/views/HomeView.jsx`

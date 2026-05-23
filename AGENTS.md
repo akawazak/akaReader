@@ -34,7 +34,9 @@ The app's goal is to give users a polished local manga-reading experience on top
 - `manga-nexus/`
   Electron + Vite + React desktop app.
 - `manga-nexus/src/components/`
-  Reusable UI and reader components. `reader/Reader.jsx` is the most complex runtime file after `App.jsx`.
+  Reusable UI and feature components. `reader/Reader.jsx` is the most complex runtime file after `App.jsx`; `extensions/ExtensionsTab.jsx` owns extension filtering/list rendering.
+- `manga-nexus/scripts/`
+  Lightweight local validation helpers, including the hook dependency-order check that catches TDZ-style React crashes.
 - `manga-nexus/src/views/`
   Larger presentation-level views such as `HomeView.jsx`.
 - `manga-nexus/src/constants/` and `manga-nexus/src/utils/`
@@ -69,6 +71,7 @@ The app's goal is to give users a polished local manga-reading experience on top
 - When touching reader behavior, inspect both:
   - `manga-nexus/src/App.jsx`
   - `manga-nexus/src/components/reader/Reader.jsx`
+- In React components, declare callbacks before any hook dependency array references them. Run `npm run check:hook-order` from `manga-nexus/` after moving reader/app callbacks.
 - When touching service startup, inspect all of:
   - `manga-nexus/electron-main.js`
   - `manga-nexus/preload.js`

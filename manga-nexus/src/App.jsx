@@ -19,6 +19,7 @@ import {
 import { Reader as NewReader } from './components/reader/Reader';
 import { HomeView as HomeTab } from './views/HomeView';
 import { DataContext, useData } from './contexts/DataContext';
+import { ExtensionsTab } from './components/extensions/ExtensionsTab';
 
 // ==================== CONFIG & CONSTANTS ====================
 
@@ -62,6 +63,12 @@ const proxyImg = (url) => {
     return `${CONFIG.API}/img?url=${encodeURIComponent(absolute)}`;
   }
   return url;
+};
+
+const directSuwayomiAsset = (url) => {
+  if (!url) return null;
+  if (/^(https?:|data:|blob:)/i.test(url)) return url;
+  return url.startsWith('/') ? `${CONFIG.SUWAYOMI}${url}` : url;
 };
 
 const getDownloadKey = (mangaKey, chapterId) => `${mangaKey}___${chapterId}`;
@@ -541,6 +548,8 @@ const DataProvider = memo(({ children }) => {
   toastRef.current = useToast();
   const sourcesRef = useRef({});
   const extRef = useRef([]);
+  const sourcesRequestRef = useRef(null);
+  const extensionsRequestRef = useRef(null);
 
   useEffect(() => storage.set('library', library), [library]);
   useEffect(() => storage.set('history', history), [history]);
@@ -579,41 +588,66 @@ const DataProvider = memo(({ children }) => {
   }, [fetchJSON]);
 
   const fetchSources = useCallback(async (force = false) => {
-    try {
-      const data = await fetchJSON(`/sources${force ? '?force=1' : ''}`);
-      if (!Array.isArray(data)) return;
-      const map = {};
-      data.forEach(s => {
-        map[String(s.id)] = {
-          id: String(s.id),
-          name: s.displayName || s.name,
-          displayName: s.displayName || s.name,
-          baseName: s.name || s.displayName || 'Source',
-          lang: s.lang,
-          icon: proxyImg(s.icon || s.iconUrl || null),
-        };
-      });
-      if (JSON.stringify(map) !== JSON.stringify(sourcesRef.current)) { sourcesRef.current = map; setSources(map); }
-    } catch { }
+    if (sourcesRequestRef.current && !force) return sourcesRequestRef.current;
+    const run = async () => {
+      try {
+        const data = await fetchJSON(`/sources${force ? '?force=1' : ''}`);
+        if (!Array.isArray(data)) return {};
+        const map = {};
+        data.forEach(s => {
+          map[String(s.id)] = {
+            id: String(s.id),
+            name: s.displayName || s.name,
+            displayName: s.displayName || s.name,
+            baseName: s.name || s.displayName || 'Source',
+            lang: s.lang,
+            // Source icons render faster when loaded directly instead of being proxied through the backend.
+            icon: directSuwayomiAsset(s.icon || s.iconUrl),
+          };
+        });
+        if (JSON.stringify(map) !== JSON.stringify(sourcesRef.current)) { sourcesRef.current = map; setSources(map); }
+        return map;
+      } catch {
+        return {};
+      }
+    };
+    const sharedRequest = run();
+    sourcesRequestRef.current = sharedRequest;
+    sharedRequest.finally(() => {
+      if (sourcesRequestRef.current === sharedRequest) sourcesRequestRef.current = null;
+    });
+    return sharedRequest;
   }, [fetchJSON]);
 
   const fetchExtensions = useCallback(async (force = false) => {
-    try {
-      const data = await fetchJSON(`/extensions${force ? '?force=1' : ''}`);
-      if (!Array.isArray(data)) return [];
-      const normalized = data.map(e => ({
-        ...e,
-        pkgName: e.pkgName || e.id,
-        isInstalled: e.isInstalled ?? e.installed ?? false,
-        isNsfw: e.isNsfw ?? e.nsfw ?? false,
-        versionName: e.versionName || e.version || '1.0.0',
-        versionCode: e.versionCode || 1,
-        hasUpdate: e.hasUpdate ?? false,
-        iconUrl: proxyImg(e.iconUrl || null),
-      }));
-      if (JSON.stringify(normalized) !== JSON.stringify(extRef.current)) { extRef.current = normalized; setExtensions(normalized); }
-      return normalized;
-    } catch { return []; }
+    if (extensionsRequestRef.current && !force) return extensionsRequestRef.current;
+    const run = async () => {
+      try {
+        const data = await fetchJSON(`/extensions${force ? '?force=1' : ''}`);
+        if (!Array.isArray(data)) return [];
+        const normalized = data.map(e => ({
+          ...e,
+          pkgName: e.pkgName || e.id,
+          isInstalled: e.isInstalled ?? e.installed ?? false,
+          isNsfw: e.isNsfw ?? e.nsfw ?? false,
+          versionName: e.versionName || e.version || '1.0.0',
+          versionCode: e.versionCode || 1,
+          hasUpdate: e.hasUpdate ?? false,
+          // Extension icons don't need the extra proxy hop for normal <img> rendering.
+          iconUrl: directSuwayomiAsset(e.iconUrl),
+        }));
+        if (JSON.stringify(normalized) !== JSON.stringify(extRef.current)) { extRef.current = normalized; setExtensions(normalized); }
+        return normalized;
+      } catch {
+        return [];
+      }
+    };
+    const sharedRequest = run();
+    extensionsRequestRef.current = sharedRequest;
+    sharedRequest.finally(() => {
+      if (extensionsRequestRef.current === sharedRequest) extensionsRequestRef.current = null;
+    });
+    return sharedRequest;
   }, [fetchJSON]);
 
   const installExt = useCallback(async (pkgName) => {
@@ -955,9 +989,11 @@ const DataProvider = memo(({ children }) => {
 });
 // ==================== UI PRIMITIVES ====================
 
-const Spin = memo(({ size = 24 }) => (
-  <Loader2 size={size} className="anim-spin" style={{ color: 'var(--accent)' }} />
-));
+const SPIN_SIZES = { sm: 14, md: 24, lg: 40, xl: 48 };
+const Spin = memo(({ size = 24, color = 'var(--accent)', style }) => {
+  const resolvedSize = typeof size === 'number' ? size : (SPIN_SIZES[size] || SPIN_SIZES.md);
+  return <Loader2 size={resolvedSize} className="anim-spin" style={{ width: resolvedSize, height: resolvedSize, flexShrink: 0, color, ...style }} />;
+});
 
 const Btn = memo(({ children, variant = 'default', size = 'md', onClick, disabled, className = '', style = {}, icon: Icon, type = 'button', title }) => {
   const base = { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8, border: 'none', cursor: disabled ? 'not-allowed' : 'pointer', fontFamily: 'system-ui,-apple-system,Segoe UI,sans-serif', fontWeight: 600, borderRadius: 12, whiteSpace: 'nowrap', opacity: disabled ? 0.4 : 1, position: 'relative', overflow: 'hidden', transition: 'all var(--t-fast) var(--ease-out)' };
@@ -3994,13 +4030,6 @@ const App = memo(() => {
   const [catchUpManga, setCatchUpManga] = useState(null);
   const [migrateManga, setMigrateManga] = useState(null);
   const [showShareCard, setShowShareCard] = useState(false);
-  const [extSearch, setExtSearch] = useState('');
-  const [extLang, setExtLang] = useState('en');
-  const [extTab, setExtTab] = useState('all');
-  const [showNsfw, setShowNsfw] = useState(true);
-  const [extSort, setExtSort] = useState('name');
-  const [extDisplayCount, setExtDisplayCount] = useState(30);
-  const extSentinelRef = useRef(null);
   const prevQ = useRef(null);
   const chapRef = useRef([]);
 
@@ -4348,23 +4377,6 @@ const App = memo(() => {
     return [...byPkg.values()];
   }, [extensions]);
 
-  const filteredExts = useMemo(() => {
-    let filtered = normalizedExts.filter(e => {
-      if (extTab === 'installed' && !e.isInstalled) return false;
-      const matchLang = extLang === 'all' || (e.lang || '').toLowerCase() === extLang;
-      const matchName = !extSearch || (e.name || '').toLowerCase().includes(extSearch.toLowerCase());
-      const matchNsfw = showNsfw ? true : !e.isNsfw;
-      return matchLang && matchName && matchNsfw;
-    });
-    switch (extSort) {
-      case 'name': filtered.sort((a, b) => (a.name || '').localeCompare(b.name || '')); break;
-      case 'version': filtered.sort((a, b) => (b.versionCode || 0) - (a.versionCode || 0)); break;
-      case 'installed': filtered.sort((a, b) => (b.isInstalled ? 1 : 0) - (a.isInstalled ? 1 : 0)); break;
-      default: filtered.sort((a, b) => (a.name || '').localeCompare(b.name || '')); break;
-    }
-    return filtered;
-  }, [normalizedExts, extTab, extLang, extSearch, showNsfw, extSort]);
-
   const filteredLibrary = useMemo(() => {
     let list = activeCategory === 'all' ? library : library.filter(m => mangaCategories[getMangaKey(m.id, m.sourceId)] === activeCategory);
     if (librarySearch.trim()) {
@@ -4496,15 +4508,6 @@ const App = memo(() => {
     const activityDays = days14.map(d => ({ ...d, read: readDaySet.has(d.date) }));
     return { streak, totalChapters, totalMinutes: Math.round(totalMinutes), inLib, activityDays };
   }, [progress, history, library, readingTime]);
-
-  useEffect(() => { setExtDisplayCount(30); }, [filteredExts]);
-
-  useEffect(() => {
-    if (tab !== 'extensions') return;
-    const obs = new IntersectionObserver(([e]) => { if (e.isIntersecting && extDisplayCount < filteredExts.length) setExtDisplayCount(p => Math.min(p + 30, filteredExts.length)); }, { threshold: 0.1 });
-    if (extSentinelRef.current) obs.observe(extSentinelRef.current);
-    return () => obs.disconnect();
-  }, [tab, filteredExts.length, extDisplayCount]);
 
   const NAV = useMemo(() => [
     { id: 'home', label: 'Home', Icon: Flame },
@@ -5235,51 +5238,15 @@ const App = memo(() => {
           )}
 
           {tab === 'extensions' && (
-            <div className="page-transition">
-              <div style={{ display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' }}>
-                <div style={{ position: 'relative', flex: 1, minWidth: 220 }}>
-                  <Search size={15} style={{ position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)', pointerEvents: 'none' }} />
-                  <input placeholder="Search extensions by name..." value={extSearch} onChange={e => setExtSearch(e.target.value)} style={{ width: '100%', background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 12, padding: '11px 14px 11px 40px', color: 'var(--text)', fontSize: 13, outline: 'none' }} onFocus={e => e.target.style.borderColor = 'var(--accent)'} onBlur={e => e.target.style.borderColor = 'var(--border)'} />
-                </div>
-                <select value={extLang} onChange={e => setExtLang(e.target.value)} style={{ background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 12, padding: '11px 14px', color: 'var(--text)', fontSize: 13, outline: 'none', cursor: 'pointer', minWidth: 130 }}>
-                  {LANGUAGES.map(l => <option key={l.value} value={l.value}>{l.label}</option>)}
-                </select>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 12, padding: '0 12px' }}>
-                  <span style={{ fontSize: 13, color: 'var(--text-dim)' }}>NSFW</span>
-                  <button onClick={() => setShowNsfw(prev => !prev)} style={{ width: 40, height: 22, borderRadius: 11, background: showNsfw ? 'var(--accent)' : 'rgba(255,255,255,0.15)', border: 'none', cursor: 'pointer', position: 'relative', transition: 'background 0.2s' }}>
-                    <div style={{ position: 'absolute', top: 2, left: showNsfw ? 20 : 2, width: 18, height: 18, borderRadius: '50%', background: '#fff', transition: 'left 0.2s', boxShadow: '0 1px 4px rgba(0,0,0,0.3)' }} />
-                  </button>
-                </div>
-                <div style={{ display: 'flex', background: 'var(--card)', borderRadius: 12, border: '1.5px solid var(--border)', overflow: 'hidden' }}>
-                  {[['all', 'All'], ['installed', 'Installed']].map(([v, l]) => (
-                    <button key={v} onClick={() => setExtTab(v)} style={{ padding: '11px 18px', border: 'none', background: extTab === v ? 'var(--accent)' : 'transparent', color: extTab === v ? '#fff' : 'var(--muted)', fontWeight: 600, fontSize: 13, cursor: 'pointer', transition: 'all 0.2s' }}>{l}</button>
-                  ))}
-                </div>
-                <select value={extSort} onChange={e => setExtSort(e.target.value)} style={{ background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 12, padding: '11px 14px', color: 'var(--text)', fontSize: 13, outline: 'none', cursor: 'pointer', minWidth: 140 }}>
-                  <option value="name">Sort by Name</option>
-                  <option value="version">Sort by Version</option>
-                  <option value="installed">Installed First</option>
-                </select>
-                <Btn variant="outline" onClick={() => { fetchExtensions(); fetchSources(); }}>
-                  <RefreshCw size={15} /> Refresh
-                </Btn>
-              </div>
-
-              {filteredExts.length === 0 ? (
-                <EmptyState icon={Puzzle} title="No extensions found" sub="Try adjusting your filters" />
-              ) : (
-                <>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    {filteredExts.slice(0, extDisplayCount).map((ext, i) => (
-                      <div key={ext.pkgName} className={`anim-fadeInUp delay-${Math.min(i, 10)}`}>
-                        <ExtCard ext={ext} onInstall={installExt} onUninstall={uninstallExt} onUpdate={updateExt} installing={installing} />
-                      </div>
-                    ))}
-                  </div>
-                  {extDisplayCount < filteredExts.length && <div ref={extSentinelRef} style={{ height: 20, margin: '20px 0' }} />}
-                </>
-              )}
-            </div>
+            <ExtensionsTab
+              extensions={normalizedExts}
+              installing={installing}
+              languages={LANGUAGES}
+              onInstall={installExt}
+              onUninstall={uninstallExt}
+              onUpdate={updateExt}
+              onRefresh={() => { fetchExtensions(); fetchSources(); }}
+            />
           )}
 
           {tab === 'library' && (

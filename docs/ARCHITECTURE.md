@@ -25,6 +25,7 @@ Electron sits beside that flow and is responsible for booting and supervising bo
 - Entry: `manga-nexus/src/main.jsx`
 - Main app shell and state: `manga-nexus/src/App.jsx`
 - Reader session logic: `manga-nexus/src/components/reader/Reader.jsx`
+- Extension management view: `manga-nexus/src/components/extensions/ExtensionsTab.jsx`
 - Supporting presentational components: `manga-nexus/src/components/**`, `manga-nexus/src/views/**`
 
 The renderer is not thin. It owns:
@@ -191,6 +192,10 @@ This is used for:
 - covers
 - chapter pages while online
 
+Source and extension icons are different: renderer code normalizes Suwayomi-relative icon paths to absolute `http://localhost:4567/...` URLs and loads them directly. That avoids routing hundreds of small extension-icon requests through the React dev proxy or backend image proxy.
+
+The extension list is rendered by `ExtensionsTab.jsx`, which owns its search/filter/sort state, defers search input rendering work, incrementally reveals rows, and uses `content-visibility` for cheaper offscreen cards.
+
 ### Offline chapter caching
 
 1. Download queue fetches chapter page URLs.
@@ -261,6 +266,7 @@ Important consequences:
 
 - `src/App.jsx` is the dominant state and UI container and should be treated as a high-risk file.
 - `Reader.jsx` has sophisticated async/state behavior and several observer/timer-driven flows.
+- Hook dependency arrays are evaluated during render. A callback must be declared before another hook dependency array references it, otherwise production bundles can throw `Cannot access '<minified name>' before initialization`.
 - `backend/server.js` mixes multiple concerns:
   - cache layer
   - GraphQL adapter

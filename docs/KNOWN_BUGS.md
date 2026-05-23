@@ -18,9 +18,46 @@ Verification run:
 - `node --check manga-nexus/electron-main.js` passed after the Electron fixes.
 - `node --check manga-nexus/preload.js` passed.
 - `npm.cmd run build` passed after the reader/app fixes.
+- `npm.cmd run check:hook-order` passed after the reader initialization-order fix.
 - `npx.cmd eslint .` could not run locally because `eslint` is not installed in `manga-nexus/node_modules`; `npx` attempted a registry fetch.
 
 ## Recently Fixed
+
+### Fixed 2026-05-23: Reader next-chapter initialization-order crash
+
+- File: `manga-nexus/src/components/reader/Reader.jsx`
+- Fix: moved `loadNextChapter` before `go`, because `go` includes `loadNextChapter` in its hook dependency array.
+- Result: reader render no longer throws `Cannot access 'loadNextChapter' before initialization`.
+
+### Fixed 2026-05-23: Hook dependency order guard added
+
+- Files:
+  - `manga-nexus/scripts/check-hook-order.mjs`
+  - `manga-nexus/package.json`
+- Fix: added `npm run check:hook-order` to detect same-component hook dependency arrays that reference later-declared `const` callbacks.
+- Result: the specific class of TDZ/runtime crash that hit the reader is now checked locally.
+
+### Fixed 2026-05-23: Source and extension icon paths normalized
+
+- File: `manga-nexus/src/App.jsx`
+- Fix: Suwayomi-relative source/extension icon URLs are converted to absolute Suwayomi URLs before rendering.
+- Result: extension icons no longer accidentally request `/api/v1/extension/icon/...` from the React dev server/backend proxy path.
+
+### Fixed 2026-05-23: Oversized loading spinner with named sizes
+
+- Files:
+  - `manga-nexus/src/App.jsx`
+  - `manga-nexus/src/components/ui/Spin.jsx`
+- Fix: `Spin` now maps named sizes like `lg` to numeric pixel sizes before passing them to Lucide.
+- Result: loading icons no longer balloon when a component passes `size="lg"`.
+
+### Improved 2026-05-23: Extensions tab extracted and optimized
+
+- Files:
+  - `manga-nexus/src/App.jsx`
+  - `manga-nexus/src/components/extensions/ExtensionsTab.jsx`
+- Change: extension search/filter/sort/display-count state moved out of `App.jsx`; extension rows now use deferred search input, incremental rendering, async image decoding, and `content-visibility`.
+- Result: the largest list view is easier to reason about and should feel lighter with large extension catalogs.
 
 ### Fixed 2026-05-23: Reader previous-chapter shortcut crash
 

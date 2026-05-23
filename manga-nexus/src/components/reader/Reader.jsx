@@ -409,31 +409,6 @@ export const Reader = memo(({
     }
   }, [allPagesRef, modeRef, doublePage, doublePageOffset]);
 
-  const go = useCallback((delta) => {
-    let step = delta;
-    if (modeRef.current === 'paged' && doublePage) {
-      if (doublePageOffset) {
-        if (pageRef.current === 0 && delta > 0) {
-          step = 1;
-        } else if (pageRef.current === 1 && delta < 0) {
-          step = -1;
-        } else {
-          step = delta * 2;
-        }
-      } else {
-        step = delta * 2;
-      }
-    }
-    
-    const next = pageRef.current + step;
-    if (next >= 0 && next < pagesLenRef.current) {
-      jumpToPage(next);
-      persistPage(allPagesRef.current[next]);
-    } else if (next >= pagesLenRef.current && delta > 0 && hasNextRef.current) {
-      loadNextChapter();
-    }
-  }, [pageRef, pagesLenRef, jumpToPage, persistPage, allPagesRef, hasNextRef, loadNextChapter, doublePage, doublePageOffset, modeRef]);
-
   const loadNextChapter = useCallback(async () => {
     if (document.hidden) return null;
     if (loadingNextRef.current || loadingCooldownRef.current || !fetchNextChapter || !hasNextRef.current) return null;
@@ -491,6 +466,31 @@ export const Reader = memo(({
       cooldownTimerRef.current = setTimeout(() => { loadingCooldownRef.current = false; }, 1000);
     }
   }, [fetchNextChapter, hasNextRef, loadedChaptersRef, pagesLenRef, allPagesRef]);
+
+  const go = useCallback((delta) => {
+    let step = delta;
+    if (modeRef.current === 'paged' && doublePage) {
+      if (doublePageOffset) {
+        if (pageRef.current === 0 && delta > 0) {
+          step = 1;
+        } else if (pageRef.current === 1 && delta < 0) {
+          step = -1;
+        } else {
+          step = delta * 2;
+        }
+      } else {
+        step = delta * 2;
+      }
+    }
+    
+    const next = pageRef.current + step;
+    if (next >= 0 && next < pagesLenRef.current) {
+      jumpToPage(next);
+      persistPage(allPagesRef.current[next]);
+    } else if (next >= pagesLenRef.current && delta > 0 && hasNextRef.current) {
+      loadNextChapter();
+    }
+  }, [pageRef, pagesLenRef, jumpToPage, persistPage, allPagesRef, hasNextRef, loadNextChapter, doublePage, doublePageOffset, modeRef]);
 
   useEffect(() => {
     // Only reset if it's a truly new session (different chapter ID or empty)
