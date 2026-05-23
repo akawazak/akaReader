@@ -355,6 +355,7 @@ async function isServiceRunning() {
 }
 
 async function installWindowsService() {
+  if (process.platform !== 'win32') return false;
   await ensureNssm();
   const java     = findJava();
   const dataRoot = path.join(userData, 'suwayomi-data');
@@ -369,11 +370,14 @@ async function installWindowsService() {
     `net start AkaReaderSuwayomi`,
   ];
   for (const cmd of cmds) cp.execSync(cmd, { windowsHide: true });
+  return true;
 }
 
 async function uninstallWindowsService() {
+  if (process.platform !== 'win32') return false;
   try { cp.execSync('net stop AkaReaderSuwayomi',  { windowsHide: true }); } catch {}
   try { cp.execSync('sc delete AkaReaderSuwayomi', { windowsHide: true }); } catch {}
+  return true;
 }
 
 // ── Process-tree kill ────────────────────────────────────────────────────────
@@ -642,8 +646,8 @@ ipcMain.handle('ensure-services', () => ensureManagedServices());
 ipcMain.handle('restart-services', () => ensureManagedServices({ restart: true }));
 
 ipcMain.handle('check-service',     ()    => isServiceRunning());
-ipcMain.handle('install-service',   async () => { await installWindowsService(); return true; });
-ipcMain.handle('uninstall-service', async () => { await uninstallWindowsService(); return true; });
+ipcMain.handle('install-service',   async () => installWindowsService());
+ipcMain.handle('uninstall-service', async () => uninstallWindowsService());
 ipcMain.handle('open-data-dir',     ()    => shell.openPath(userData));
 ipcMain.handle('get-version',       ()    => app.getVersion());
 ipcMain.handle('get-java-path',     ()    => findJava());

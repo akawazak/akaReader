@@ -1,6 +1,6 @@
 {
   "name": "akareader",
-  "version": "2.0.34",
+  "version": "2.0.35",
   "description": "Manga reader powered by Suwayomi",
   "main": "electron-main.js",
   "author": {
@@ -17,7 +17,7 @@
     "clean": "rimraf dist dist-electron",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "electron:build": "rimraf dist dist-electron && vite build && electron-builder --win",
-    "dist": "vite build && electron-builder"
+    "dist": "vite build && electron-builder --win"
   },
   "dependencies": {
     "react": "^18.2.0",
@@ -86,20 +86,6 @@
         }
       ],
       "icon": "public/icon.ico"
-    },
-    "mac": {
-      "target": "dmg",
-      "icon": "public/icon.icns",
-      "category": "public.app-category.entertainment"
-    },
-    "linux": {
-      "target": [
-        "AppImage",
-        "deb"
-      ],
-      "icon": "public/icon.png",
-      "category": "Utility",
-      "maintainer": "akawazak <akawazak@users.noreply.github.com>"
     },
     "nsis": {
       "artifactName": "akaReader-Setup-${version}.${ext}",

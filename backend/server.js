@@ -107,12 +107,16 @@ const gql = async (query, variables = {}, retries = 2) => {
 };
 
 const fixUrl = url => (!url ? null : url.startsWith('http') ? url : `${SUWAYOMI}${url}`);
+const getMangaCacheKey = (sourceId, mangaId) => `manga-${sourceId}-${mangaId}`;
+const getChapterPagesCacheKey = (sourceId, chapterId) => `pages-${sourceId}-${chapterId}`;
 
 const isAllowedImageUrl = value => {
   try {
     const candidate = new URL(value);
     const suwayomi = new URL(SUWAYOMI);
-    return candidate.protocol.startsWith('http');
+    if (!['http:', 'https:'].includes(candidate.protocol)) return false;
+    const allowedHosts = new Set([suwayomi.hostname, '127.0.0.1', 'localhost', '::1', '[::1]']);
+    return allowedHosts.has(candidate.hostname);
   } catch {
     return false;
   }
@@ -246,12 +250,11 @@ app.get('/api/img', async (req, res) => {
   for (let i = 0; i < 2; i++) {
     try {
       const r = await http.get(url, { responseType: 'arraybuffer', timeout: 30000 });
-      res.set('Content-Type', r.headers['content-type'] || 'image/jpeg');
       res.set('Cache-Control', 'public, max-age=86400');
-    // Set proper Content-Type based on upstream header
-    const contentType = r.headers['content-type'] || 'application/octet-stream';
-    res.set('Content-Type', contentType);
-    return res.send(Buffer.from(r.data));
+      // Preserve the upstream image type instead of forcing a jpeg default.
+      const contentType = r.headers['content-type'] || 'application/octet-stream';
+      res.set('Content-Type', contentType);
+      return res.send(Buffer.from(r.data));
     } catch (e) {
       if (i === 1) {
         console.error('[img-proxy] Final failure:', url, e.message);
@@ -361,24 +364,34 @@ app.get('/api/source/:sourceId/search', async (req, res) => {
   const { sourceId } = req.params;
   const q = req.query.q || '';
   const page = Math.max(1, parseInt(req.query.page) || 1);
-  const cacheKey = `search-${sourceId}-${q}-${page}`;
+  const sort = String(req.query.sort || 'latest').toLowerCase();
+  const status = String(req.query.status || 'all').toLowerCase();
+  const contentType = String(req.query.contentType || 'all').toLowerCase();
+  const tags = String(req.query.tags || '').trim().toLowerCase();
+  const cacheKey = `search-${sourceId}-${q}-${page}-${sort}-${status}-${contentType}-${tags}`;
   try {
     const cached = caches.search.get(cacheKey);
     if (cached) return res.json(cached);
-    const data = await gql(
-      `mutation($src:LongString!, $type:FetchSourceMangaType!, $q:String, $page:Int!) {
-        fetchSourceManga(input:{source:$src, type:$type, query:$q, page:$page}) {
-          mangas { id title thumbnailUrl }
-          hasNextPage
-        }
-      }`,
-      { src: sourceId, type: q ? 'SEARCH' : 'POPULAR', q, page }
-    );
+    const queryDoc = `mutation($src:LongString!, $type:FetchSourceMangaType!, $q:String, $page:Int!) {
+      fetchSourceManga(input:{source:$src, type:$type, query:$q, page:$page}) {
+        mangas { id title thumbnailUrl }
+        hasNextPage
+      }
+    }`;
+    const requestedType = q ? 'SEARCH' : (sort === 'popular' ? 'POPULAR' : 'LATEST');
+    let data;
+    try {
+      data = await gql(queryDoc, { src: sourceId, type: requestedType, q, page });
+    } catch (error) {
+      if (q || requestedType === 'POPULAR') throw error;
+      data = await gql(queryDoc, { src: sourceId, type: 'POPULAR', q, page });
+    }
     if (!data?.fetchSourceManga) throw new Error('Source failed to return results');
     const { mangas = [], hasNextPage = false } = data.fetchSourceManga;
     const result = {
       results: mangas.map(m => ({ id: String(m.id), title: m.title, cover: fixUrl(m.thumbnailUrl) })),
       hasNextPage,
+      requestedFilters: { sort, status, contentType, tags },
     };
     caches.search.set(cacheKey, result);
     res.json(result);
@@ -387,9 +400,10 @@ app.get('/api/source/:sourceId/search', async (req, res) => {
 
 // ── Manga Detail ───────────────────────────────────────────────────────────
 app.get('/api/source/:sourceId/manga/:mangaId', async (req, res) => {
+  const sourceId = String(req.params.sourceId);
   const mangaId = parseInt(req.params.mangaId);
   if (isNaN(mangaId)) return res.status(400).json({ error: 'Invalid ID' });
-  const cacheKey = `manga-${mangaId}`;
+  const cacheKey = getMangaCacheKey(sourceId, mangaId);
   try {
     const cached = caches.manga.get(cacheKey);
     if (cached) return res.json(cached);
@@ -436,9 +450,10 @@ app.get('/api/source/:sourceId/manga/:mangaId', async (req, res) => {
 
 // ── Chapter Pages ──────────────────────────────────────────────────────────
 app.get('/api/source/:sourceId/chapter/:chapterId', async (req, res) => {
+  const sourceId = String(req.params.sourceId);
   const chapterId = parseInt(req.params.chapterId);
   if (isNaN(chapterId)) return res.status(400).json({ error: 'Invalid chapter ID' });
-  const cacheKey = `pages-${chapterId}`;
+  const cacheKey = getChapterPagesCacheKey(sourceId, chapterId);
   try {
     const cached = caches.pages.get(cacheKey);
     if (cached) return res.json(cached);
@@ -482,13 +497,16 @@ function guessExt(url, ct) {
 }
 
 app.get('/api/source/:sourceId/chapter/:chapterId/download', async (req, res) => {
+  if (!archiver) {
     return res.status(501).json({ error: 'archiver not installed' });
+  }
+  const sourceId = String(req.params.sourceId);
   const chapterId = parseInt(req.params.chapterId);
   if (isNaN(chapterId)) return res.status(400).json({ error: 'Invalid chapter ID' });
   const { title = `chapter-${chapterId}` } = req.query;
   const safeName = String(title).replace(/[/\\?%*:|"<>]/g, '-');
   try {
-    let pages = caches.pages.get(`pages-${chapterId}`);
+    let pages = caches.pages.get(getChapterPagesCacheKey(sourceId, chapterId));
     if (!pages) {
       const data = await gql(`mutation($id:Int!){ fetchChapterPages(input:{chapterId:$id}){ pages } }`, { id: chapterId });
       pages = (data.fetchChapterPages?.pages || []).map(p => fixUrl(p));

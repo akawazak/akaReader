@@ -303,10 +303,12 @@ export const Reader = memo(({
   const markedReadRef = useRef(new Set());
   const pendingPersistRef = useRef(null);
   const persistTimerRef = useRef(null);
+  const cooldownTimerRef = useRef(null);
   const initialPositionKeyRef = useRef(null);
   const suppressNextTapRef = useRef(false);
   const suppressTapTimerRef = useRef(null);
   const fetchSentinelRef = useRef(null);
+  const nextChapterAbortRef = useRef(null);
 
   const modeRef = useLatest(mode);
   const pageRef = useLatest(page);
@@ -314,6 +316,7 @@ export const Reader = memo(({
   const directionRef = useLatest(direction);
   const panelOpenRef = useLatest(panelOpen);
   const showReceiptRef = useLatest(showReceipt);
+  const hasPrevRef = useLatest(hasPrev);
   
   const loadingCooldownRef = useRef(false);
   const loadingNextRef = useRef(false);
@@ -371,6 +374,7 @@ export const Reader = memo(({
   const persistPage = useCallback((pInfo) => {
     if (!pInfo || !updateProgress) return;
     const { chapter, localIndex } = pInfo;
+    onPageChange?.(localIndex, pInfo);
     
     // Debounce progress updates to avoid hammering the backend
     clearTimeout(persistTimerRef.current);
@@ -378,11 +382,11 @@ export const Reader = memo(({
       updateProgress(mangaId, chapter.id, chapter.number, localIndex, mangaSourceId);
     }, 1500);
 
-    if (localIndex >= chapter.total - 1 && !markedReadRef.current.has(chapter.id)) {
+    if (localIndex >= pInfo.total - 1 && !markedReadRef.current.has(chapter.id)) {
       markChapterRead?.(mangaId, chapter.id, true, mangaSourceId);
       markedReadRef.current.add(chapter.id);
     }
-  }, [mangaId, mangaSourceId, updateProgress, markChapterRead]);
+  }, [mangaId, mangaSourceId, updateProgress, markChapterRead, onPageChange]);
 
   const jumpToPage = useCallback((idx, smooth = true) => {
     const len = allPagesRef.current.length;
@@ -448,9 +452,13 @@ export const Reader = memo(({
     loadingCooldownRef.current = true;
     setNextChapterError('');
     setIsFetchingNext(true);
+    nextChapterAbortRef.current?.abort();
+    const ac = new AbortController();
+    nextChapterAbortRef.current = ac;
 
     try {
-      const res = await fetchNextChapter(lastChapterId);
+      const res = await fetchNextChapter(lastChapterId, ac.signal);
+      if (ac.signal.aborted) return null;
       // If the fetch returned an error but we have next, don't kill hasNext forever
       if (res?.error) {
         setNextChapterError(res.error);
@@ -470,12 +478,17 @@ export const Reader = memo(({
       setLocalHasNext(false);
       return null;
     } catch (e) {
+      if (ac.signal.aborted) return null;
       setNextChapterError(e?.message || 'Failed to load the next chapter.');
       return null;
     } finally {
+      if (nextChapterAbortRef.current === ac) {
+        nextChapterAbortRef.current = null;
+      }
       loadingNextRef.current = false;
       setIsFetchingNext(false);
-      setTimeout(() => { loadingCooldownRef.current = false; }, 1000);
+      clearTimeout(cooldownTimerRef.current);
+      cooldownTimerRef.current = setTimeout(() => { loadingCooldownRef.current = false; }, 1000);
     }
   }, [fetchNextChapter, hasNextRef, loadedChaptersRef, pagesLenRef, allPagesRef]);
 
@@ -535,6 +548,35 @@ export const Reader = memo(({
     root.querySelectorAll('[data-page]').forEach(el => obs.observe(el));
     return () => obs.disconnect();
   }, [mode, persistPage, allPagesRef, allPages.length]);
+
+  useEffect(() => {
+    if (!autoScroll || mode === 'paged') return undefined;
+    const root = containerRef.current;
+    if (!root) return undefined;
+
+    let rafId = 0;
+    let lastTs = 0;
+    const pixelsPerSecond = mode === 'webtoon' ? 78 : 58;
+
+    const tick = (ts) => {
+      if (!lastTs) lastTs = ts;
+      const delta = ts - lastTs;
+      lastTs = ts;
+
+      if (!panelOpenRef.current && !showReceiptRef.current) {
+        root.scrollTop += (pixelsPerSecond * delta) / 1000;
+        const reachedBottom = root.scrollTop + root.clientHeight >= root.scrollHeight - 2;
+        if (reachedBottom && hasNextRef.current) {
+          loadNextChapter();
+        }
+      }
+
+      rafId = window.requestAnimationFrame(tick);
+    };
+
+    rafId = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(rafId);
+  }, [autoScroll, mode, loadNextChapter, hasNextRef, panelOpenRef, showReceiptRef]);
 
   // ─ Auto-load next chapter observer ─
   useEffect(() => {
@@ -660,7 +702,13 @@ export const Reader = memo(({
   }, []);
 
   // ─ Tap handling ─
-  useEffect(() => () => clearTimeout(suppressTapTimerRef.current), []);
+  useEffect(() => () => {
+    nextChapterAbortRef.current?.abort();
+    clearTimeout(suppressTapTimerRef.current);
+    clearTimeout(uiTimerRef.current);
+    clearTimeout(persistTimerRef.current);
+    clearTimeout(cooldownTimerRef.current);
+  }, []);
 
   const suppressNextTap = useCallback(() => {
     suppressNextTapRef.current = true;
