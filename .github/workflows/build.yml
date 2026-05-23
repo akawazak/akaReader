@@ -16,11 +16,7 @@ env:
 
 jobs:
   build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
@@ -59,42 +55,21 @@ jobs:
       # No Java, no JAR download needed anymore
 
       - name: Package (Windows)
-        if: matrix.os == 'windows-latest'
         working-directory: manga-nexus
         shell: bash
         run: npm run dist -- --win --publish=never
         env:
           ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: true
 
-      - name: Package (macOS)
-        if: matrix.os == 'macos-latest'
-        working-directory: manga-nexus
-        run: npm run dist -- --mac --publish=never
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: false
-          ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: true
-
-      - name: Package (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        working-directory: manga-nexus
-        run: npm run dist -- --linux --publish=never
-        env:
-          ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: true
-
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.os }}
+          name: dist-windows
           path: |
             manga-nexus/dist-electron/*.exe
             manga-nexus/dist-electron/*.exe.blockmap
-            manga-nexus/dist-electron/*.dmg
-            manga-nexus/dist-electron/*.dmg.blockmap
             manga-nexus/dist-electron/*.zip
             manga-nexus/dist-electron/*.zip.blockmap
-            manga-nexus/dist-electron/*.AppImage
-            manga-nexus/dist-electron/*.AppImage.blockmap
-            manga-nexus/dist-electron/*.deb
             manga-nexus/dist-electron/*.yml
           if-no-files-found: ignore
 
