@@ -91,7 +91,7 @@ akareader/
 
 - `manga-nexus/package.json`
   Frontend/dev/build scripts plus Electron Builder config.
-  Packaging is intentionally Windows-only at this point.
+  Packaging is intentionally Windows-only at this point and uses one-click NSIS for smoother updates.
 - `manga-nexus/electron-main.js`
   Main-process orchestration:
   - app startup

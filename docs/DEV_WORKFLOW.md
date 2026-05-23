@@ -74,6 +74,8 @@ npm run dist
 
 Runs the Windows packaging flow used by the repo today.
 
+Packaged Windows builds use a one-click NSIS installer. `electron-updater` downloads updates in the background; downloaded updates install on app quit unless the user chooses `Restart now`.
+
 ## Testing Reality
 
 Current state:

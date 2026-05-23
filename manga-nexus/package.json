@@ -1,6 +1,6 @@
 {
   "name": "akareader",
-  "version": "2.0.37",
+  "version": "2.0.38",
   "description": "Manga reader powered by Suwayomi",
   "main": "electron-main.js",
   "author": {
@@ -90,8 +90,8 @@
     },
     "nsis": {
       "artifactName": "akaReader-Setup-${version}.${ext}",
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
+      "oneClick": true,
+      "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     },

@@ -59,6 +59,14 @@ Verification run:
 - Change: extension search/filter/sort/display-count state moved out of `App.jsx`; extension rows now use deferred search input, incremental rendering, async image decoding, and `content-visibility`.
 - Result: the largest list view is easier to reason about and should feel lighter with large extension catalogs.
 
+### Improved 2026-05-23: Update flow stays interactive by default
+
+- Files:
+  - `manga-nexus/src/App.jsx`
+  - `manga-nexus/package.json`
+- Change: downloaded updates now present as "installs when you close the app" with an optional `Restart now` button, and the NSIS installer is one-click.
+- Result: users can keep reading after an update downloads and should avoid a manual setup wizard during online update installs.
+
 ### Fixed 2026-05-23: Reader previous-chapter shortcut crash
 
 - File: `manga-nexus/src/components/reader/Reader.jsx`

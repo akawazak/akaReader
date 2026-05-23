@@ -75,6 +75,10 @@ The preload contract in `manga-nexus/preload.js` gives the renderer access to:
 - data directory/runtime info
 - packaged app updater actions
 
+## App Update Flow
+
+Packaged builds use `electron-updater` from the Electron main process. Updates download in the background while the renderer stays interactive. Once downloaded, the banner tells the user the update will install when the app is closed; an explicit `Restart now` button is still available for immediate install. Windows packaging uses a one-click NSIS installer so online update installs avoid a manual setup wizard.
+
 ## State Management
 
 There is no external state library. State is centralized in React.

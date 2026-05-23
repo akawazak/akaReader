@@ -4610,15 +4610,13 @@ const App = memo(() => {
         </div>
       )}
       {updateAvailable && (
-        <div className="anim-fadeIn" style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 900, background: 'linear-gradient(90deg,rgba(234,179,8,0.95),rgba(251,191,36,0.95))', backdropFilter: 'blur(12px)', padding: '10px 20px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+        <div className="anim-fadeIn" style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 900, background: 'linear-gradient(90deg,rgba(234,179,8,0.95),rgba(251,191,36,0.95))', backdropFilter: 'blur(12px)', padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, pointerEvents: 'auto' }}>
           <BellRing size={16} style={{ color: '#78350f' }} />
-          <span style={{ fontSize: 13, fontWeight: 800, color: '#78350f', display: 'flex', alignItems: 'center', gap: 8 }}>
-            {updateDownloaded ? `akaReader v${updateAvailable} is ready` : updateDownloadPct ? `Downloading akaReader v${updateAvailable} in the background (${updateDownloadPct}%)` : `akaReader v${updateAvailable} is downloading in the background`}
+          <span style={{ fontSize: 13, fontWeight: 800, color: '#78350f', display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {updateDownloaded ? `akaReader v${updateAvailable} is ready and will install when you close the app` : updateDownloadPct ? `Downloading akaReader v${updateAvailable} in the background (${updateDownloadPct}%)` : `akaReader v${updateAvailable} is downloading in the background`}
           </span>
-          {updateDownloaded ? (
-            <button onClick={() => window.electronAPI?.installAppUpdate?.()} style={{ background: '#78350f', color: '#fff7ed', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 800, cursor: 'pointer' }}>Restart to update</button>
-          ) : (
-            <button onClick={() => window.electronAPI?.downloadAppUpdate?.()} disabled={!!updateDownloadPct} style={{ background: '#78350f', color: '#fff7ed', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 800, cursor: updateDownloadPct ? 'default' : 'pointer', opacity: updateDownloadPct ? 0.75 : 1 }}>{updateDownloadPct ? 'Downloading' : 'Download now'}</button>
+          {updateDownloaded && (
+            <button onClick={() => window.electronAPI?.installAppUpdate?.()} style={{ background: '#78350f', color: '#fff7ed', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 800, cursor: 'pointer', flexShrink: 0 }}>Restart now</button>
           )}
           <a href={`https://github.com/akawazak/akareader/releases/tag/v${updateAvailable}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, fontWeight: 700, color: '#78350f', textDecoration: 'underline' }}>Release notes</a>
           <button onClick={() => setUpdateAvailable(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: '#78350f', display: 'flex' }}><X size={16} /></button>
