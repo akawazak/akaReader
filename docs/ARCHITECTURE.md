@@ -73,6 +73,7 @@ The preload contract in `manga-nexus/preload.js` gives the renderer access to:
 - service installation status
 - current desktop platform so Windows-only UI can stay hidden elsewhere
 - data directory/runtime info
+- source verification popups for sites that require a browser challenge
 - packaged app updater actions
 
 ## App Update Flow
@@ -209,6 +210,18 @@ The extension list is rendered by `ExtensionsTab.jsx`, which owns its search/fil
 5. `App.jsx` revokes old blob URLs when pages change or the reader flow unmounts.
 
 Important note: offline cache storage is renderer-managed, not backend-managed.
+
+## Source Verification Flow
+
+Some source websites require a browser challenge before Suwayomi can fetch metadata or pages. akaReader treats this as a user-driven verification step rather than a silent bypass:
+
+1. The backend returns the source/Cloudflare/challenge error to the renderer.
+2. The renderer shows a `Verify Source` action on manga or chapter failures.
+3. Electron opens the source URL in a dedicated verification `BrowserWindow`.
+4. The app waits until the user closes that window.
+5. The renderer retries the manga/chapter request.
+
+The app also avoids applying its local Content Security Policy to external verification pages so challenge scripts can run normally.
 
 ## Navigation And Routing
 

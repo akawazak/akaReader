@@ -72,6 +72,38 @@ const directSuwayomiAsset = (url) => {
 };
 
 const getDownloadKey = (mangaKey, chapterId) => `${mangaKey}___${chapterId}`;
+const DOWNLOAD_PAGE_CONCURRENCY = 4;
+const UPDATE_SCAN_CONCURRENCY = 4;
+
+async function mapWithConcurrency(items, limit, task) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(limit, items.length);
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex++;
+      results[currentIndex] = await task(items[currentIndex], currentIndex);
+    }
+  }));
+
+  return results;
+}
+
+async function fetchPageBlobs(urls, signal, onProgress) {
+  let completed = 0;
+  const results = await mapWithConcurrency(urls, DOWNLOAD_PAGE_CONCURRENCY, async (url, index) => {
+    if (signal.aborted) throw new Error('Download cancelled');
+    const response = await fetch(url, { signal });
+    if (!response.ok) throw new Error(`Page failed: ${response.status}`);
+    const blob = await response.blob();
+    completed++;
+    onProgress(completed, urls.length);
+    return { url, blob, index };
+  });
+
+  return results.sort((a, b) => a.index - b.index).map(({ url, blob }) => ({ url, blob }));
+}
 
 const LANGUAGES = [
   { value: 'all', label: 'All Languages' },
@@ -158,6 +190,11 @@ const calculateStreak = (history) => {
     else break;
   }
   return streak;
+};
+
+const isSourceVerificationError = (message = '') => {
+  const text = String(message).toLowerCase();
+  return text.includes('cloudflare') || text.includes('captcha') || text.includes('challenge') || text.includes('verification');
 };
 
 // ==================== GLOBAL STYLES ====================
@@ -841,6 +878,21 @@ const DataProvider = memo(({ children }) => {
   }, [fetchJSON, progress, library, mangaCategories, getMangaKey]);
 
   const updateToastedRef = useRef(false);
+  const cancelDownload = useCallback((id) => {
+    setDownloadQueue(prev => prev.map(d => {
+      if (d.id !== id) return d;
+      if (d.status === 'downloading') dlAbortRef.current?.abort();
+      return (d.status === 'pending' || d.status === 'downloading') ? { ...d, status: 'cancelled' } : d;
+    }));
+  }, []);
+
+  const cancelActiveDownloads = useCallback(() => {
+    dlAbortRef.current?.abort();
+    setDownloadQueue(prev => prev.map(d =>
+      (d.status === 'pending' || d.status === 'downloading') ? { ...d, status: 'cancelled' } : d
+    ));
+  }, []);
+
   const queueChaptersForDownload = useCallback((chapters, mangaId, mangaTitle, sourceId) => {
     const sorted = [...chapters].sort((a, b) => parseFloat(a.number) - parseFloat(b.number));
     const mangaKey = getMangaKey(mangaId, sourceId);
@@ -877,24 +929,12 @@ const DataProvider = memo(({ children }) => {
         const urls = Array.isArray(imgs) ? imgs : [];
         if (!urls.length) throw new Error('No pages found');
         setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, pagesTotal: urls.length } : d));
-        let done = 0;
-        const blobs = [];
-        for (const url of urls) {
-          if (ac.signal.aborted) {
-            setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, status: 'cancelled' } : d));
-            return;
-          }
-          const r = await fetch(url, { signal: ac.signal });
-          if (!r.ok) throw new Error(`Page failed: ${r.status}`);
-          const blob = await r.blob();
-          blobs.push({ url, blob });
-          done++;
+        const blobs = await fetchPageBlobs(urls, ac.signal, (done) => {
           const pct = Math.round(done / urls.length * 100);
           setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, progress: pct, pagesLoaded: done } : d));
-        }
+        });
         await saveChapterBlobs(getMangaKey(pending.mangaId, pending.sourceId), pending.chapterId, blobs);
         await refreshDownloads();
-        // but for now we'll assume saveChapterBlobs handles the DB.
         setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, status: 'done', progress: 100 } : d));
         toastRef.current?.(`Ch. ${pending.chapterNum} of "${pending.mangaTitle}" saved`, 'success');
       } catch (e) {
@@ -910,33 +950,36 @@ const DataProvider = memo(({ children }) => {
         dlProcessingRef.current = false;
       }
     })();
-  }, [downloadQueue, fetchJSON]);
+  }, [downloadQueue, fetchJSON, getMangaKey, refreshDownloads]);
   useEffect(() => () => dlAbortRef.current?.abort(), []);
 
   const checkForUpdates = useCallback(async () => {
     if (library.length === 0) return;
     setCheckingUpdates(true);
-    const newUpdates = [];
-    for (const manga of library) {
-      try {
-        const source = sources[manga.sourceId];
-        if (!source) continue;
-        const data = await fetchJSON(`/source/${source.id}/manga/${manga.id}`);
-        if (data.error) continue;
-        const currentTotal = data.totalChapters;
-        const mKey = getMangaKey(manga.id, manga.sourceId);
-        const savedProgress = progress[mKey];
-        const lastReadChapter = savedProgress ? parseInt(savedProgress.chapterNum) : 0;
-        if (currentTotal > lastReadChapter) {
-          newUpdates.push({ ...manga, newChapters: currentTotal - lastReadChapter });
+    try {
+      const scanResults = await mapWithConcurrency(library, UPDATE_SCAN_CONCURRENCY, async (manga) => {
+        try {
+          const source = sources[manga.sourceId];
+          if (!source) return null;
+          const data = await fetchJSON(`/source/${source.id}/manga/${manga.id}`);
+          if (data.error) return null;
+          const currentTotal = data.totalChapters;
+          const mKey = getMangaKey(manga.id, manga.sourceId);
+          const savedProgress = progress[mKey];
+          const lastReadChapter = savedProgress ? parseInt(savedProgress.chapterNum) : 0;
+          if (currentTotal > lastReadChapter) {
+            return { ...manga, newChapters: currentTotal - lastReadChapter };
+          }
+        } catch (e) {
+          // Ignore individual source failures so one broken extension does not block the update scan.
         }
-      } catch (e) {
-        // Ignore individual source failures so one broken extension does not block the update scan.
-      }
+        return null;
+      });
+      setUpdates(scanResults.filter(Boolean));
+    } finally {
+      setCheckingUpdates(false);
     }
-    setUpdates(newUpdates);
-    setCheckingUpdates(false);
-  }, [library, sources, fetchJSON, progress]);
+  }, [library, sources, fetchJSON, progress, getMangaKey]);
 
   useEffect(() => {
     if (library.length > 0 && backendOnline) {
@@ -979,11 +1022,11 @@ const DataProvider = memo(({ children }) => {
     installExt, uninstallExt, updateExt,
     toggleLibrary, setCategory, addToHistory, removeFromHistory, clearHistory, removeMangaCompletely,
     updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates, handleMigrate,
-    queueChaptersForDownload,
+    queueChaptersForDownload, cancelDownload, cancelActiveDownloads,
     addCategory, removeCategory, categories,
     getMangaKey, downloadedKeys, refreshDownloads,
     inLibrary: (id, sourceId) => library.some(m => String(m.id) === String(id) && (sourceId ? String(m.sourceId) === String(sourceId) : true))
-  }), [backendOnline, sources, extensions, library, history, progress, mangaCategories, installing, readingTime, settings, updates, checkingUpdates, readChapters, suwayomiReady, setSuwayomiReady, downloadQueue, overlayHidden, fetchJSON, checkHealth, fetchSources, fetchExtensions, installExt, uninstallExt, updateExt, toggleLibrary, setCategory, addToHistory, removeFromHistory, removeMangaCompletely, updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates, handleMigrate, addCategory, removeCategory, categories, downloadedKeys, refreshDownloads]);
+  }), [backendOnline, sources, extensions, library, history, progress, mangaCategories, installing, readingTime, settings, updates, checkingUpdates, readChapters, suwayomiReady, setSuwayomiReady, downloadQueue, overlayHidden, fetchJSON, checkHealth, fetchSources, fetchExtensions, installExt, uninstallExt, updateExt, toggleLibrary, setCategory, addToHistory, removeFromHistory, removeMangaCompletely, updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates, handleMigrate, queueChaptersForDownload, cancelDownload, cancelActiveDownloads, addCategory, removeCategory, categories, downloadedKeys, refreshDownloads]);
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 });
@@ -3859,7 +3902,7 @@ const App = memo(() => {
     installExt, uninstallExt, updateExt, toggleLibrary, setCategory,
     addToHistory, removeFromHistory, clearHistory, removeMangaCompletely, updateProgress, inLibrary,
     checkForUpdates, addReadingTime, updateSetting, handleMigrate,
-    queueChaptersForDownload,
+    queueChaptersForDownload, cancelDownload, cancelActiveDownloads,
     suwayomiReady, setSuwayomiReady,
     categories, getMangaKey,
   } = data;
@@ -4017,6 +4060,7 @@ const App = memo(() => {
   const [readerPage, setReaderPage] = useState(0);
   const chapterAbortRef = useRef(null);
   const pagesRef = useRef([]);
+  const [sourceVerifying, setSourceVerifying] = useState(false);
 
   const [activeCategory, setActiveCategory] = useState('all');
   const [libraryView, setLibraryView] = useState(() => settings?.libraryView || 'grid');
@@ -4045,6 +4089,28 @@ const App = memo(() => {
   }, []);
 
   const debouncedSearch = useMemo(() => debounce(q => setQuery(q), CONFIG.DEBOUNCE_DELAY), []);
+
+  const verificationUrl = mangaDetail?.url || selectedManga?.url || '';
+  const verifySourceThenRetry = useCallback(async (retry) => {
+    if (!verificationUrl) {
+      toast('No source page is available for verification.', 'warning');
+      return;
+    }
+    if (!window.electronAPI?.verifySourceUrl) {
+      window.electronAPI?.openExternal?.(verificationUrl);
+      toast('Solve the source challenge, then retry.', 'info');
+      return;
+    }
+    setSourceVerifying(true);
+    const result = await window.electronAPI.verifySourceUrl(verificationUrl);
+    setSourceVerifying(false);
+    if (result?.ok) {
+      toast('Verification window closed. Retrying...', 'info');
+      retry?.();
+    } else {
+      toast(result?.error || 'Could not open verification window.', 'error');
+    }
+  }, [verificationUrl, toast]);
 
   const buildFilterParams = useCallback((q, page, filters) => {
     const params = new URLSearchParams({ q, page });
@@ -4142,8 +4208,8 @@ const App = memo(() => {
         const parsed = JSON.parse(msg);
         if (parsed.error) msg = parsed.error;
       } catch { }
-      if (msg.toLowerCase().includes('cloudflare')) {
-        msg = 'Cloudflare bypass required. Please open this manga in your browser to solve the challenge.';
+      if (isSourceVerificationError(msg)) {
+        msg = 'This source needs browser verification before akaReader can load it.';
       }
       setMangaError(msg);
       toast('Failed to load manga', 'error');
@@ -4186,7 +4252,10 @@ const App = memo(() => {
       updateProgress(mId, chapter.id, chapter.number, startPage, srcId);
     } catch (e) {
       if (ac.signal.aborted) return;
-      const message = e?.message || 'Failed to load chapter.';
+      let message = e?.message || 'Failed to load chapter.';
+      if (isSourceVerificationError(message)) {
+        message = 'This source needs browser verification before akaReader can load the chapter.';
+      }
       setChapterError(message);
       toast(`Failed to load chapter: ${message}`, 'error');
     } finally {
@@ -4554,6 +4623,16 @@ const App = memo(() => {
           {currentChapter && (
             <Btn variant="outline" onClick={() => openChapter(currentChapter, activeSource?.id || selectedManga?.sourceId, mangaDetail?.id || selectedManga?.id, readerPage)} icon={RefreshCw}>
               Retry
+            </Btn>
+          )}
+          {isSourceVerificationError(chapterError) && (
+            <Btn
+              variant="outline"
+              disabled={sourceVerifying}
+              onClick={() => verifySourceThenRetry(() => currentChapter && openChapter(currentChapter, activeSource?.id || selectedManga?.sourceId, mangaDetail?.id || selectedManga?.id, readerPage))}
+              icon={ExternalLink}
+            >
+              {sourceVerifying ? 'Waiting...' : 'Verify Source'}
             </Btn>
           )}
         </div>
@@ -4929,9 +5008,14 @@ const App = memo(() => {
                     action={
                       <div style={{ display: 'flex', gap: 10 }}>
                         <Btn onClick={() => openManga(selectedManga)}>Retry</Btn>
-                        {mangaError.toLowerCase().includes('cloudflare') && (
-                          <Btn variant="outline" onClick={() => window.electronAPI.openExternal(mangaDetail?.url || selectedManga?.url)}>
-                            Solve in Browser
+                        {isSourceVerificationError(mangaError) && (
+                          <Btn
+                            variant="outline"
+                            disabled={sourceVerifying}
+                            onClick={() => verifySourceThenRetry(() => openManga(selectedManga))}
+                            icon={ExternalLink}
+                          >
+                            {sourceVerifying ? 'Waiting...' : 'Verify Source'}
                           </Btn>
                         )}
                       </div>
@@ -5493,20 +5577,8 @@ const App = memo(() => {
             onClear={() => setDownloadQueue(prev => prev.filter(d => d.status === 'pending' || d.status === 'downloading'))}
             onRemove={id => setDownloadQueue(prev => prev.filter(d => d.id !== id))}
             onRetry={id => setDownloadQueue(prev => prev.map(d => d.id === id ? { ...d, status: 'pending', progress: 0, pagesLoaded: 0, pagesTotal: 0, error: null } : d))}
-            onCancel={id => {
-              setDownloadQueue(prev => prev.map(d => {
-                if (d.id !== id) return d;
-                if (d.status === 'downloading') { dlAbortRef.current?.abort(); return { ...d, status: 'cancelled' }; }
-                if (d.status === 'pending') return { ...d, status: 'cancelled' };
-                return d;
-              }));
-            }}
-            onCancelAll={() => {
-              dlAbortRef.current?.abort();
-              setDownloadQueue(prev => prev.map(d =>
-                (d.status === 'pending' || d.status === 'downloading') ? { ...d, status: 'cancelled' } : d
-              ));
-            }}
+            onCancel={cancelDownload}
+            onCancelAll={cancelActiveDownloads}
           />}
           {tab === 'settings' && <SettingsPage />}
           {migrateManga && <SourceMigrationModal manga={migrateManga} sources={sources} onClose={() => setMigrateManga(null)} onMigrate={handleMigrate} />}

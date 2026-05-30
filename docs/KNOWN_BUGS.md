@@ -10,7 +10,7 @@ Severity labels:
 ## Audit Notes
 
 Last deep scan: 2026-05-23.
-Last stabilization pass: 2026-05-23.
+Last stabilization pass: 2026-05-30.
 
 Verification run:
 
@@ -19,7 +19,10 @@ Verification run:
 - `node --check manga-nexus/preload.js` passed.
 - `npm.cmd run build` passed after the reader/app fixes.
 - `npm.cmd run check:hook-order` passed after the reader initialization-order fix.
-- `npx.cmd eslint .` could not run locally because `eslint` is not installed in `manga-nexus/node_modules`; `npx` attempted a registry fetch.
+- `npm.cmd run lint -- --quiet` passed after local ESLint dependencies and config scope were added.
+- `npm.cmd run validate` passed after release validation scripting was added.
+- `npm.cmd run dist -- --publish=never` produced Windows NSIS and portable artifacts.
+- `npm.cmd audit --omit=dev --audit-level=high` passed for both `manga-nexus/` and `backend/`.
 
 ## Recently Fixed
 
@@ -162,6 +165,59 @@ Verification run:
 - Fix: the browse filter bar now exposes only the supported browse mode (`latest` / `popular`) and the backend cache/request path follows that mode.
 - Result: the app no longer presents status/content-type/tag filters that it does not truly enforce.
 
+### Improved 2026-05-30: Concurrent offline chapter downloads
+
+- File: `manga-nexus/src/App.jsx`
+- Change: offline page fetching now uses bounded concurrency instead of serial page requests.
+- Result: large chapter downloads should finish faster while still avoiding unbounded network work.
+
+### Improved 2026-05-30: Concurrent library update scans
+
+- File: `manga-nexus/src/App.jsx`
+- Change: update checks now scan the library with a small concurrency limit.
+- Result: large libraries no longer wait on one manga request at a time.
+
+### Fixed 2026-05-30: Download cancellation references live abort controller
+
+- File: `manga-nexus/src/App.jsx`
+- Fix: download cancellation now goes through DataProvider actions instead of referencing an out-of-scope abort ref from the App component.
+- Result: cancel actions no longer risk runtime `dlAbortRef is not defined` crashes.
+
+### Improved 2026-05-30: Source verification popup
+
+- Files:
+  - `manga-nexus/electron-main.js`
+  - `manga-nexus/preload.js`
+  - `manga-nexus/src/App.jsx`
+  - `backend/server.js`
+- Change: source search results now carry source URLs, Cloudflare/challenge-style failures show a `Verify Source` action, and Electron opens a dedicated verification window before retrying.
+- Result: users can complete source verification inside the app instead of being sent to an unrelated browser session.
+
+### Fixed 2026-05-30: Reproducible local lint gate
+
+- Files:
+  - `manga-nexus/package.json`
+  - `manga-nexus/package-lock.json`
+  - `manga-nexus/eslint.config.js`
+- Fix: installed the ESLint packages the config already referenced and added `npm run lint`.
+- Result: `npm run lint -- --quiet` can run locally without `npx` fetching missing packages.
+
+### Improved 2026-05-30: Publishing workflow and checklist
+
+- Files:
+  - `.github/workflows/build.yml`
+  - `docs/PUBLISHING.md`
+  - `README.md`
+  - `PRIVACY.md`
+- Change: CI now installs with `npm ci`, validates the renderer before packaging, fails tag releases if the tag version and package version disagree, and documents the manual release checklist.
+- Result: public release builds are less likely to ship with stale dependencies, skipped validation, or unclear user-facing expectations.
+
+### Fixed 2026-05-30: Backend production dependency audit
+
+- File: `backend/package-lock.json`
+- Fix: refreshed the backend lockfile with `npm audit fix`.
+- Result: backend production audit reports zero high-severity vulnerabilities.
+
 ### Fixed 2026-05-23: Stale extracted component set removed
 
 - Files:
@@ -173,19 +229,17 @@ Verification run:
 
 ## Risky Async / State Code
 
-### `P1` Download queue still processes pages serially in the renderer
+### `P2` Download queue still runs inside renderer lifecycle
 
 - Files:
-  - `manga-nexus/src/App.jsx:839-882`
+  - `manga-nexus/src/App.jsx`
 - Risk:
-  - serial fetches are slow for large chapters
-  - long-running downloads happen inside React lifecycle instead of a dedicated worker/process
+  - bounded concurrent downloads are faster now, but long-running download work still lives inside React rather than a dedicated worker/process
 
-### `P1` Update scan is sequential across the entire library
+### `P2` Update scan still uses chapter count heuristics
 
-- File: `manga-nexus/src/App.jsx:884-907`
+- File: `manga-nexus/src/App.jsx`
 - Risk:
-  - one-by-one network requests can make update checks slow on large libraries
   - scan compares `totalChapters` against last read `chapterNum`, which may be semantically wrong for non-linear numbering
 
 ### `P2` Online/offline service state comes from multiple channels
@@ -243,14 +297,6 @@ Verification run:
 - Impact: if Suwayomi IDs are global, this is harmless. If IDs collide or stale cache data exists, source-specific routes can return wrong data.
 
 ## Tooling / Workflow Problems
-
-### `P2` ESLint config exists but ESLint is not installed
-
-- Files:
-  - `manga-nexus/eslint.config.js`
-  - `manga-nexus/package.json`
-- Issue: running `npx.cmd eslint .` attempted to fetch `eslint` from the registry because there is no local `eslint` dependency.
-- Impact: linting is not reproducible offline and likely not part of the normal local workflow.
 
 ### `P3` Build can fail under restricted environments because Vite/esbuild reads outside the sandbox
 

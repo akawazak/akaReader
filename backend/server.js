@@ -372,7 +372,7 @@ app.get('/api/source/:sourceId/search', async (req, res) => {
     if (cached) return res.json(cached);
     const queryDoc = `mutation($src:LongString!, $type:FetchSourceMangaType!, $q:String, $page:Int!) {
       fetchSourceManga(input:{source:$src, type:$type, query:$q, page:$page}) {
-        mangas { id title thumbnailUrl }
+        mangas { id title thumbnailUrl url }
         hasNextPage
       }
     }`;
@@ -387,7 +387,7 @@ app.get('/api/source/:sourceId/search', async (req, res) => {
     if (!data?.fetchSourceManga) throw new Error('Source failed to return results');
     const { mangas = [], hasNextPage = false } = data.fetchSourceManga;
     const result = {
-      results: mangas.map(m => ({ id: String(m.id), title: m.title, cover: fixUrl(m.thumbnailUrl) })),
+      results: mangas.map(m => ({ id: String(m.id), title: m.title, cover: fixUrl(m.thumbnailUrl), url: m.url || '' })),
       hasNextPage,
       requestedFilters: { sort, status, contentType, tags },
     };

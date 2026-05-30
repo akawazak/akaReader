@@ -57,6 +57,18 @@ npm run build
 Builds the renderer into `manga-nexus/dist`.
 
 ```powershell
+npm run lint -- --quiet
+```
+
+Runs the local ESLint gate using checked-in dev dependencies. The full lint output still includes warnings for existing hook dependency and cleanup work, so use `--quiet` for the current release gate.
+
+```powershell
+npm run validate
+```
+
+Runs the current release validation bundle: lint release gate, hook-order check, and renderer build.
+
+```powershell
 npm run check:hook-order
 ```
 
@@ -74,6 +86,8 @@ npm run dist
 
 Runs the Windows packaging flow used by the repo today.
 
+See `docs/PUBLISHING.md` for the pre-tag release checklist.
+
 Packaged Windows builds use a one-click NSIS installer. `electron-updater` downloads updates in the background; downloaded updates install on app quit unless the user chooses `Restart now`.
 
 ## Testing Reality
@@ -82,7 +96,7 @@ Current state:
 
 - no formal unit/integration test suite is configured
 - no dedicated e2e runner is present
-- validation is primarily manual/runtime-driven
+- validation is primarily manual/runtime-driven, plus local lint/build/hook-order checks
 
 That means safe debugging depends on targeted manual verification.
 
@@ -161,6 +175,7 @@ Check:
 - Launch Electron and verify the startup screen progresses to online.
 - Open extensions, install/uninstall one extension, and confirm source refresh.
 - Browse a source, open a manga, and load a chapter.
+- For a source challenge, use the in-app verification popup, close it after the source page loads, then retry the manga/chapter.
 - Read forward until next-chapter prefetch triggers.
 - Download a chapter for offline use, reopen it offline, and verify IndexedDB-backed blob loading.
 - Cancel an in-progress download and confirm it stops instead of finishing in the background.

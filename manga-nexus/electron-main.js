@@ -18,6 +18,7 @@ try { autoUpdater = require('electron-updater').autoUpdater; } catch {}
 const isDev = !app.isPackaged;
 
 let mainWindow   = null;
+let verificationWindow = null;
 let tray         = null;
 let serverProc   = null;
 let suwayomiProc = null;
@@ -654,6 +655,53 @@ ipcMain.handle('get-java-path',     ()    => findJava());
 ipcMain.handle('get-jar-path',      ()    => jarPath);
 ipcMain.handle('get-suwayomi-config-path', () => suwayomiConfigPath);
 ipcMain.handle('open-external',      (_, url) => shell.openExternal(url));
+ipcMain.handle('verify-source-url', async (_, url) => {
+  let target;
+  try {
+    target = new URL(String(url || ''));
+  } catch {
+    return { ok: false, error: 'No verification URL is available for this source.' };
+  }
+  if (!['http:', 'https:'].includes(target.protocol)) {
+    return { ok: false, error: 'Unsupported verification URL.' };
+  }
+
+  if (verificationWindow && !verificationWindow.isDestroyed()) {
+    verificationWindow.focus();
+    return { ok: true, alreadyOpen: true };
+  }
+
+  return new Promise(resolve => {
+    verificationWindow = new BrowserWindow({
+      width: 1100,
+      height: 820,
+      minWidth: 720,
+      minHeight: 560,
+      parent: mainWindow || undefined,
+      modal: false,
+      title: 'Source verification',
+      backgroundColor: '#0a0a0f',
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        webSecurity: true,
+      },
+    });
+
+    verificationWindow.webContents.setWindowOpenHandler(({ url: nextUrl }) => {
+      verificationWindow.loadURL(nextUrl);
+      return { action: 'deny' };
+    });
+    verificationWindow.on('closed', () => {
+      verificationWindow = null;
+      resolve({ ok: true });
+    });
+    verificationWindow.loadURL(target.toString()).catch(e => {
+      if (verificationWindow && !verificationWindow.isDestroyed()) verificationWindow.close();
+      resolve({ ok: false, error: e?.message || 'Failed to open verification window.' });
+    });
+  });
+});
 
 ipcMain.handle('check-for-app-update', async () => {
   if (!autoUpdater) return { ok: false, error: 'Updater is not available in this build.' };
@@ -773,6 +821,15 @@ app.whenReady().then(async () => {
   // and prevent XSS — allows our localhost backend and Vite dev server
   const { session } = require('electron');
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    let requestUrl;
+    try { requestUrl = new URL(details.url); } catch {}
+    const isAppPage = details.url.startsWith('file:') ||
+      (requestUrl && ['localhost', '127.0.0.1', '[::1]'].includes(requestUrl.hostname));
+    if (!isAppPage) {
+      callback({ responseHeaders: details.responseHeaders });
+      return;
+    }
+
     callback({
       responseHeaders: {
         ...details.responseHeaders,

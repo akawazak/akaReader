@@ -10,10 +10,11 @@ akareader/
 |  |- ARCHITECTURE.md
 |  |- DEV_WORKFLOW.md
 |  |- FILE_MAP.md
-|  `- KNOWN_BUGS.md
+|  |- KNOWN_BUGS.md
+|  `- PUBLISHING.md
 |- .github/
 |  `- workflows/
-|     `- build-release.yml
+|     `- build.yml
 |- backend/
 |  |- package.json
 |  `- server.js
@@ -28,8 +29,7 @@ akareader/
    |  `- check-hook-order.mjs
    |- public/
    |  |- icon.ico
-   |  |- icon.icns
-   |  `- icon.png
+   |  `- vite.svg
    `- src/
       |- main.jsx
       |- App.jsx
@@ -64,13 +64,15 @@ akareader/
 - `AGENTS.md`
   AI-specific project memory and repo-handling instructions.
 - `README.md`
-  Currently minimal and not a reliable source of project truth.
+  Public project overview, development commands, packaging notes, and monetization guidance.
 - `docs/`
   Durable internal documentation for architecture, risks, workflows, and file ownership.
+- `docs/PUBLISHING.md`
+  Pre-tag release checklist and publishing notes.
 
 ### CI
 
-- `.github/workflows/build-release.yml`
+- `.github/workflows/build.yml`
   Windows-focused Electron packaging and GitHub release publishing.
 
 ### Backend
@@ -102,10 +104,11 @@ akareader/
   - Windows service installation
 - `manga-nexus/preload.js`
   Safe IPC bridge exposed to the renderer via `window.electronAPI`.
+  Includes `verifySourceUrl`, which opens a dedicated source verification popup from the main process.
 - `manga-nexus/vite.config.js`
   Vite config and `/api` proxy to the local backend in development.
 - `manga-nexus/eslint.config.js`
-  Current lint rules.
+  Current lint rules. The practical release gate is `npm run lint -- --quiet`.
 - `manga-nexus/index.html`
   Renderer HTML entry.
 - `manga-nexus/scripts/check-hook-order.mjs`
