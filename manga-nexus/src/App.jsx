@@ -3945,7 +3945,9 @@ const App = memo(() => {
   const [updateAvailable, setUpdateAvailable] = useState(null);
   const [updateDownloaded, setUpdateDownloaded] = useState(false);
   const [updateDownloadPct, setUpdateDownloadPct] = useState(null);
+  const [updateDownloading, setUpdateDownloading] = useState(false);
   const [releaseNotes, setReleaseNotes] = useState('');
+  const updateVersionRef = useRef(null); // tracks version even when banner is dismissed
   const [showReleaseNotes, setShowReleaseNotes] = useState(false);
 
   const [tab, setTab] = useState('home');
@@ -3987,8 +3989,10 @@ const App = memo(() => {
         } else if (status.startsWith('update-available:')) {
           const ver = status.split(':')[1];
           setUpdateAvailable(ver);
+          updateVersionRef.current = ver;
           setUpdateDownloaded(false);
           setUpdateDownloadPct(null);
+          setUpdateDownloading(false);
           setReleaseNotes('');
           // Fetch actual release notes from GitHub API
           fetch(`https://api.github.com/repos/akawazak/akareader/releases/tags/v${ver}`)
@@ -3997,14 +4001,22 @@ const App = memo(() => {
             .catch(() => {});
         } else if (status.startsWith('update-downloading:')) {
           setUpdateDownloadPct(status.split(':')[1]);
+          setUpdateDownloading(true);
         } else if (status === 'update-downloaded') {
           setUpdateDownloaded(true);
           setUpdateDownloadPct(null);
+          setUpdateDownloading(false);
+          // Re-show banner if user dismissed it while download was running
+          if (!updateAvailable && updateVersionRef.current) {
+            setUpdateAvailable(updateVersionRef.current);
+          }
         } else if (status === 'update-not-available') {
           setUpdateDownloadPct(null);
+          setUpdateDownloading(false);
         } else if (status.startsWith('update-error:')) {
           setUpdateDownloadPct(null);
           setUpdateDownloaded(false);
+          setUpdateDownloading(false);
         }
       });
     }
@@ -4738,6 +4750,8 @@ const App = memo(() => {
           </span>
           {updateDownloaded ? (
             <button onClick={() => window.electronAPI?.installAppUpdate?.()} style={{ background: '#78350f', color: '#fff7ed', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 800, cursor: 'pointer', flexShrink: 0 }}>Restart now</button>
+          ) : updateDownloading ? (
+            <span style={{ background: 'rgba(120,53,15,0.3)', color: '#78350f', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 800, cursor: 'default', flexShrink: 0, fontSize: 12 }}>Downloading…</span>
           ) : (
             <button onClick={() => window.electronAPI?.downloadAppUpdate?.()} style={{ background: '#78350f', color: '#fff7ed', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 800, cursor: 'pointer', flexShrink: 0 }}>Download</button>
           )}

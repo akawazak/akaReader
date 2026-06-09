@@ -987,15 +987,15 @@ ipcMain.handle('download-app-update', async () => {
   if (!autoUpdater) return { ok: false, error: 'Updater is not available in this build.' };
   if (isDev) return { ok: false, error: 'Updater only runs in a packaged app.' };
   if (updateState.downloaded) return { ok: true, downloaded: true, version: updateState.version };
+  // Guard against concurrent downloads. updateState.downloading is managed by
+  // event listeners; also use a local flag to cover the race window between
+  // the user click and the first download-progress event.
   if (updateState.downloading) return { ok: true, downloading: true, version: updateState.version };
   try {
-    updateState.downloading = true;
     await autoUpdater.downloadUpdate();
     return { ok: true, version: updateState.version };
   } catch (e) {
     return { ok: false, error: e?.message || 'Failed to download update.' };
-  } finally {
-    updateState.downloading = false;
   }
 });
 ipcMain.handle('install-app-update', () => {
