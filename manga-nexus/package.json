@@ -1,6 +1,6 @@
 {
   "name": "akareader",
-  "version": "2.0.40",
+  "version": "2.0.41",
   "description": "Manga reader powered by Suwayomi",
   "main": "electron-main.js",
   "author": {
@@ -21,7 +21,9 @@
     "clean": "rimraf dist dist-electron",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "electron:build": "rimraf dist dist-electron && vite build && electron-builder --win",
-    "dist": "vite build && electron-builder --win"
+    "dist": "vite build && electron-builder --win",
+    "dist:linux": "vite build && electron-builder --linux",
+    "dist:all": "vite build && electron-builder -mwl"
   },
   "dependencies": {
     "electron-updater": "^6.1.0",
@@ -105,6 +107,33 @@
     },
     "portable": {
       "artifactName": "akaReader-Portable-${version}.${ext}"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "public",
+      "category": "Utility",
+      "vendor": "akawazak",
+      "synopsis": "Local manga reader powered by Suwayomi",
+      "description": "akaReader is a desktop manga reader that bundles a managed Suwayomi runtime and a local source browser."
+    },
+    "appImage": {
+      "artifactName": "akaReader-${version}-x86_64.${ext}"
+    },
+    "deb": {
+      "artifactName": "akaReader-${version}-amd64.${ext}"
     }
   }
 }

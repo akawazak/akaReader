@@ -16,6 +16,7 @@ env:
 
 jobs:
   build:
+    name: Build (Windows)
     runs-on: windows-latest
 
     steps:
@@ -60,7 +61,7 @@ jobs:
         env:
           ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: true
 
-      - name: Upload artifacts
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist-windows
@@ -72,8 +73,64 @@ jobs:
             manga-nexus/dist-electron/*.yml
           if-no-files-found: ignore
 
+  build-linux:
+    name: Build (Linux)
+    runs-on: ubuntu-latest
+    # Linux packaging pulls in some system libs on the runner; this is the
+    # same command developers run locally with `npm run dist:linux`.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Install frontend dependencies
+        working-directory: manga-nexus
+        run: npm ci --no-audit --no-fund --legacy-peer-deps
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci --no-audit --no-fund
+
+      - name: Validate renderer
+        working-directory: manga-nexus
+        run: npm run validate
+
+      - name: Install Linux build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libarchive-tools \
+            fakeroot \
+            rpm
+
+      - name: Package (Linux)
+        working-directory: manga-nexus
+        run: npm run dist:linux -- --publish=never
+        env:
+          ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: true
+          # electron-builder's AppImage stage uses Docker by default; force
+          # the in-process build path so the GitHub-hosted runner doesn't
+          # need Docker-in-Docker.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux
+          path: |
+            manga-nexus/dist-electron/*.AppImage
+            manga-nexus/dist-electron/*.AppImage.blockmap
+            manga-nexus/dist-electron/*.deb
+            manga-nexus/dist-electron/latest-linux.yml
+          if-no-files-found: ignore
+
   release:
-    needs: build
+    needs: [build, build-linux]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
 
