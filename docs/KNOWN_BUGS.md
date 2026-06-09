@@ -15,7 +15,7 @@ Last stabilization pass: 2026-05-30.
 Verification run:
 
 - `node --check backend/server.js` passed after the backend fixes.
-- `node --check manga-nexus/electron-main.js` passed after the Electron fixes.
+- `node --check manga-nexus/electron-main.js` passed after the Electron fixes and the cross-platform JRE/Java discovery pass.
 - `node --check manga-nexus/preload.js` passed.
 - `npm.cmd run build` passed after the reader/app fixes.
 - `npm.cmd run check:hook-order` passed after the reader initialization-order fix.
@@ -224,6 +224,18 @@ Verification run:
   - deleted orphaned files under `manga-nexus/src/components/` that were no longer part of the active bundle
 - Fix: removed the stale alternative component set that had drifted away from the real app state surface.
 - Result: future work is less likely to accidentally re-import outdated implementations.
+
+### Improved 2026-06-09: Cross-platform service startup (Linux/macOS local dev)
+
+- File: `manga-nexus/electron-main.js`
+- Change:
+  - `findJava()` now also scans `/usr/lib/jvm`, `/usr/local/lib/jvm`, `/opt`, and `/snap/jdk/current` (Linux) plus `/Library/Java/JavaVirtualMachines` and Homebrew (macOS) before falling back to `java` on PATH.
+  - `JAVA_HOME` is now resolved with `bin/java` on POSIX and `bin/java.exe` on Windows, instead of always appending `java.exe`.
+  - The bundled/downloaded JRE path uses the same platform-aware binary name.
+  - `getJreUrl()` now returns the platform-appropriate Temurin 21 asset: Windows ZIP, macOS tar.gz, Linux x64/aarch64 tar.gz.
+  - `extractZip()` was replaced by `extractArchive()`, which uses `powershell Expand-Archive` / `tar` on Windows and `tar` / `unzip` on POSIX. The Linux JRE tarball is now extracted by `tar -xzf` instead of PowerShell.
+  - Tray and BrowserWindow icons now prefer a sibling `public/icon.png` on non-Windows so Linux/GTK does not have to parse a Windows `.ico`.
+- Result: `npm run electron:dev` can complete JRE discovery, JRE download, and Suwayomi startup on a Linux desktop with a system Java installed; previously it failed at the JRE step because the Windows-only JRE ZIP was extracted by `powershell Expand-Archive`.
 
 ## Confirmed / Highly Likely Open Problems
 

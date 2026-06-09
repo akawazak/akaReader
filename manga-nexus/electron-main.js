@@ -47,19 +47,32 @@ const backendDir = isDev
   : path.join(process.resourcesPath, 'backend');
 
 const serverPath      = path.join(backendDir, 'server.js');
-const iconPath        = path.join(__dirname, 'public', 'icon.ico');
 const preloadPath     = path.join(__dirname, 'preload.js');
 const userData        = app.getPath('userData');
 const userExtDir      = path.join(userData, 'extensions');
 const jarPath         = path.join(userData, 'suwayomi.jar');
 const jreDir          = path.join(userData, 'jre');
-const javaExe         = path.join(jreDir, 'bin', 'java.exe');
+// Platform-aware Java binary path. Windows uses java.exe inside bin/;
+// POSIX (Linux/macOS) uses the undecorated `java` binary.
+const javaExe         = process.platform === 'win32'
+  ? path.join(jreDir, 'bin', 'java.exe')
+  : path.join(jreDir, 'bin', 'java');
 const nssmExe         = path.join(userData, 'nssm.exe');
 const suwayomiPidFile = path.join(userData, 'suwayomi.pid');
 const suwayomiConfigPath = path.join(userData, 'suwayomi-data', 'server.conf');
 const defaultExtensionRepos = [
   'https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.min.json',
 ];
+
+// Platform-aware icon paths. Linux/GTK trays expect a PNG; .ico works
+// (mostly) on Windows/macOS. We keep the .ico as the canonical icon for
+// packaging and fall back to a sibling PNG when the platform wants one.
+const iconIcoPath     = path.join(__dirname, 'public', 'icon.ico');
+const iconPngPath     = path.join(__dirname, 'public', 'icon.png');
+const trayIconPath    = process.platform === 'win32'
+  ? (fs.existsSync(iconIcoPath) ? iconIcoPath : iconPngPath)
+  : (fs.existsSync(iconPngPath) ? iconPngPath : iconIcoPath);
+const windowIconPath  = process.platform === 'win32' ? iconIcoPath : trayIconPath;
 
 fs.mkdirSync(userExtDir, { recursive: true });
 fs.mkdirSync(path.join(userData, 'suwayomi-data'), { recursive: true });
@@ -154,35 +167,100 @@ async function getLatestJarUrl() {
 }
 
 function getJreUrl() {
-  return 'https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.4%2B7/OpenJDK21U-jre_x64_windows_hotspot_21.0.4_7.zip';
+  // Platform-aware JRE download. We pin the Temurin 21 LTS build that
+  // matches what the bundled Windows installer is known to work with, but
+  // swap the asset for the current platform.
+  const version = '21.0.4';
+  const build = '7';
+  if (process.platform === 'win32') {
+    return `https://github.com/adoptium/temurin21-binaries/releases/download/jdk-${version}%2B${build}/OpenJDK21U-jre_x64_windows_hotspot_${version}_${build}.zip`;
+  }
+  if (process.platform === 'darwin') {
+    return `https://github.com/adoptium/temurin21-binaries/releases/download/jdk-${version}%2B${build}/OpenJDK21U-jre_x64_mac_hotspot_${version}_${build}.tar.gz`;
+  }
+  // Linux x64 (default). Other Linux arches (aarch64, etc.) would need a
+  // different asset; fall back to x64 and let the user override via env.
+  if (process.platform === 'linux') {
+    const arch = process.arch === 'arm64' ? 'aarch64' : 'x64';
+    return `https://github.com/adoptium/temurin21-binaries/releases/download/jdk-${version}%2B${build}/OpenJDK21U-jre_${arch}_linux_hotspot_${version}_${build}.tar.gz`;
+  }
+  // Unknown platform: stick with the Windows ZIP and let extraction fail
+  // loudly so the user gets a real error message.
+  return `https://github.com/adoptium/temurin21-binaries/releases/download/jdk-${version}%2B${build}/OpenJDK21U-jre_x64_windows_hotspot_${version}_${build}.zip`;
 }
 
-function extractZip(zipPath, destDir) {
+function extractArchive(archivePath, destDir) {
+  // Cross-platform archive extraction. We support ZIP (Windows JRE, nssm)
+  // and tar.gz (Linux/macOS JRE) without pulling in a Node dep.
+  //
+  // - Windows: PowerShell's Expand-Archive handles ZIP.
+  // - POSIX:   `unzip` for ZIP, `tar` for tar.gz — both ship by default on
+  //            essentially every Linux/macOS desktop install.
   return new Promise((resolve, reject) => {
-    cp.exec(
-      `powershell -NoProfile -Command "Expand-Archive -Path '${zipPath}' -DestinationPath '${destDir}' -Force"`,
-      { windowsHide: true },
-      err => err ? reject(err) : resolve()
-    );
+    const lower = String(archivePath).toLowerCase();
+
+    if (process.platform === 'win32') {
+      if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
+        // PowerShell 5+ ships tar.exe; fall back to Expand-Archive only for ZIP.
+        cp.exec(
+          `powershell -NoProfile -Command "tar -xzf '${archivePath}' -C '${destDir}' -Force"`,
+          { windowsHide: true },
+          err => err ? reject(err) : resolve()
+        );
+        return;
+      }
+      cp.exec(
+        `powershell -NoProfile -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${destDir}' -Force"`,
+        { windowsHide: true },
+        err => err ? reject(err) : resolve()
+      );
+      return;
+    }
+
+    // POSIX path
+    if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
+      cp.exec(`tar -xzf ${shellQuote(archivePath)} -C ${shellQuote(destDir)}`,
+        err => err ? reject(err) : resolve());
+      return;
+    }
+    if (lower.endsWith('.zip')) {
+      cp.exec(`unzip -q -o ${shellQuote(archivePath)} -d ${shellQuote(destDir)}`,
+        err => err ? reject(err) : resolve());
+      return;
+    }
+    reject(new Error(`Unsupported archive format: ${archivePath}`));
   });
 }
 
+// Minimal POSIX shell-arg quoter. On Windows the PowerShell layer already
+// embeds the args in a quoted string, so this is only used for the POSIX
+// path. We deliberately keep this lightweight: wrap in single quotes and
+// escape any embedded single quotes.
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
 function findJava() {
-  // 1. Check for downloaded JRE in userData
+  // 1. Check for downloaded JRE in userData (per-platform binary name)
   if (fs.existsSync(javaExe)) return javaExe;
-  
+
   // 2. Check for bundled JRE in backend resources
-  const bundledJava = path.join(backendDir, 'jre', 'bin', 'java.exe');
+  const bundledJava = process.platform === 'win32'
+    ? path.join(backendDir, 'jre', 'bin', 'java.exe')
+    : path.join(backendDir, 'jre', 'bin', 'java');
   if (fs.existsSync(bundledJava)) return bundledJava;
 
-  // 3. Check system environment
+  // 3. Check JAVA_HOME with the right binary name for the platform
   if (process.env.JAVA_HOME) {
-    const p = path.join(process.env.JAVA_HOME, 'bin', 'java.exe');
+    const p = process.platform === 'win32'
+      ? path.join(process.env.JAVA_HOME, 'bin', 'java.exe')
+      : path.join(process.env.JAVA_HOME, 'bin', 'java');
     if (fs.existsSync(p)) return p;
   }
 
-  // 4. Check common Windows Java install roots. Electron can launch with a
-  // trimmed PATH, so relying only on "java" can miss a perfectly good JDK/JRE.
+  // 4. Check common install roots for the active platform.
+  // Electron can launch with a trimmed PATH, so a bare "java" lookup can
+  // miss a perfectly good JDK/JRE installed on disk.
   if (process.platform === 'win32') {
     const roots = [
       path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Eclipse Adoptium'),
@@ -200,8 +278,49 @@ function findJava() {
         }
       } catch {}
     }
+  } else if (process.platform === 'linux') {
+    const roots = ['/usr/lib/jvm', '/usr/local/lib/jvm', '/opt', '/snap/jdk/current'];
+    for (const root of roots) {
+      try {
+        const entries = fs.readdirSync(root, { withFileTypes: true });
+        for (const e of entries) {
+          let base;
+          if (e.isDirectory()) {
+            base = path.join(root, e.name);
+          } else if (e.isSymbolicLink()) {
+            try { base = fs.realpathSync(path.join(root, e.name)); } catch { continue; }
+          } else {
+            continue;
+          }
+          const candidate = path.join(base, 'bin', 'java');
+          if (fs.existsSync(candidate)) return candidate;
+        }
+      } catch {}
+    }
+  } else if (process.platform === 'darwin') {
+    const roots = [
+      '/Library/Java/JavaVirtualMachines',
+      '/opt/homebrew/opt',
+      '/usr/local/opt',
+    ];
+    for (const root of roots) {
+      try {
+        const entries = fs.readdirSync(root, { withFileTypes: true });
+        for (const e of entries) {
+          let base;
+          if (e.isDirectory()) {
+            base = path.join(root, e.name);
+            if (base.includes('jdk') || base.includes('jre') || base.includes('openjdk')) {
+              const candidate = path.join(base, 'Contents', 'Home', 'bin', 'java');
+              if (fs.existsSync(candidate)) return candidate;
+            }
+          }
+        }
+      } catch {}
+    }
   }
 
+  // 5. Last resort: assume `java` is on PATH.
   return 'java';
 }
 
@@ -274,18 +393,20 @@ async function ensureJre() {
   }
 
   sendStatus('downloading-jre');
-  const zipPath = path.join(userData, 'jre-download.zip');
-  await download(getJreUrl(), zipPath, pct => {
+  const jreUrl = getJreUrl();
+  const isTarGz = jreUrl.endsWith('.tar.gz');
+  const archivePath = path.join(userData, isTarGz ? 'jre-download.tar.gz' : 'jre-download.zip');
+  await download(jreUrl, archivePath, pct => {
     if (pct % 10 === 0) sendStatus('downloading-jre:' + pct);
   });
   sendStatus('extracting-jre');
   const extractDir = path.join(userData, 'jre-extract');
-  await extractZip(zipPath, extractDir);
+  await extractArchive(archivePath, extractDir);
   const folder = fs.readdirSync(extractDir).find(e => e.startsWith('jdk') || e.startsWith('OpenJDK'));
   if (!folder) throw new Error('JRE folder not found');
   if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true });
   fs.renameSync(path.join(extractDir, folder), jreDir);
-  try { fs.unlinkSync(zipPath); } catch {}
+  try { fs.unlinkSync(archivePath); } catch {}
   try { fs.rmSync(extractDir, { recursive: true }); } catch {}
   console.log('[jre] Ready at', jreDir);
 }
@@ -332,11 +453,12 @@ async function ensureJar() {
 }
 
 async function ensureNssm() {
+  if (process.platform !== 'win32') return;
   if (fs.existsSync(nssmExe)) return;
   const zipPath    = path.join(userData, 'nssm.zip');
   const extractDir = path.join(userData, 'nssm-extract');
   await download('https://nssm.cc/release/nssm-2.24.zip', zipPath, null);
-  await extractZip(zipPath, extractDir);
+  await extractArchive(zipPath, extractDir);
   const src = path.join(extractDir, 'nssm-2.24', 'win64', 'nssm.exe');
   if (fs.existsSync(src)) fs.copyFileSync(src, nssmExe);
   try { fs.unlinkSync(zipPath); } catch {}
@@ -747,7 +869,7 @@ ipcMain.handle('install-app-update', () => {
 function createTray() {
   if (tray) { try { tray.destroy(); } catch {} }
   try {
-    tray = new Tray(iconPath);
+    tray = new Tray(trayIconPath);
     tray.setToolTip('akaReader');
     tray.setContextMenu(Menu.buildFromTemplate([
       { label: 'Open akaReader', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
@@ -787,7 +909,7 @@ function createMainWindow() {
       nodeIntegration: false, contextIsolation: true,
       webSecurity: true, preload: preloadPath,
     },
-    icon: iconPath,
+    icon: windowIconPath,
   });
 
   mainWindow.webContents.on('did-finish-load', flushStatusQueue);
