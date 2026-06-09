@@ -1,6 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  platform: process.platform,
+
   // Window controls
   minimize: () => ipcRenderer.invoke('window-minimize'),
   maximize: () => ipcRenderer.invoke('window-maximize'),
@@ -35,6 +37,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // App version (reads from package.json via Electron — always accurate)
   getVersion:  () => ipcRenderer.invoke('get-version'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  verifySourceUrl: (url) => ipcRenderer.invoke('verify-source-url', url),
   checkForAppUpdate: () => ipcRenderer.invoke('check-for-app-update'),
   downloadAppUpdate: () => ipcRenderer.invoke('download-app-update'),
   installAppUpdate: () => ipcRenderer.invoke('install-app-update'),

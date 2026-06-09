@@ -6,6 +6,8 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 
 // Optional middleware - gracefully skip if not installed
 let rateLimit, helmet, compression;
@@ -70,15 +72,15 @@ app.use(express.json({ limit: '10mb' }));
 // ── Config ─────────────────────────────────────────────────────────────────
 const SUWAYOMI = process.env.SUWAYOMI_URL || 'http://localhost:4567';
 const GQL = `${SUWAYOMI}/api/graphql`;
-const http = axios.create({ timeout: 30000 });
+const http = axios.create({ timeout: 120000 });
 
 // ── Caches ─────────────────────────────────────────────────────────────────
 const caches = {
-  sources:    new LRUCache(50,  30000),    // 30s
-  extensions: new LRUCache(100, 1800000),  // 30min (extensions rarely change)
-  search:     new LRUCache(200, 300000),   // 5min
-  manga:      new LRUCache(100, 600000),   // 10min
-  pages:      new LRUCache(50,  1800000),  // 30min
+  sources:    new LRUCache(50,  30000),   // 30s
+  extensions: new LRUCache(100, 600000),  // 10min
+  search:     new LRUCache(200, 300000),  // 5min
+  manga:      new LRUCache(100, 600000),  // 10min
+  pages:      new LRUCache(50,  1800000), // 30min
 };
 
 // ── Logging ────────────────────────────────────────────────────────────────
@@ -98,24 +100,24 @@ const gql = async (query, variables = {}, retries = 2) => {
       if (r.data.errors) throw new Error(r.data.errors.map(e => e.message).join(', '));
       return r.data.data;
     } catch (e) {
-      if (i === retries) {
-        if (e.response && e.response.data) {
-          const msg = typeof e.response.data === 'string' ? e.response.data : JSON.stringify(e.response.data);
-          throw new Error(`[${e.response.status}] ${msg}`);
-        }
-        throw e;
-      }
+      if (i === retries) throw e;
       await new Promise(r => setTimeout(r, 300 * (i + 1)));
     }
   }
 };
 
 const fixUrl = url => (!url ? null : url.startsWith('http') ? url : `${SUWAYOMI}${url}`);
+const getMangaCacheKey = (sourceId, mangaId) => `manga-${sourceId}-${mangaId}`;
+const getChapterPagesCacheKey = (sourceId, chapterId) => `pages-${sourceId}-${chapterId}`;
 
-const fmtNum = n => {
-  if (n == null) return null;
-  const f = parseFloat(n);
-  return isNaN(f) ? null : String(f % 1 === 0 ? f : parseFloat(f.toFixed(1)));
+const isAllowedImageUrl = value => {
+  try {
+    const candidate = new URL(value);
+    if (!['http:', 'https:'].includes(candidate.protocol)) return false;
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 const fmtDate = value => {
@@ -124,27 +126,71 @@ const fmtDate = value => {
   return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString();
 };
 
+function fmtNum(n) {
+  return (n === undefined || n === null) ? null : Number.isInteger(n) ? String(n) : String(n).replace(/\.0$/, '');
+}
+
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+const clearMangaCaches = () => {
+  caches.sources.clear();
+  caches.search.clear();
+  caches.manga.clear();
+  caches.pages.clear();
+};
+
+const getExtensionDir = () => {
+  if (process.env.SUWAYOMI_EXT_DIR) return process.env.SUWAYOMI_EXT_DIR;
+  if (process.env.APPDATA) return path.join(process.env.APPDATA, 'akareader', 'suwayomi-data', 'extensions');
+  return null;
+};
+
+const extensionTokens = pkg => {
+  const normalized = String(pkg || '').toLowerCase();
+  const shortName = normalized
+    .replace(/^eu\.kanade\.tachiyomi\.extension\./, '')
+    .replace(/^tachiyomi\./, '');
+  const parts = shortName.split('.').filter(Boolean);
+  return [
+    shortName,
+    parts.length >= 2 ? `${parts[parts.length - 2]}.${parts[parts.length - 1]}` : '',
+    parts.at(-1) || '',
+  ].filter(Boolean);
+};
+
+const removeExtensionFiles = async pkg => {
+  const dir = getExtensionDir();
+  if (!dir) return [];
+  let entries = [];
+  try {
+    entries = await fs.promises.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const tokens = extensionTokens(pkg);
+  const removed = [];
+  await Promise.all(entries
+    .filter(entry => entry.isFile())
+    .filter(entry => /\.(apk|jar)$/i.test(entry.name))
+    .filter(entry => {
+      const name = entry.name.toLowerCase();
+      return tokens.some(token => token.length >= 3 && name.includes(token));
+    })
+    .map(async entry => {
+      const file = path.join(dir, entry.name);
+      try {
+        await fs.promises.unlink(file);
+        removed.push(entry.name);
+      } catch (e) {
+        console.warn('[extensions] Could not remove file:', file, e.message);
+      }
+    }));
+  return removed;
+};
 
 const syncExtensions = async () => {
   await gql('mutation { fetchExtensions(input: {}) { clientMutationId } }', {}, 0);
-};
-
-// Pre-warm extension cache on server start
-let extensionPrewarmDone = false;
-const prewarmExtensions = async () => {
-  if (extensionPrewarmDone) return;
-  try {
-    console.log('[prewarm] Fetching extensions in background...');
-    const result = await queryExtensions();
-    if (result.length > 0) {
-      caches.extensions.set('all', result);
-      console.log(`[prewarm] Cached ${result.length} extensions`);
-    }
-    extensionPrewarmDone = true;
-  } catch (e) {
-    console.log('[prewarm] Extensions not ready yet, will retry...');
-  }
 };
 
 const queryExtensions = async () => {
@@ -194,7 +240,7 @@ app.get('/api/health', async (_, res) => {
 app.get('/api/img', async (req, res) => {
   const url = req.query.url;
   if (!url) return res.status(400).end();
-  if (!url.startsWith('http')) {
+  if (!isAllowedImageUrl(url)) {
     return res.status(403).end();
   }
 
@@ -202,14 +248,14 @@ app.get('/api/img', async (req, res) => {
   for (let i = 0; i < 2; i++) {
     try {
       const r = await http.get(url, { responseType: 'arraybuffer', timeout: 30000 });
-      res.set('Content-Type', r.headers['content-type'] || 'image/jpeg');
       res.set('Cache-Control', 'public, max-age=86400');
-      res.set('Access-Control-Allow-Origin', '*');
+      // Preserve the upstream image type instead of forcing a jpeg default.
+      const contentType = r.headers['content-type'] || 'application/octet-stream';
+      res.set('Content-Type', contentType);
       return res.send(Buffer.from(r.data));
     } catch (e) {
       if (i === 1) {
-        const errorMsg = e.response ? `[${e.response.status}]` : e.message;
-        console.error('[img-proxy] Final failure:', url, errorMsg);
+        console.error('[img-proxy] Final failure:', url, e.message);
         return res.status(502).end();
       }
       await sleep(1000); // Wait before retry
@@ -220,8 +266,12 @@ app.get('/api/img', async (req, res) => {
 // ── Extensions ─────────────────────────────────────────────────────────────
 app.get('/api/extensions', async (_, res) => {
   try {
-    const cached = caches.extensions.get('all');
+    const force = ['1', 'true'].includes(String(_.query.force || '').toLowerCase());
+    const cached = !force && caches.extensions.get('all');
     if (cached) return res.json(cached);
+    if (force) {
+      await syncExtensions().catch(() => {});
+    }
     let result = await queryExtensions();
     if (!result.length) {
       await syncExtensions();
@@ -234,8 +284,7 @@ app.get('/api/extensions', async (_, res) => {
     caches.extensions.set('all', result);
     res.json(result);
   } catch (e) {
-    console.error('[extensions]', e.message);
-    res.status(500).json({ error: e.message || 'Unknown error fetching extensions' });
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -262,22 +311,24 @@ app.post('/api/extensions/install/:pkgName', async (req, res) => {
   try {
     const pkg = decodeURIComponent(req.params.pkgName);
     await extAction('install', pkg);
-    caches.sources.clear();
     caches.extensions.clear();
+    clearMangaCaches();
+    await sleep(500);
+    syncExtensions().catch(() => {});
     res.json({ ok: true });
-  } catch (e) { 
-    console.error('[extensions/install]', e.message);
-    res.status(500).json({ error: e.message || 'Unknown error' }); 
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.post('/api/extensions/uninstall/:pkgName', async (req, res) => {
   try {
     const pkg = decodeURIComponent(req.params.pkgName);
     await extAction('uninstall', pkg);
-    caches.sources.clear();
+    const removedFiles = await removeExtensionFiles(pkg);
     caches.extensions.clear();
-    res.json({ ok: true });
+    clearMangaCaches();
+    await sleep(500);
+    syncExtensions().catch(() => {});
+    res.json({ ok: true, removedFiles });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -286,14 +337,18 @@ app.post('/api/extensions/update/:pkgName', async (req, res) => {
     const pkg = decodeURIComponent(req.params.pkgName);
     await extAction('update', pkg);
     caches.extensions.clear();
+    clearMangaCaches();
+    await sleep(500);
+    syncExtensions().catch(() => {});
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Sources ────────────────────────────────────────────────────────────────
-app.get('/api/sources', async (_, res) => {
+app.get('/api/sources', async (req, res) => {
   try {
-    const cached = caches.sources.get('all');
+    const force = ['1', 'true'].includes(String(req.query.force || '').toLowerCase());
+    const cached = !force && caches.sources.get('all');
     if (cached) return res.json(cached);
     const data = await gql(`query { sources { nodes { id name lang iconUrl displayName isNsfw } } }`);
     const result = data.sources?.nodes || [];
@@ -307,24 +362,34 @@ app.get('/api/source/:sourceId/search', async (req, res) => {
   const { sourceId } = req.params;
   const q = req.query.q || '';
   const page = Math.max(1, parseInt(req.query.page) || 1);
-  const cacheKey = `search-${sourceId}-${q}-${page}`;
+  const sort = String(req.query.sort || 'latest').toLowerCase();
+  const status = String(req.query.status || 'all').toLowerCase();
+  const contentType = String(req.query.contentType || 'all').toLowerCase();
+  const tags = String(req.query.tags || '').trim().toLowerCase();
+  const cacheKey = `search-${sourceId}-${q}-${page}-${sort}-${status}-${contentType}-${tags}`;
   try {
     const cached = caches.search.get(cacheKey);
     if (cached) return res.json(cached);
-    const data = await gql(
-      `mutation($src:LongString!, $type:FetchSourceMangaType!, $q:String, $page:Int!) {
-        fetchSourceManga(input:{source:$src, type:$type, query:$q, page:$page}) {
-          mangas { id title thumbnailUrl }
-          hasNextPage
-        }
-      }`,
-      { src: sourceId, type: q ? 'SEARCH' : 'POPULAR', q, page }
-    );
+    const queryDoc = `mutation($src:LongString!, $type:FetchSourceMangaType!, $q:String, $page:Int!) {
+      fetchSourceManga(input:{source:$src, type:$type, query:$q, page:$page}) {
+        mangas { id title thumbnailUrl url }
+        hasNextPage
+      }
+    }`;
+    const requestedType = q ? 'SEARCH' : (sort === 'popular' ? 'POPULAR' : 'LATEST');
+    let data;
+    try {
+      data = await gql(queryDoc, { src: sourceId, type: requestedType, q, page });
+    } catch (error) {
+      if (q || requestedType === 'POPULAR') throw error;
+      data = await gql(queryDoc, { src: sourceId, type: 'POPULAR', q, page });
+    }
     if (!data?.fetchSourceManga) throw new Error('Source failed to return results');
     const { mangas = [], hasNextPage = false } = data.fetchSourceManga;
     const result = {
-      results: mangas.map(m => ({ id: String(m.id), title: m.title, cover: fixUrl(m.thumbnailUrl) })),
+      results: mangas.map(m => ({ id: String(m.id), title: m.title, cover: fixUrl(m.thumbnailUrl), url: m.url || '' })),
       hasNextPage,
+      requestedFilters: { sort, status, contentType, tags },
     };
     caches.search.set(cacheKey, result);
     res.json(result);
@@ -333,9 +398,10 @@ app.get('/api/source/:sourceId/search', async (req, res) => {
 
 // ── Manga Detail ───────────────────────────────────────────────────────────
 app.get('/api/source/:sourceId/manga/:mangaId', async (req, res) => {
+  const sourceId = String(req.params.sourceId);
   const mangaId = parseInt(req.params.mangaId);
   if (isNaN(mangaId)) return res.status(400).json({ error: 'Invalid ID' });
-  const cacheKey = `manga-${mangaId}`;
+  const cacheKey = getMangaCacheKey(sourceId, mangaId);
   try {
     const cached = caches.manga.get(cacheKey);
     if (cached) return res.json(cached);
@@ -382,9 +448,10 @@ app.get('/api/source/:sourceId/manga/:mangaId', async (req, res) => {
 
 // ── Chapter Pages ──────────────────────────────────────────────────────────
 app.get('/api/source/:sourceId/chapter/:chapterId', async (req, res) => {
+  const sourceId = String(req.params.sourceId);
   const chapterId = parseInt(req.params.chapterId);
   if (isNaN(chapterId)) return res.status(400).json({ error: 'Invalid chapter ID' });
-  const cacheKey = `pages-${chapterId}`;
+  const cacheKey = getChapterPagesCacheKey(sourceId, chapterId);
   try {
     const cached = caches.pages.get(cacheKey);
     if (cached) return res.json(cached);
@@ -401,6 +468,7 @@ async function fetchBuffer(url, retries = 2) {
   for (let i = 0; i <= retries; i++) {
     try {
       const r = await http.get(url, { responseType: 'arraybuffer', timeout: 60000 });
+      if (r.status !== 200) throw new Error(`Bad status ${r.status}`);
       return { ok: true, buf: Buffer.from(r.data), ct: r.headers['content-type'] || '' };
     } catch (e) { if (i === retries) return { ok: false, err: e.message }; await sleep(800 * (i + 1)); }
   }
@@ -414,7 +482,9 @@ async function fetchAllBuffers(urls) {
       results[i] = await fetchBuffer(urls[i]);
     }
   };
-  await Promise.all(Array.from({ length: DOWNLOAD_CONCURRENCY }, worker));
+    // Limit concurrency to avoid memory blow‑up
+    const concurrency = Math.min(DOWNLOAD_CONCURRENCY, 2);
+    await Promise.all(Array.from({ length: concurrency }, worker));
   return results;
 }
 function guessExt(url, ct) {
@@ -425,13 +495,16 @@ function guessExt(url, ct) {
 }
 
 app.get('/api/source/:sourceId/chapter/:chapterId/download', async (req, res) => {
-  if (!archiver) return res.status(501).json({ error: 'archiver not installed' });
+  if (!archiver) {
+    return res.status(501).json({ error: 'archiver not installed' });
+  }
+  const sourceId = String(req.params.sourceId);
   const chapterId = parseInt(req.params.chapterId);
   if (isNaN(chapterId)) return res.status(400).json({ error: 'Invalid chapter ID' });
   const { title = `chapter-${chapterId}` } = req.query;
   const safeName = String(title).replace(/[/\\?%*:|"<>]/g, '-');
   try {
-    let pages = caches.pages.get(`pages-${chapterId}`);
+    let pages = caches.pages.get(getChapterPagesCacheKey(sourceId, chapterId));
     if (!pages) {
       const data = await gql(`mutation($id:Int!){ fetchChapterPages(input:{chapterId:$id}){ pages } }`, { id: chapterId });
       pages = (data.fetchChapterPages?.pages || []).map(p => fixUrl(p));
@@ -464,11 +537,17 @@ const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`✓ akaReader proxy → http://localhost:${PORT}`);
   console.log(`  Suwayomi        → ${SUWAYOMI}`);
-  // Pre-warm extension cache in background after Suwayomi has time to start
-  const warmup = () => {
-    prewarmExtensions().catch(() => {});
-  };
-  setTimeout(warmup, 3000);
-  setTimeout(warmup, 8000);
-  setTimeout(warmup, 15000);
+  prewarmExtensions();
 });
+
+async function prewarmExtensions() {
+  try {
+    console.log('[prewarm] Fetching extensions in background...');
+    const data = await gql('{ extensions { nodes { pkgName name lang iconUrl versionName isInstalled hasUpdate } } }');
+    const nodes = data.extensions?.nodes || [];
+    if (nodes.length > 0) {
+      caches.extensions.set('all', nodes);
+      console.log(`[prewarm] Cached ${nodes.length} extensions`);
+    }
+  } catch (e) { console.error('[prewarm] failed:', e.message); }
+}

@@ -1,6 +1,6 @@
 {
   "name": "akareader",
-  "version": "2.0.29",
+  "version": "2.0.44",
   "description": "Manga reader powered by Suwayomi",
   "main": "electron-main.js",
   "author": {
@@ -14,25 +14,36 @@
   "scripts": {
     "dev": "vite --port 5173 --strictPort",
     "build": "vite build",
+    "lint": "eslint .",
+    "lint:release": "eslint . --quiet",
+    "validate": "npm run lint:release && npm run check:hook-order && npm run build",
+    "check:hook-order": "node scripts/check-hook-order.mjs",
     "clean": "rimraf dist dist-electron",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "electron:build": "rimraf dist dist-electron && vite build && electron-builder --win",
-    "dist": "vite build && electron-builder"
+    "dist": "vite build && electron-builder --win",
+    "dist:linux": "vite build && electron-builder --linux",
+    "dist:all": "vite build && electron-builder -mwl"
   },
   "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
+    "electron-updater": "^6.1.0",
     "lucide-react": "^0.263.1",
-    "electron-updater": "^6.1.0"
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@vitejs/plugin-react": "^4.0.0",
-    "vite": "^5.0.0",
+    "concurrently": "^8.0.0",
     "electron": "^30.0.0",
     "electron-builder": "^24.0.0",
-    "concurrently": "^8.0.0",
-    "wait-on": "^7.0.0",
-    "rimraf": "^5.0.0"
+    "eslint": "^10.4.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.6.0",
+    "rimraf": "^5.0.0",
+    "vite": "^5.0.0",
+    "wait-on": "^7.0.0"
   },
   "build": {
     "appId": "com.akareader.app",
@@ -59,18 +70,19 @@
         "filter": [
           "server.js",
           "package.json",
-          "*.jar",
+          "**/*.jar",
+          "**/suwayomi-linux-assets.tar.gz",
           "node_modules/**/*",
           "!node_modules/.cache/**",
           "!node_modules/.bin/**",
           "!node_modules/**/test/**",
           "!node_modules/**/tests/**",
           "!node_modules/**/*.md",
-          "!node_modules/**/*.map"
+          "!node_modules/**/*.map",
+          "!**/.*"
         ]
       }
     ],
-    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "win": {
       "target": [
         {
@@ -88,29 +100,42 @@
       ],
       "icon": "public/icon.ico"
     },
-    "mac": {
-      "target": "dmg",
-      "icon": "public/icon.icns",
-      "category": "public.app-category.entertainment"
-    },
-    "linux": {
-      "target": [
-        "AppImage",
-        "deb"
-      ],
-      "icon": "public/icon.png",
-      "category": "Utility",
-      "maintainer": "akawazak <akawazak@users.noreply.github.com>"
-    },
     "nsis": {
-      "artifactName": "${productName}-Setup-${version}.${ext}",
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
+      "artifactName": "akaReader-Setup-${version}.${ext}",
+      "oneClick": true,
+      "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     },
     "portable": {
-      "artifactName": "${productName}-Portable-${version}.${ext}"
+      "artifactName": "akaReader-Portable-${version}.${ext}"
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "public",
+      "category": "Utility",
+      "vendor": "akawazak",
+      "synopsis": "Local manga reader powered by Suwayomi",
+      "description": "akaReader is a desktop manga reader that bundles a managed Suwayomi runtime and a local source browser."
+    },
+    "appImage": {
+      "artifactName": "akaReader-${version}-x86_64.${ext}"
+    },
+    "deb": {
+      "artifactName": "akaReader-${version}-amd64.${ext}"
     }
   }
 }

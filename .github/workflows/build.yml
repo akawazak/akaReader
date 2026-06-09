@@ -16,11 +16,8 @@ env:
 
 jobs:
   build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+    name: Build (Windows)
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
@@ -31,7 +28,7 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Sync version with tag
+      - name: Verify version matches tag
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
@@ -39,97 +36,130 @@ jobs:
           cd manga-nexus
           CURRENT=$(node -p "require('./package.json').version")
           if [ "$TAG_VERSION" != "$CURRENT" ]; then
-            npm version $TAG_VERSION --no-git-tag-version --allow-same-version
-            cd ..
-            git config user.name "github-actions"
-            git config user.email "github-actions@github.com"
-            git add manga-nexus/package.json manga-nexus/package-lock.json
-            git commit -m "chore: sync version to $TAG_VERSION [skip ci]" || true
-            git push || true
+            echo "Tag version $TAG_VERSION does not match package version $CURRENT"
+            exit 1
           fi
 
       - name: Install frontend dependencies
         working-directory: manga-nexus
-        run: npm install --no-audit --no-fund --legacy-peer-deps
+        run: npm ci --no-audit --no-fund --legacy-peer-deps
 
       - name: Install backend dependencies
         working-directory: backend
         run: npm install --no-audit --no-fund
 
+      - name: Download Suwayomi JAR (for bundled server)
+        run: |
+          # Download the platform-agnostic JAR — contains the server binary.
+          # The JRE is handled separately by ensureJre() at runtime.
+          ASSET_URL=$(curl -sL "https://api.github.com/repos/Suwayomi/Suwayomi-Server/releases/latest" \
+            -H "Accept: application/vnd.github.v3+json" \
+            | python3 -c "import sys,json; assets=json.load(sys.stdin)['assets']; print(next(a['browser_download_url'] for a in assets if a['name'].endswith('.jar') and not a['name'].endswith('-sources.jar')))")
+          echo "Downloading: $ASSET_URL"
+          curl -sL "$ASSET_URL" -o backend/Suwayomi-Server.jar
+
+      - name: Validate renderer
+        working-directory: manga-nexus
+        run: npm run validate
+
+      # No Java, no JAR download needed anymore
+
       - name: Package (Windows)
-        if: matrix.os == 'windows-latest'
         working-directory: manga-nexus
         shell: bash
-        run: |
-          for i in 1 2 3; do
-            echo "Attempt $i..."
-            npm run dist -- --win --publish=never && break
-            echo "Attempt $i failed, retrying in 10s..."
-            sleep 10
-          done
+        run: npm run dist -- --win --publish=never
         env:
           ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: true
 
-      - name: Package (macOS)
-        if: matrix.os == 'macos-latest'
-        working-directory: manga-nexus
-        run: npm run dist -- --mac --publish=never
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: false
-          ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: true
-
-      - name: Package (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        working-directory: manga-nexus
-        run: npm run dist -- --linux --publish=never
-        env:
-          ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: true
-
-      - name: Upload artifacts
+      - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: dist-${{ matrix.os }}
+          name: dist-windows
           path: |
             manga-nexus/dist-electron/*.exe
             manga-nexus/dist-electron/*.exe.blockmap
-            manga-nexus/dist-electron/*.dmg
-            manga-nexus/dist-electron/*.dmg.blockmap
             manga-nexus/dist-electron/*.zip
             manga-nexus/dist-electron/*.zip.blockmap
-            manga-nexus/dist-electron/*.AppImage
-            manga-nexus/dist-electron/*.AppImage.blockmap
-            manga-nexus/dist-electron/*.deb
             manga-nexus/dist-electron/*.yml
           if-no-files-found: ignore
 
-  release:
-    needs: build
+  build-linux:
+    name: Build (Linux)
     runs-on: ubuntu-latest
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
+    # Linux packaging pulls in some system libs on the runner; this is the
+    # same command developers run locally with `npm run dist:linux`.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Install frontend dependencies
+        working-directory: manga-nexus
+        run: npm ci --no-audit --no-fund --legacy-peer-deps
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm install --no-audit --no-fund
+
+      - name: Download Suwayomi linux-assets (for bundled JRE)
+        run: |
+          ASSET_URL=$(curl -sL "https://api.github.com/repos/Suwayomi/Suwayomi-Server/releases/latest" \
+            -H "Accept: application/vnd.github.v3+json" \
+            | python3 -c "import sys,json; assets=json.load(sys.stdin)['assets']; print(next(a['browser_download_url'] for a in assets if a['name'].endswith('linux-assets.tar.gz')))")
+          echo "Downloading: $ASSET_URL"
+          curl -sL "$ASSET_URL" -o backend/suwayomi-linux-assets.tar.gz
+
+      - name: Validate renderer
+        working-directory: manga-nexus
+        run: npm run validate
+
+      - name: Install Linux build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libarchive-tools \
+            fakeroot \
+            rpm
+
+      - name: Package (Linux)
+        working-directory: manga-nexus
+        run: npm run dist:linux -- --publish=never
+        env:
+          ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: true
+          # electron-builder's AppImage stage uses Docker by default; force
+          # the in-process build path so the GitHub-hosted runner doesn't
+          # need Docker-in-Docker.
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux
+          path: |
+            manga-nexus/dist-electron/*.AppImage
+            manga-nexus/dist-electron/*.AppImage.blockmap
+            manga-nexus/dist-electron/*.deb
+            manga-nexus/dist-electron/latest-linux.yml
+          if-no-files-found: ignore
+
+  release:
+    needs: [build, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
 
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
-        with:
-          path: release-assets
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            release-assets/**/*.exe
-            release-assets/**/*.exe.blockmap
-            release-assets/**/latest.yml
-            release-assets/**/*.dmg
-            release-assets/**/*.dmg.blockmap
-            release-assets/**/latest-mac.yml
-            release-assets/**/*.zip
-            release-assets/**/*.zip.blockmap
-            release-assets/**/*.AppImage
-            release-assets/**/*.AppImage.blockmap
-            release-assets/**/latest-linux.yml
-            release-assets/**/*.deb
+          files: dist-*/*
           draft: false
           prerelease: false
           generate_release_notes: true

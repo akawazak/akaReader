@@ -3,7 +3,7 @@
  * Fixes: instant window, full process-tree kill, async service check
  */
 const {
-  app, BrowserWindow, Menu, shell, dialog,
+  app, BrowserWindow, Menu, shell,
   Tray, globalShortcut, ipcMain, screen, utilityProcess
 } = require('electron');
 const path  = require('path');
@@ -18,11 +18,19 @@ try { autoUpdater = require('electron-updater').autoUpdater; } catch {}
 const isDev = !app.isPackaged;
 
 let mainWindow   = null;
+let verificationWindow = null;
 let tray         = null;
 let serverProc   = null;
 let suwayomiProc = null;
 let isQuitting   = false;
 let serviceMode  = false;
+let updateState  = {
+  checking: false,
+  downloading: false,
+  downloaded: false,
+  version: null,
+  lastCheckAt: 0,
+};
 
 // ── Single instance ──────────────────────────────────────────────────────────
 const gotLock = app.requestSingleInstanceLock();
@@ -39,19 +47,32 @@ const backendDir = isDev
   : path.join(process.resourcesPath, 'backend');
 
 const serverPath      = path.join(backendDir, 'server.js');
-const iconPath        = path.join(__dirname, 'public', 'icon.ico');
 const preloadPath     = path.join(__dirname, 'preload.js');
 const userData        = app.getPath('userData');
 const userExtDir      = path.join(userData, 'extensions');
 const jarPath         = path.join(userData, 'suwayomi.jar');
 const jreDir          = path.join(userData, 'jre');
-const javaExe         = path.join(jreDir, 'bin', 'java.exe');
+// Platform-aware Java binary path. Windows uses java.exe inside bin/;
+// POSIX (Linux/macOS) uses the undecorated `java` binary.
+const javaExe         = process.platform === 'win32'
+  ? path.join(jreDir, 'bin', 'java.exe')
+  : path.join(jreDir, 'bin', 'java');
 const nssmExe         = path.join(userData, 'nssm.exe');
 const suwayomiPidFile = path.join(userData, 'suwayomi.pid');
 const suwayomiConfigPath = path.join(userData, 'suwayomi-data', 'server.conf');
 const defaultExtensionRepos = [
   'https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.min.json',
 ];
+
+// Platform-aware icon paths. Linux/GTK trays expect a PNG; .ico works
+// (mostly) on Windows/macOS. We keep the .ico as the canonical icon for
+// packaging and fall back to a sibling PNG when the platform wants one.
+const iconIcoPath     = path.join(__dirname, 'public', 'icon.ico');
+const iconPngPath     = path.join(__dirname, 'public', 'icon.png');
+const trayIconPath    = process.platform === 'win32'
+  ? (fs.existsSync(iconIcoPath) ? iconIcoPath : iconPngPath)
+  : (fs.existsSync(iconPngPath) ? iconPngPath : iconIcoPath);
+const windowIconPath  = process.platform === 'win32' ? iconIcoPath : trayIconPath;
 
 fs.mkdirSync(userExtDir, { recursive: true });
 fs.mkdirSync(path.join(userData, 'suwayomi-data'), { recursive: true });
@@ -97,6 +118,7 @@ function flushStatusQueue() {
 // ── HTTPS download with progress ──────────────────────────────────────────────
 function download(url, dest, onProgress) {
   return new Promise((resolve, reject) => {
+    let file = null;
     const doGet = (u) => {
       https.get(u, { headers: { 'User-Agent': 'akaReader/3.0' } }, res => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -105,7 +127,7 @@ function download(url, dest, onProgress) {
         if (res.statusCode !== 200) {
           return reject(new Error('HTTP ' + res.statusCode + ' — ' + u));
         }
-        const file = fs.createWriteStream(dest);
+        file = fs.createWriteStream(dest);
         const total = parseInt(res.headers['content-length'] || '0', 10);
         let received = 0;
         res.on('data', chunk => {
@@ -115,7 +137,7 @@ function download(url, dest, onProgress) {
         res.pipe(file);
         file.on('finish', () => file.close(resolve));
         file.on('error', e => { fs.unlink(dest, () => {}); reject(e); });
-      }).on('error', e => { reject(e); });
+      }).on('error', e => { if (file) fs.unlink(dest, () => {}); reject(e); });
     };
     doGet(url);
   });
@@ -145,35 +167,112 @@ async function getLatestJarUrl() {
 }
 
 function getJreUrl() {
-  return 'https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.4%2B7/OpenJDK21U-jre_x64_windows_hotspot_21.0.4_7.zip';
+  // Platform-aware JRE download. We pin the Temurin 21 LTS build that
+  // matches what the bundled Windows installer is known to work with, but
+  // swap the asset for the current platform.
+  const version = '21.0.4';
+  const build = '7';
+  if (process.platform === 'win32') {
+    return `https://github.com/adoptium/temurin21-binaries/releases/download/jdk-${version}%2B${build}/OpenJDK21U-jre_x64_windows_hotspot_${version}_${build}.zip`;
+  }
+  if (process.platform === 'darwin') {
+    return `https://github.com/adoptium/temurin21-binaries/releases/download/jdk-${version}%2B${build}/OpenJDK21U-jre_x64_mac_hotspot_${version}_${build}.tar.gz`;
+  }
+  // Linux x64 (default). Other Linux arches (aarch64, etc.) would need a
+  // different asset; fall back to x64 and let the user override via env.
+  if (process.platform === 'linux') {
+    const arch = process.arch === 'arm64' ? 'aarch64' : 'x64';
+    return `https://github.com/adoptium/temurin21-binaries/releases/download/jdk-${version}%2B${build}/OpenJDK21U-jre_${arch}_linux_hotspot_${version}_${build}.tar.gz`;
+  }
+  // Unknown platform: stick with the Windows ZIP and let extraction fail
+  // loudly so the user gets a real error message.
+  return `https://github.com/adoptium/temurin21-binaries/releases/download/jdk-${version}%2B${build}/OpenJDK21U-jre_x64_windows_hotspot_${version}_${build}.zip`;
 }
 
-function extractZip(zipPath, destDir) {
+function extractArchive(archivePath, destDir) {
+  // Cross-platform archive extraction. We support ZIP (Windows JRE, nssm)
+  // and tar.gz (Linux/macOS JRE) without pulling in a Node dep.
+  //
+  // - Windows: PowerShell's Expand-Archive handles ZIP.
+  // - POSIX:   `tar` for tar.gz, `unzip` for ZIP — both ship by default on
+  //            essentially every Linux/macOS desktop install.
   return new Promise((resolve, reject) => {
-    cp.exec(
-      `powershell -NoProfile -Command "Expand-Archive -Path \\"${zipPath}\\" -DestinationPath \\"${destDir}\\" -Force"`,
-      { windowsHide: true },
-      err => err ? reject(err) : resolve()
-    );
+    const lower = String(archivePath).toLowerCase();
+
+    if (process.platform === 'win32') {
+      if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
+        // PowerShell 5+ ships tar.exe; fall back to Expand-Archive only for ZIP.
+        cp.exec(
+          `powershell -NoProfile -Command "tar -xzf '${archivePath}' -C '${destDir}' -Force"`,
+          { windowsHide: true },
+          err => err ? reject(err) : resolve()
+        );
+        return;
+      }
+      cp.exec(
+        `powershell -NoProfile -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${destDir}' -Force"`,
+        { windowsHide: true },
+        err => err ? reject(err) : resolve()
+      );
+      return;
+    }
+
+    // POSIX path — ensure executable permissions before running
+    const runCmd = (cmd, opts = {}) => {
+      return new Promise((res, rej) => {
+        cp.exec(cmd, { timeout: 300000, ...opts }, (err, stdout, stderr) => {
+          if (err) {
+            // Provide diagnostic context on failure
+            const extra = stderr ? `\nstderr: ${stderr.slice(0, 500)}` : '';
+            rej(new Error(`${err.message}${extra}`));
+          } else {
+            res();
+          }
+        });
+      });
+    };
+
+    if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
+      runCmd(`tar -xzf ${shellQuote(archivePath)} -C ${shellQuote(destDir)}`).then(resolve).catch(reject);
+      return;
+    }
+    if (lower.endsWith('.zip')) {
+      runCmd(`unzip -q -o ${shellQuote(archivePath)} -d ${shellQuote(destDir)}`).then(resolve).catch(reject);
+      return;
+    }
+    reject(new Error(`Unsupported archive format: ${archivePath}`));
   });
 }
 
+// Minimal POSIX shell-arg quoter. On Windows the PowerShell layer already
+// embeds the args in a quoted string, so this is only used for the POSIX
+// path. We deliberately keep this lightweight: wrap in single quotes and
+// escape any embedded single quotes.
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
 function findJava() {
-  // 1. Check for downloaded JRE in userData
+  // 1. Check for downloaded JRE in userData (per-platform binary name)
   if (fs.existsSync(javaExe)) return javaExe;
-  
+
   // 2. Check for bundled JRE in backend resources
-  const bundledJava = path.join(backendDir, 'jre', 'bin', 'java.exe');
+  const bundledJava = process.platform === 'win32'
+    ? path.join(backendDir, 'jre', 'bin', 'java.exe')
+    : path.join(backendDir, 'jre', 'bin', 'java');
   if (fs.existsSync(bundledJava)) return bundledJava;
 
-  // 3. Check system environment
+  // 3. Check JAVA_HOME with the right binary name for the platform
   if (process.env.JAVA_HOME) {
-    const p = path.join(process.env.JAVA_HOME, 'bin', 'java.exe');
+    const p = process.platform === 'win32'
+      ? path.join(process.env.JAVA_HOME, 'bin', 'java.exe')
+      : path.join(process.env.JAVA_HOME, 'bin', 'java');
     if (fs.existsSync(p)) return p;
   }
 
-  // 4. Check common Windows Java install roots. Electron can launch with a
-  // trimmed PATH, so relying only on "java" can miss a perfectly good JDK/JRE.
+  // 4. Check common install roots for the active platform.
+  // Electron can launch with a trimmed PATH, so a bare "java" lookup can
+  // miss a perfectly good JDK/JRE installed on disk.
   if (process.platform === 'win32') {
     const roots = [
       path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Eclipse Adoptium'),
@@ -191,8 +290,49 @@ function findJava() {
         }
       } catch {}
     }
+  } else if (process.platform === 'linux') {
+    const roots = ['/usr/lib/jvm', '/usr/local/lib/jvm', '/opt', '/snap/jdk/current'];
+    for (const root of roots) {
+      try {
+        const entries = fs.readdirSync(root, { withFileTypes: true });
+        for (const e of entries) {
+          let base;
+          if (e.isDirectory()) {
+            base = path.join(root, e.name);
+          } else if (e.isSymbolicLink()) {
+            try { base = fs.realpathSync(path.join(root, e.name)); } catch { continue; }
+          } else {
+            continue;
+          }
+          const candidate = path.join(base, 'bin', 'java');
+          if (fs.existsSync(candidate)) return candidate;
+        }
+      } catch {}
+    }
+  } else if (process.platform === 'darwin') {
+    const roots = [
+      '/Library/Java/JavaVirtualMachines',
+      '/opt/homebrew/opt',
+      '/usr/local/opt',
+    ];
+    for (const root of roots) {
+      try {
+        const entries = fs.readdirSync(root, { withFileTypes: true });
+        for (const e of entries) {
+          let base;
+          if (e.isDirectory()) {
+            base = path.join(root, e.name);
+            if (base.includes('jdk') || base.includes('jre') || base.includes('openjdk')) {
+              const candidate = path.join(base, 'Contents', 'Home', 'bin', 'java');
+              if (fs.existsSync(candidate)) return candidate;
+            }
+          }
+        }
+      } catch {}
+    }
   }
 
+  // 5. Last resort: assume `java` is on PATH.
   return 'java';
 }
 
@@ -255,61 +395,154 @@ async function ensureJre() {
   // Check if we have a bundled JRE in the backend directory
   const bundledJre = path.join(backendDir, 'jre');
   if (fs.existsSync(bundledJre)) {
-    console.log('[jre] Found bundled JRE, copying...');
+    console.log('[jre] Found bundled JRE, copying recursively...');
     sendStatus('installing-bundled-jre');
     fs.mkdirSync(jreDir, { recursive: true });
-    // Note: Simple copy for directories is complex in Node, so we just use it directly if possible
-    // or tell findJava to use it. Actually, better to just let findJava use it.
-    return; 
+    copyDirRecursive(bundledJre, jreDir);
+    console.log('[jre] Bundled JRE copied to', jreDir);
+    return;
+  }
+
+  // Check if linux-assets.tar.gz is bundled (contains JAR + bundled JRE).
+  // This runs BEFORE ensureJar() extracts it, so we extract the JRE here
+  // so that hasUsableJava() can find it immediately after.
+  const bundled = findBundledSuwayomi(backendDir);
+  if (bundled && bundled.type === 'tarball') {
+    console.log('[jre] Found bundled linux-assets, extracting JRE...');
+    sendStatus('installing-bundled-jre');
+    try {
+      const extractDir = path.join(userData, 'jre-tarball-extract');
+      if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true });
+      fs.mkdirSync(extractDir, { recursive: true });
+      await extractArchive(bundled.path, extractDir);
+      const entries = fs.readdirSync(extractDir, { withFileTypes: true });
+      const serverFolder = entries.find(e => e.isDirectory() && e.name.includes('Suwayomi'));
+      if (serverFolder) {
+        const srcJre = path.join(extractDir, serverFolder.name, 'jre');
+        if (fs.existsSync(srcJre)) {
+          if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true });
+          copyDirRecursive(srcJre, jreDir);
+          console.log('[jre] Bundled JRE from tarball copied to', jreDir);
+          try { fs.rmSync(extractDir, { recursive: true }); } catch {}
+          if (hasUsableJava()) {
+            console.log('[jre] Bundled JRE is usable at', findJava());
+            sendStatus('using-system-java');
+            return;
+          }
+        }
+      }
+      try { fs.rmSync(extractDir, { recursive: true }); } catch {}
+    } catch (e) {
+      console.warn('[jre] Failed to extract bundled JRE from tarball:', e.message);
+    }
   }
 
   sendStatus('downloading-jre');
-  const zipPath = path.join(userData, 'jre-download.zip');
-  await download(getJreUrl(), zipPath, pct => {
+  const jreUrl = getJreUrl();
+  const isTarGz = jreUrl.endsWith('.tar.gz');
+  const archivePath = path.join(userData, isTarGz ? 'jre-download.tar.gz' : 'jre-download.zip');
+  await download(jreUrl, archivePath, pct => {
     if (pct % 10 === 0) sendStatus('downloading-jre:' + pct);
   });
   sendStatus('extracting-jre');
   const extractDir = path.join(userData, 'jre-extract');
-  await extractZip(zipPath, extractDir);
+  await extractArchive(archivePath, extractDir);
   const folder = fs.readdirSync(extractDir).find(e => e.startsWith('jdk') || e.startsWith('OpenJDK'));
   if (!folder) throw new Error('JRE folder not found');
   if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true });
   fs.renameSync(path.join(extractDir, folder), jreDir);
-  try { fs.unlinkSync(zipPath); } catch {}
+  try { fs.unlinkSync(archivePath); } catch {}
   try { fs.rmSync(extractDir, { recursive: true }); } catch {}
   console.log('[jre] Ready at', jreDir);
 }
 
+// Cross-platform recursive copy — replaces fs.cpSync for older Node.js
+function copyDirRecursive(src, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  const entries = fs.readdirSync(src, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyDirRecursive(srcPath, destPath);
+    } else {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
+
 async function ensureJar() {
   if (fs.existsSync(jarPath)) {
-    sendStatus('using-existing-suwayomi');
-    return;
+    const sz = fs.statSync(jarPath).size;
+    if (sz > 1000) {
+      sendStatus('using-existing-suwayomi');
+      return;
+    }
+    console.warn('[jar] Existing JAR too small, replacing:', jarPath);
+    try { fs.unlinkSync(jarPath); } catch {}
   }
 
-  // Check if we have a bundled JAR in the backend directory
-  try {
-    if (fs.existsSync(backendDir)) {
-      const files = fs.readdirSync(backendDir);
-      const bundledJar = files.find(f => f.startsWith('Suwayomi-Server') && f.endsWith('.jar'));
-      if (bundledJar) {
-        const bundledPath = path.join(backendDir, bundledJar);
-        console.log('[jar] Found bundled JAR:', bundledJar);
-        sendStatus('installing-bundled-suwayomi');
-        fs.copyFileSync(bundledPath, jarPath);
-        
-        // Validate copied JAR exists and has content
-        if (!fs.existsSync(jarPath) || fs.statSync(jarPath).size < 1000) {
-          console.error('[jar] Bundled JAR copy failed or file too small');
-          fs.unlinkSync(jarPath);
-          throw new Error('Bundled JAR copy failed');
+  // Check if we have a bundled Suwayomi package in the backend directory
+  const bundled = findBundledSuwayomi(backendDir);
+  if (bundled) {
+    if (bundled.type === 'tarball') {
+      // linux-assets.tar.gz — contains both JAR and bundled JRE
+      console.log('[jar] Found bundled Suwayomi tarball:', bundled.name);
+      sendStatus('installing-bundled-suwayomi');
+      try {
+        const extractDir = path.join(userData, 'suwayomi-extract');
+        if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true });
+        fs.mkdirSync(extractDir, { recursive: true });
+        await extractArchive(bundled.path, extractDir);
+        // The tarball extracts into a folder like Suwayomi-Server-<version>/
+        const entries = fs.readdirSync(extractDir, { withFileTypes: true });
+        const serverFolder = entries.find(e => e.isDirectory() && e.name.includes('Suwayomi'));
+        if (!serverFolder) throw new Error('Could not find Suwayomi server folder in tarball');
+        const serverDir = path.join(extractDir, serverFolder.name);
+        // Copy the JAR
+        const jarFiles = fs.readdirSync(serverDir).filter(f => f.endsWith('.jar'));
+        if (!jarFiles.length) throw new Error('No JAR found in tarball');
+        const srcJar = path.join(serverDir, jarFiles[0]);
+        fs.copyFileSync(srcJar, jarPath);
+        // Copy the bundled JRE to userData/suwayomi-data/jre
+        const srcJre = path.join(serverDir, 'jre');
+        if (fs.existsSync(srcJre)) {
+          if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true });
+          copyDirRecursive(srcJre, jreDir);
+          console.log('[jar] Bundled JRE copied to', jreDir);
         }
-        
-        console.log('[jar] Bundled JAR copied to', jarPath, '- size:', fs.statSync(jarPath).size, 'bytes');
-        return;
+        // Cleanup extract dir
+        try { fs.rmSync(extractDir, { recursive: true }); } catch {}
+        const sz = fs.statSync(jarPath).size;
+        if (sz > 1000) {
+          console.log('[jar] Bundled Suwayomi (with JRE) ready at', jarPath);
+          sendStatus('using-existing-suwayomi');
+          return;
+        }
+        fs.unlinkSync(jarPath);
+      } catch (e) {
+        console.error('[jar] Tarball extraction failed:', e.message);
+        try { fs.unlinkSync(bundled.path); } catch {}
+      }
+    } else {
+      // Plain JAR — just copy it
+      console.log('[jar] Found bundled JAR:', bundled.name);
+      sendStatus('installing-bundled-suwayomi');
+      try {
+        fs.copyFileSync(bundled.path, jarPath);
+        const sz = fs.statSync(jarPath).size;
+        if (sz > 1000) {
+          console.log('[jar] Bundled JAR copied to', jarPath, '- size:', sz, 'bytes');
+          return;
+        }
+        console.error('[jar] Copied JAR too small:', sz);
+        fs.unlinkSync(jarPath);
+      } catch (e) {
+        console.error('[jar] Copy failed:', e.message);
       }
     }
-  } catch (e) {
-    console.warn('[jar] Failed to check for bundled JAR:', e.message);
+  } else {
+    console.log('[jar] No bundled Suwayomi found in', backendDir);
   }
 
   sendStatus('downloading-suwayomi');
@@ -321,12 +554,36 @@ async function ensureJar() {
   console.log('[jar] Ready at', jarPath);
 }
 
+// Scan directory for Suwayomi bundle — plain JAR or linux-assets.tar.gz
+function findBundledSuwayomi(dir) {
+  try {
+    if (!fs.existsSync(dir)) return null;
+    const files = fs.readdirSync(dir);
+    // Prefer linux-assets.tar.gz (has JAR + JRE) on all platforms
+    const tarball = files.find(f => f === 'suwayomi-linux-assets.tar.gz');
+    if (tarball) return { name: tarball, path: path.join(dir, tarball), type: 'tarball' };
+    // Fall back to plain JAR
+    const jar = files.find(f => f.startsWith('Suwayomi-Server') && f.endsWith('.jar'));
+    if (jar) return { name: jar, path: path.join(dir, jar), type: 'jar' };
+    // Nested JAR (some releases unpack into subfolder)
+    for (const f of files) {
+      if (f.endsWith('.jar') && f.includes('Suwayomi')) {
+        return { name: f, path: path.join(dir, f), type: 'jar' };
+      }
+    }
+  } catch (e) {
+    console.warn('[jar] Scan failed:', e.message);
+  }
+  return null;
+}
+
 async function ensureNssm() {
+  if (process.platform !== 'win32') return;
   if (fs.existsSync(nssmExe)) return;
   const zipPath    = path.join(userData, 'nssm.zip');
   const extractDir = path.join(userData, 'nssm-extract');
   await download('https://nssm.cc/release/nssm-2.24.zip', zipPath, null);
-  await extractZip(zipPath, extractDir);
+  await extractArchive(zipPath, extractDir);
   const src = path.join(extractDir, 'nssm-2.24', 'win64', 'nssm.exe');
   if (fs.existsSync(src)) fs.copyFileSync(src, nssmExe);
   try { fs.unlinkSync(zipPath); } catch {}
@@ -346,15 +603,11 @@ async function isServiceRunning() {
 }
 
 async function installWindowsService() {
+  if (process.platform !== 'win32') return false;
   await ensureNssm();
   const java     = findJava();
   const dataRoot = path.join(userData, 'suwayomi-data');
   ensureSuwayomiConfig(dataRoot);
-  
-  // Clean up any existing service first to avoid "service already exists" errors
-  try { cp.execSync(`"${nssmExe}" stop AkaReaderSuwayomi`, { windowsHide: true, timeout: 5000 }); } catch {}
-  try { cp.execSync(`"${nssmExe}" remove AkaReaderSuwayomi confirm`, { windowsHide: true, timeout: 5000 }); } catch {}
-
   const cmds = [
     `"${nssmExe}" install AkaReaderSuwayomi "${java}"`,
     `"${nssmExe}" set AkaReaderSuwayomi AppParameters "-Dsuwayomi.tachidesk.config.server.rootDir=\\"${dataRoot}\\" -jar \\"${jarPath}\\" --server.port=4567"`,
@@ -362,18 +615,17 @@ async function installWindowsService() {
     `"${nssmExe}" set AkaReaderSuwayomi Start SERVICE_AUTO_START`,
     `"${nssmExe}" set AkaReaderSuwayomi AppStdout "${path.join(userData, 'suwayomi.log')}"`,
     `"${nssmExe}" set AkaReaderSuwayomi AppStderr "${path.join(userData, 'suwayomi-err.log')}"`,
-    `"${nssmExe}" start AkaReaderSuwayomi`,
+    `net start AkaReaderSuwayomi`,
   ];
-  
-  for (const cmd of cmds) {
-    console.log('[service] Executing:', cmd);
-    cp.execSync(cmd, { windowsHide: true, timeout: 10000 });
-  }
+  for (const cmd of cmds) cp.execSync(cmd, { windowsHide: true });
+  return true;
 }
 
 async function uninstallWindowsService() {
+  if (process.platform !== 'win32') return false;
   try { cp.execSync('net stop AkaReaderSuwayomi',  { windowsHide: true }); } catch {}
   try { cp.execSync('sc delete AkaReaderSuwayomi', { windowsHide: true }); } catch {}
+  return true;
 }
 
 // ── Process-tree kill ────────────────────────────────────────────────────────
@@ -381,7 +633,7 @@ async function uninstallWindowsService() {
 function killPid(pid) {
   if (!pid) return;
   if (process.platform === 'win32') {
-    try { cp.spawn('taskkill', ['/F', '/T', '/PID', String(pid)], { windowsHide: true, stdio: 'ignore' }); } catch {}
+    try { cp.spawnSync('taskkill', ['/F', '/T', '/PID', String(pid)], { windowsHide: true, timeout: 5000 }); } catch {}
   } else {
     try { process.kill(-pid, 'SIGKILL'); } catch {
       try { process.kill(pid, 'SIGKILL'); } catch {}
@@ -417,7 +669,6 @@ function waitForSuwayomi(timeoutMs = 90000) {
       if (Date.now() - start > timeoutMs) return reject(new Error('Suwayomi timeout'));
       const req = http.request('http://localhost:4567/api/graphql', {
         method: 'POST',
-        timeout: 2000,
         headers: { 'Content-Type': 'application/json' },
       }, res => {
         let body = '';
@@ -429,11 +680,11 @@ function waitForSuwayomi(timeoutMs = 90000) {
               if (parsed?.data?.aboutServer?.version) return resolve(true);
             } catch {}
           }
-          setTimeout(attempt, 2000);
+          setTimeout(attempt, 1500);
         });
       });
-      req.on('error', () => setTimeout(attempt, 2000));
-      req.setTimeout(2000, () => req.destroy());
+      req.on('error', () => setTimeout(attempt, 1500));
+      req.setTimeout(3000, () => req.destroy());
       req.write(JSON.stringify({ query: 'query { aboutServer { version } }' }));
       req.end();
     };
@@ -442,77 +693,48 @@ function waitForSuwayomi(timeoutMs = 90000) {
 }
 
 async function startSuwayomi() {
-  const logFile = path.join(userData, 'suwayomi-startup.log');
-  try { fs.writeFileSync(logFile, `--- Startup ${new Date().toISOString()} ---\n`); } catch {}
-
   try {
-    const isRunning = await Promise.race([
-      waitForSuwayomi(3000),
-      new Promise(r => setTimeout(() => r(false), 3500))
+    await Promise.race([
+      waitForSuwayomi(2000),
+      new Promise((_, r) => setTimeout(() => r(new Error('timeout')), 2500))
     ]);
-    if (isRunning) {
-      console.log('[suwayomi] Already running');
-      serviceMode = true;
-      return true;
-    }
+    console.log('[suwayomi] Already running');
+    serviceMode = true;
+    return true;
   } catch {}
 
-  const java = findJava();
+  const java     = findJava();
   const dataRoot = path.join(userData, 'suwayomi-data');
-  let lastError = '';
-  
-  if (!fs.existsSync(jarPath) || fs.statSync(jarPath).size < 1000) {
-    throw new Error('Suwayomi JAR is missing or corrupted. Please try checking for updates.');
-  }
-
+  sendStatus('configuring-suwayomi');
+  ensureSuwayomiConfig(dataRoot);
   sendStatus('starting-suwayomi');
-  console.log('[suwayomi] Launching from:', userData);
+  console.log('[suwayomi] Launching…');
 
-  const args = [
+  suwayomiProc = cp.spawn(java, [
     `-Dsuwayomi.tachidesk.config.server.rootDir=${dataRoot}`,
-    '-Xmx512m', 
-    '-jar', jarPath,
-    '--server.port=4567'
-  ];
-
-  try { fs.appendFileSync(logFile, `Command: "${java}" ${args.join(' ')}\n\n`); } catch {}
-
-  suwayomiProc = cp.spawn(java, args, {
-    cwd: userData,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-    detached: false
+    '-Xmx512m', '-jar', jarPath,
+    '--server.port=4567',
+  ], {
+    cwd: userData, stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true, detached: false,
   });
 
-  if (!suwayomiProc || !suwayomiProc.pid) {
-    throw new Error('Failed to spawn Suwayomi. Check if Java is installed correctly.');
-  }
-
+  // FIX: write PID immediately so cleanup works even after forced kill
   fs.writeFileSync(suwayomiPidFile, String(suwayomiProc.pid));
 
   suwayomiProc.stdout.on('data', d => {
-    const l = d.toString();
-    try { fs.appendFileSync(logFile, l); } catch {}
-    if (l.trim()) console.log('[suwayomi]', l.trim().slice(0, 120));
+    const l = d.toString().trim();
+    if (l) console.log('[suwayomi]', l.slice(0, 120));
   });
-
   suwayomiProc.stderr.on('data', d => {
-    const l = d.toString();
-    try { fs.appendFileSync(logFile, '[ERR] ' + l); } catch {}
-    if (l.trim()) {
-      console.error('[suwayomi:err]', l.trim().slice(0, 120));
-      lastError = l.trim().slice(0, 200);
-    }
+    const l = d.toString().trim();
+    if (l) console.error('[suwayomi:err]', l.slice(0, 120));
   });
-
-  suwayomiProc.on('exit', (code, signal) => {
-    console.log('[suwayomi] exited', code, signal);
+  suwayomiProc.on('exit', code => {
+    console.log('[suwayomi] exited', code);
     suwayomiProc = null;
     try { fs.unlinkSync(suwayomiPidFile); } catch {}
-    if (!isQuitting) {
-      const msg = code !== 0 ? `Suwayomi crashed (code ${code}). ${lastError}` : 'Suwayomi stopped unexpectedly.';
-      sendStatus('suwayomi-failed:' + msg);
-    }
+    if (!isQuitting) sendStatus('crashed');
   });
 
   try {
@@ -520,42 +742,54 @@ async function startSuwayomi() {
     console.log('[suwayomi] Ready!');
     return true;
   } catch (e) {
-    console.error('[suwayomi] Failed to become ready:', e.message);
-    throw new Error(`Suwayomi started but didn't respond in time. ${lastError}`);
+    console.error('[suwayomi] Failed:', e.message);
+    sendStatus('suwayomi-failed:' + e.message);
+    return false;
   }
 }
 
 // ── Backend server ────────────────────────────────────────────────────────────
 function startServer() {
   if (serverProc) return;
-  const logFile = path.join(userData, 'backend-startup.log');
-  try { fs.writeFileSync(logFile, `--- Backend Startup ${new Date().toISOString()} ---\n`); } catch {}
+  console.log('[server] starting at', backendDir);
 
-  console.log('[server] starting');
+  const env = {
+    ...process.env,
+    PORT: '3001',
+    EXT_DIR: userExtDir,
+    SUWAYOMI_EXT_DIR: path.join(userData, 'suwayomi-data', 'extensions'),
+    SUWAYOMI_URL: 'http://localhost:4567',
+  };
+
   serverProc = utilityProcess.fork(serverPath, [], {
     cwd: backendDir,
-    env: { ...process.env, PORT: '3001', EXT_DIR: userExtDir },
+    env,
     stdio: 'pipe',
     serviceName: 'akaReader-backend',
   });
 
+  let stderrBuffer = '';
   serverProc.stdout.on('data', d => {
-    const l = d.toString();
-    try { fs.appendFileSync(logFile, l); } catch {}
-    if (l.trim()) console.log('[server]', l.trim());
+    const l = d.toString().trim();
+    if (l) console.log('[server]', l);
   });
-
   serverProc.stderr.on('data', d => {
-    const l = d.toString();
-    try { fs.appendFileSync(logFile, '[ERR] ' + l); } catch {}
-    if (l.trim()) console.error('[server:err]', l.trim());
+    const l = d.toString().trim();
+    if (l) console.error('[server:err]', l);
+    stderrBuffer += l + '\n';
   });
 
-  serverProc.on('spawn', () => console.log('[server] spawned'));
-  serverProc.on('exit', code => {
-    const msg = `[server] exited with code ${code}`;
-    console.log(msg);
-    try { fs.appendFileSync(logFile, msg + '\n'); } catch {}
+  serverProc.on('spawn', () => {
+    console.log('[server] spawned (pid:', serverProc.pid, ')');
+    sendStatus('backend-spawned');
+  });
+  serverProc.on('error', err => {
+    console.error('[server] fork error:', err.message);
+    sendStatus('backend-error:' + err.message);
+  });
+  serverProc.on('exit', (code, signal) => {
+    console.log('[server] exited', code, signal ? `(${signal})` : '');
+    if (stderrBuffer) console.error('[server] final stderr:\n', stderrBuffer.slice(0, 1000));
     serverProc = null;
     if (!isQuitting) setTimeout(startServer, 3000);
   });
@@ -611,7 +845,7 @@ async function ensureManagedServices({ restart = false } = {}) {
         if (suwayomiProc) killSuwayomi();
         killServer();
         serviceMode = false;
-        await new Promise(r => setTimeout(r, 100));
+        await new Promise(r => setTimeout(r, 500));
       }
 
       sendStatus('starting-backend');
@@ -624,8 +858,15 @@ async function ensureManagedServices({ restart = false } = {}) {
       sendStatus('backend-ready');
 
       sendStatus('suwayomi-starting');
-      await ensureJre();
-      await ensureJar();
+      // Wrap JRE/JAR setup in try/catch to avoid unhandled rejections
+      try {
+        await ensureJre();
+        await ensureJar();
+      } catch (e) {
+        console.error('[startup] JRE/JAR setup failed:', e.message);
+        sendStatus('setup-failed:' + e.message);
+        throw e;
+      }
 
       if (await isServiceRunning()) {
         console.log('[startup] Service already running, waiting for it to be ready...');
@@ -642,11 +883,7 @@ async function ensureManagedServices({ restart = false } = {}) {
       return true;
     } catch (e) {
       console.error('[startup] Service error:', e.message);
-      const detail = e.message || 'Unknown startup error';
-      sendStatus('suwayomi-failed:' + detail);
-      
-      // Fallback: If Suwayomi fails but backend proxy is up, 
-      // we could technically proceed offline, but it's better to show the error first.
+      sendStatus('suwayomi-failed:' + e.message);
       return false;
     } finally {
       servicesPromise = null;
@@ -673,101 +910,107 @@ ipcMain.handle('ensure-services', () => ensureManagedServices());
 ipcMain.handle('restart-services', () => ensureManagedServices({ restart: true }));
 
 ipcMain.handle('check-service',     ()    => isServiceRunning());
-ipcMain.handle('install-service',   async () => {
-  try {
-    await installWindowsService();
-    return { ok: true };
-  } catch (e) {
-    console.error('[service] Install error:', e.message);
-    let msg = e.message;
-    if (msg.includes('Access is denied') || msg.includes('exit code 1')) {
-      msg = 'Access denied. Please run akaReader as Administrator to install the service.';
-    }
-    return { ok: false, error: msg };
-  }
-});
-ipcMain.handle('uninstall-service', async () => {
-  try {
-    await uninstallWindowsService();
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
-});
+ipcMain.handle('install-service',   async () => installWindowsService());
+ipcMain.handle('uninstall-service', async () => uninstallWindowsService());
 ipcMain.handle('open-data-dir',     ()    => shell.openPath(userData));
 ipcMain.handle('get-version',       ()    => app.getVersion());
 ipcMain.handle('get-java-path',     ()    => findJava());
 ipcMain.handle('get-jar-path',      ()    => jarPath);
 ipcMain.handle('get-suwayomi-config-path', () => suwayomiConfigPath);
 ipcMain.handle('open-external',      (_, url) => shell.openExternal(url));
+ipcMain.handle('verify-source-url', async (_, url) => {
+  let target;
+  try {
+    target = new URL(String(url || ''));
+  } catch {
+    return { ok: false, error: 'No verification URL is available for this source.' };
+  }
+  if (!['http:', 'https:'].includes(target.protocol)) {
+    return { ok: false, error: 'Unsupported verification URL.' };
+  }
+
+  if (verificationWindow && !verificationWindow.isDestroyed()) {
+    verificationWindow.focus();
+    return { ok: true, alreadyOpen: true };
+  }
+
+  return new Promise(resolve => {
+    verificationWindow = new BrowserWindow({
+      width: 1100,
+      height: 820,
+      minWidth: 720,
+      minHeight: 560,
+      parent: mainWindow || undefined,
+      modal: false,
+      title: 'Source verification',
+      backgroundColor: '#0a0a0f',
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        webSecurity: true,
+      },
+    });
+
+    verificationWindow.webContents.setWindowOpenHandler(({ url: nextUrl }) => {
+      verificationWindow.loadURL(nextUrl);
+      return { action: 'deny' };
+    });
+    verificationWindow.on('closed', () => {
+      verificationWindow = null;
+      resolve({ ok: true });
+    });
+    verificationWindow.loadURL(target.toString()).catch(e => {
+      if (verificationWindow && !verificationWindow.isDestroyed()) verificationWindow.close();
+      resolve({ ok: false, error: e?.message || 'Failed to open verification window.' });
+    });
+  });
+});
 
 ipcMain.handle('check-for-app-update', async () => {
   if (!autoUpdater) return { ok: false, error: 'Updater is not available in this build.' };
   if (isDev) return { ok: false, error: 'Updater only runs in a packaged app.' };
+  if (updateState.downloaded) return { ok: true, downloaded: true, version: updateState.version };
+  if (updateState.checking) return { ok: true, checking: true, version: updateState.version };
+  if (updateState.downloading) return { ok: true, downloading: true, version: updateState.version };
   try {
+    updateState.checking = true;
+    updateState.lastCheckAt = Date.now();
     const result = await autoUpdater.checkForUpdates();
-    const remoteVersion = result?.updateInfo?.version || null;
-    const localVersion = app.getVersion();
-    // Only report an update if remote is actually newer
-    const hasUpdate = remoteVersion && remoteVersion !== localVersion;
-    return { ok: true, version: hasUpdate ? remoteVersion : null, currentVersion: localVersion };
+    return { ok: true, version: result?.updateInfo?.version || null, downloaded: updateState.downloaded };
   } catch (e) {
     return { ok: false, error: e?.message || 'Failed to check for updates.' };
+  } finally {
+    updateState.checking = false;
   }
 });
 ipcMain.handle('download-app-update', async () => {
   if (!autoUpdater) return { ok: false, error: 'Updater is not available in this build.' };
   if (isDev) return { ok: false, error: 'Updater only runs in a packaged app.' };
+  if (updateState.downloaded) return { ok: true, downloaded: true, version: updateState.version };
+  // Guard against concurrent downloads. updateState.downloading is managed by
+  // event listeners; also use a local flag to cover the race window between
+  // the user click and the first download-progress event.
+  if (updateState.downloading) return { ok: true, downloading: true, version: updateState.version };
   try {
     await autoUpdater.downloadUpdate();
-    return { ok: true };
+    return { ok: true, version: updateState.version };
   } catch (e) {
     return { ok: false, error: e?.message || 'Failed to download update.' };
   }
 });
 ipcMain.handle('install-app-update', () => {
-  if (!autoUpdater || isDev) return { ok: false };
+  if (!autoUpdater || isDev) return { ok: false, error: 'Updater is not available in this build.' };
+  if (!updateState.downloaded) return { ok: false, error: 'No downloaded update is ready to install.' };
   isQuitting = true;
   autoUpdater.quitAndInstall(true, true);
   return { ok: true };
-});
-
-ipcMain.handle('reinstall-backend', async () => {
-  if (suwayomiProc) { try { suwayomiProc.kill('SIGKILL'); } catch {} }
-  if (serverProc) { try { serverProc.kill('SIGKILL'); } catch {} }
-  await new Promise(r => setTimeout(r, 1000));
-  try {
-    if (fs.existsSync(jarPath)) fs.rmSync(jarPath, { force: true });
-    if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true, force: true });
-  } catch (e) {
-    console.error('Failed to delete backend files:', e);
-    return { ok: false, error: e.message };
-  }
-  app.relaunch();
-  app.exit(0);
-});
-
-ipcMain.handle('factory-reset', async () => {
-  if (suwayomiProc) { try { suwayomiProc.kill('SIGKILL'); } catch {} }
-  if (serverProc) { try { serverProc.kill('SIGKILL'); } catch {} }
-  await new Promise(r => setTimeout(r, 1000));
-  try {
-    if (fs.existsSync(jarPath)) fs.rmSync(jarPath, { force: true });
-    if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true, force: true });
-    if (fs.existsSync(suwayomiRoot)) fs.rmSync(suwayomiRoot, { recursive: true, force: true });
-  } catch (e) {
-    console.error('Failed to delete backend/data files:', e);
-    return { ok: false, error: e.message };
-  }
-  app.relaunch();
-  app.exit(0);
 });
 
 // ── Tray ──────────────────────────────────────────────────────────────────────
 function createTray() {
   if (tray) { try { tray.destroy(); } catch {} }
   try {
-    tray = new Tray(iconPath);
+    tray = new Tray(trayIconPath);
     tray.setToolTip('akaReader');
     tray.setContextMenu(Menu.buildFromTemplate([
       { label: 'Open akaReader', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
@@ -807,7 +1050,7 @@ function createMainWindow() {
       nodeIntegration: false, contextIsolation: true,
       webSecurity: true, preload: preloadPath,
     },
-    icon: iconPath,
+    icon: windowIconPath,
   });
 
   mainWindow.webContents.on('did-finish-load', flushStatusQueue);
@@ -841,18 +1084,27 @@ app.whenReady().then(async () => {
   // and prevent XSS — allows our localhost backend and Vite dev server
   const { session } = require('electron');
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    let requestUrl;
+    try { requestUrl = new URL(details.url); } catch {}
+    const isAppPage = details.url.startsWith('file:') ||
+      (requestUrl && ['localhost', '127.0.0.1', '[::1]'].includes(requestUrl.hostname));
+    if (!isAppPage) {
+      callback({ responseHeaders: details.responseHeaders });
+      return;
+    }
+
     callback({
       responseHeaders: {
         ...details.responseHeaders,
         'Content-Security-Policy': [
-          "default-src 'self' 'unsafe-inline' http://localhost:* file:",
-          "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-          "style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com",
-          "font-src 'self' https://fonts.gstatic.com data:",
-          "img-src 'self' data: blob: http://localhost:* file:",
-          "script-src 'self' 'unsafe-inline' http://localhost:*",
-          "connect-src 'self' http://localhost:* ws://localhost:*"
-        ].join('; ')
+          "default-src 'self' 'unsafe-inline' http://localhost:* file:;",
+          "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;",
+          "style-src-elem 'self' 'unsafe-inline' https://fonts.googleapis.com;",
+          "font-src 'self' https://fonts.gstatic.com data:;",
+          "img-src 'self' data: blob: http://localhost:* file:;",
+          "script-src 'self' 'unsafe-inline' http://localhost:*;",
+          "connect-src 'self' http://localhost:* ws://localhost:*;"
+        ].join(' ')
       }
     });
   });
@@ -875,57 +1127,42 @@ app.whenReady().then(async () => {
   });
 
   if (autoUpdater && !isDev) {
-    autoUpdater.autoDownload = true;
-    autoUpdater.autoInstallOnAppQuit = true;
-
-    // Track whether this is a manual check (from settings) or automatic
-    let isManualCheck = false;
+    // Don't autoDownload — we want update-available to fire so the UI shows
+    // the notification banner. The user clicks "Restart now" to trigger install.
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
 
     autoUpdater.on('checking-for-update', () => {
       console.log('[updater] Checking for updates...');
+      updateState.checking = true;
+      updateState.lastCheckAt = Date.now();
       sendStatus('update-checking');
-      // Show a native notification so the user knows it's checking
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.setProgressBar(0.05, { mode: 'indeterminate' });
-      }
     });
 
     autoUpdater.on('update-available', i => {
       console.log('[updater] Update available:', i.version);
+      updateState.checking = false;
+      updateState.downloading = autoUpdater.autoDownload;
+      updateState.downloaded = false;
+      updateState.version = i.version || null;
       sendStatus('update-available:' + i.version);
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.setProgressBar(0.1);
-      }
-      dialog.showMessageBox(mainWindow, {
-        type: 'info',
-        title: 'Update Available',
-        message: `akaReader v${i.version} is available and downloading now.`,
-        detail: 'The update will download in the background. You\'ll be prompted to restart when it\'s ready.',
-        buttons: ['OK'],
-      }).catch(() => {});
     });
 
     autoUpdater.on('update-not-available', () => {
       console.log('[updater] No updates available');
+      updateState.checking = false;
+      updateState.downloading = false;
+      updateState.downloaded = false;
+      updateState.version = null;
       sendStatus('update-not-available');
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.setProgressBar(-1);
-      }
-      // Only show the "up to date" dialog on manual checks, not every 2h auto-check
-      if (isManualCheck) {
-        isManualCheck = false;
-        dialog.showMessageBox(mainWindow, {
-          type: 'info',
-          title: 'You\'re Up to Date',
-          message: `akaReader v${app.getVersion()} is the latest version.`,
-          buttons: ['OK'],
-        }).catch(() => {});
-      }
     });
 
     autoUpdater.on('download-progress', p => {
       const pct = Math.round(p.percent || 0);
+      updateState.checking = false;
+      updateState.downloading = true;
       sendStatus('update-downloading:' + pct);
+      // Show progress on the Windows taskbar icon
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.setProgressBar(pct / 100);
       }
@@ -933,25 +1170,23 @@ app.whenReady().then(async () => {
 
     autoUpdater.on('update-downloaded', (i) => {
       console.log('[updater] Update downloaded:', i?.version);
+      updateState.checking = false;
+      updateState.downloading = false;
+      updateState.downloaded = true;
+      updateState.version = i?.version || updateState.version;
       sendStatus('update-downloaded');
+      // Clear taskbar progress
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.setProgressBar(-1);
       }
-      dialog.showMessageBox(mainWindow, {
-        type: 'info',
-        title: 'Update Ready — akaReader v' + (i?.version || 'new'),
-        message: `akaReader v${i?.version || 'latest'} has been downloaded and is ready to install.`,
-        detail: 'The app will restart to apply the update. Your data and settings are safe.',
-        buttons: ['Restart Now', 'Later'],
-        defaultId: 0,
-      }).then(({ response }) => {
-        if (response === 0) { isQuitting = true; autoUpdater.quitAndInstall(true, true); }
-      });
     });
 
     autoUpdater.on('error', e => {
       console.error('[updater]', e.message);
+      updateState.checking = false;
+      updateState.downloading = false;
       sendStatus('update-error:' + (e?.message || 'unknown'));
+      // Clear taskbar progress on error
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.setProgressBar(-1);
       }
@@ -960,12 +1195,6 @@ app.whenReady().then(async () => {
     // Check immediately on launch, then every 2 hours
     autoUpdater.checkForUpdates().catch(() => {});
     setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 2 * 60 * 60 * 1000);
-
-    // Allow manual check from renderer
-    ipcMain.handle('manual-check-update', async () => {
-      isManualCheck = true;
-      try { await autoUpdater.checkForUpdates(); } catch {}
-    });
   }
 
   app.on('activate', () => {
