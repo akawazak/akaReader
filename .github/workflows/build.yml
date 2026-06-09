@@ -49,13 +49,14 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Download Suwayomi JAR (for bundled server)
-        uses: softprops/action-get-gh-release@v1
-        with:
-          repo: Suwayomi/Suwayomi-Server
-          pattern: 'Suwayomi-Server-v*.jar'
-          exclude: '-sources.jar'
-          file: backend/Suwayomi-Server.jar
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -sL "https://api.github.com/repos/Suwayomi/Suwayomi-Server/releases/latest" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -o release.json
+          ASSET_URL=$(grep -o '"browser_download_url": "[^"]*Suwayomi-Server-v[^"]*\.jar"' release.json | head -1 | grep -o 'https://[^"]*')
+          echo "Downloading: $ASSET_URL"
+          curl -sL "$ASSET_URL" -o backend/Suwayomi-Server.jar
+          rm release.json
 
       - name: Validate renderer
         working-directory: manga-nexus
@@ -106,12 +107,14 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Download Suwayomi linux-assets (for bundled JRE)
-        uses: softprops/action-get-gh-release@v1
-        with:
-          repo: Suwayomi/Suwayomi-Server
-          pattern: 'Suwayomi-Server-v*-linux-assets.tar.gz'
-          file: backend/suwayomi-linux-assets.tar.gz
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -sL "https://api.github.com/repos/Suwayomi/Suwayomi-Server/releases/latest" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -o release.json
+          ASSET_URL=$(grep -o '"browser_download_url": "[^"]*linux-assets.tar.gz"' release.json | grep -o 'https://[^"]*')
+          echo "Downloading: $ASSET_URL"
+          curl -sL "$ASSET_URL" -o backend/suwayomi-linux-assets.tar.gz
+          rm release.json
 
       - name: Validate renderer
         working-directory: manga-nexus
