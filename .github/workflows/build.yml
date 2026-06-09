@@ -37,6 +37,7 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Download Suwayomi JAR (for bundled server)
+        shell: bash
         run: |
           curl -sL "https://api.github.com/repos/Suwayomi/Suwayomi-Server/releases/latest" \
             -H "Accept: application/vnd.github.v3+json" \
