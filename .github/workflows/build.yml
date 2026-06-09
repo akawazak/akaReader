@@ -48,6 +48,16 @@ jobs:
         working-directory: backend
         run: npm install --no-audit --no-fund
 
+      - name: Download Suwayomi JAR (for bundled server)
+        run: |
+          # Download the platform-agnostic JAR — contains the server binary.
+          # The JRE is handled separately by ensureJre() at runtime.
+          ASSET_URL=$(curl -sL "https://api.github.com/repos/Suwayomi/Suwayomi-Server/releases/latest" \
+            -H "Accept: application/vnd.github.v3+json" \
+            | python3 -c "import sys,json; assets=json.load(sys.stdin)['assets']; print(next(a['browser_download_url'] for a in assets if a['name'].endswith('.jar') and not a['name'].endswith('-sources.jar')))")
+          echo "Downloading: $ASSET_URL"
+          curl -sL "$ASSET_URL" -o backend/Suwayomi-Server.jar
+
       - name: Validate renderer
         working-directory: manga-nexus
         run: npm run validate
@@ -95,6 +105,14 @@ jobs:
       - name: Install backend dependencies
         working-directory: backend
         run: npm install --no-audit --no-fund
+
+      - name: Download Suwayomi linux-assets (for bundled JRE)
+        run: |
+          ASSET_URL=$(curl -sL "https://api.github.com/repos/Suwayomi/Suwayomi-Server/releases/latest" \
+            -H "Accept: application/vnd.github.v3+json" \
+            | python3 -c "import sys,json; assets=json.load(sys.stdin)['assets']; print(next(a['browser_download_url'] for a in assets if a['name'].endswith('linux-assets.tar.gz')))")
+          echo "Downloading: $ASSET_URL"
+          curl -sL "$ASSET_URL" -o backend/suwayomi-linux-assets.tar.gz
 
       - name: Validate renderer
         working-directory: manga-nexus

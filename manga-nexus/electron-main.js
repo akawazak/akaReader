@@ -403,6 +403,40 @@ async function ensureJre() {
     return;
   }
 
+  // Check if linux-assets.tar.gz is bundled (contains JAR + bundled JRE).
+  // This runs BEFORE ensureJar() extracts it, so we extract the JRE here
+  // so that hasUsableJava() can find it immediately after.
+  const bundled = findBundledSuwayomi(backendDir);
+  if (bundled && bundled.type === 'tarball') {
+    console.log('[jre] Found bundled linux-assets, extracting JRE...');
+    sendStatus('installing-bundled-jre');
+    try {
+      const extractDir = path.join(userData, 'jre-tarball-extract');
+      if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true });
+      fs.mkdirSync(extractDir, { recursive: true });
+      await extractArchive(bundled.path, extractDir);
+      const entries = fs.readdirSync(extractDir, { withFileTypes: true });
+      const serverFolder = entries.find(e => e.isDirectory() && e.name.includes('Suwayomi'));
+      if (serverFolder) {
+        const srcJre = path.join(extractDir, serverFolder.name, 'jre');
+        if (fs.existsSync(srcJre)) {
+          if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true });
+          copyDirRecursive(srcJre, jreDir);
+          console.log('[jre] Bundled JRE from tarball copied to', jreDir);
+          try { fs.rmSync(extractDir, { recursive: true }); } catch {}
+          if (hasUsableJava()) {
+            console.log('[jre] Bundled JRE is usable at', findJava());
+            sendStatus('using-system-java');
+            return;
+          }
+        }
+      }
+      try { fs.rmSync(extractDir, { recursive: true }); } catch {}
+    } catch (e) {
+      console.warn('[jre] Failed to extract bundled JRE from tarball:', e.message);
+    }
+  }
+
   sendStatus('downloading-jre');
   const jreUrl = getJreUrl();
   const isTarGz = jreUrl.endsWith('.tar.gz');
@@ -448,25 +482,67 @@ async function ensureJar() {
     try { fs.unlinkSync(jarPath); } catch {}
   }
 
-  // Check if we have a bundled JAR in the backend directory
-  const bundledJar = findBundledJar(backendDir);
-  if (bundledJar) {
-    console.log('[jar] Found bundled JAR:', bundledJar.name);
-    sendStatus('installing-bundled-suwayomi');
-    try {
-      fs.copyFileSync(bundledJar.path, jarPath);
-      const sz = fs.statSync(jarPath).size;
-      if (sz > 1000) {
-        console.log('[jar] Bundled JAR copied to', jarPath, '- size:', sz, 'bytes');
-        return;
+  // Check if we have a bundled Suwayomi package in the backend directory
+  const bundled = findBundledSuwayomi(backendDir);
+  if (bundled) {
+    if (bundled.type === 'tarball') {
+      // linux-assets.tar.gz — contains both JAR and bundled JRE
+      console.log('[jar] Found bundled Suwayomi tarball:', bundled.name);
+      sendStatus('installing-bundled-suwayomi');
+      try {
+        const extractDir = path.join(userData, 'suwayomi-extract');
+        if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true });
+        fs.mkdirSync(extractDir, { recursive: true });
+        await extractArchive(bundled.path, extractDir);
+        // The tarball extracts into a folder like Suwayomi-Server-<version>/
+        const entries = fs.readdirSync(extractDir, { withFileTypes: true });
+        const serverFolder = entries.find(e => e.isDirectory() && e.name.includes('Suwayomi'));
+        if (!serverFolder) throw new Error('Could not find Suwayomi server folder in tarball');
+        const serverDir = path.join(extractDir, serverFolder.name);
+        // Copy the JAR
+        const jarFiles = fs.readdirSync(serverDir).filter(f => f.endsWith('.jar'));
+        if (!jarFiles.length) throw new Error('No JAR found in tarball');
+        const srcJar = path.join(serverDir, jarFiles[0]);
+        fs.copyFileSync(srcJar, jarPath);
+        // Copy the bundled JRE to userData/suwayomi-data/jre
+        const srcJre = path.join(serverDir, 'jre');
+        if (fs.existsSync(srcJre)) {
+          if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true });
+          copyDirRecursive(srcJre, jreDir);
+          console.log('[jar] Bundled JRE copied to', jreDir);
+        }
+        // Cleanup extract dir
+        try { fs.rmSync(extractDir, { recursive: true }); } catch {}
+        const sz = fs.statSync(jarPath).size;
+        if (sz > 1000) {
+          console.log('[jar] Bundled Suwayomi (with JRE) ready at', jarPath);
+          sendStatus('using-existing-suwayomi');
+          return;
+        }
+        fs.unlinkSync(jarPath);
+      } catch (e) {
+        console.error('[jar] Tarball extraction failed:', e.message);
+        try { fs.unlinkSync(bundled.path); } catch {}
       }
-      console.error('[jar] Copied JAR too small:', sz);
-      fs.unlinkSync(jarPath);
-    } catch (e) {
-      console.error('[jar] Copy failed:', e.message);
+    } else {
+      // Plain JAR — just copy it
+      console.log('[jar] Found bundled JAR:', bundled.name);
+      sendStatus('installing-bundled-suwayomi');
+      try {
+        fs.copyFileSync(bundled.path, jarPath);
+        const sz = fs.statSync(jarPath).size;
+        if (sz > 1000) {
+          console.log('[jar] Bundled JAR copied to', jarPath, '- size:', sz, 'bytes');
+          return;
+        }
+        console.error('[jar] Copied JAR too small:', sz);
+        fs.unlinkSync(jarPath);
+      } catch (e) {
+        console.error('[jar] Copy failed:', e.message);
+      }
     }
   } else {
-    console.log('[jar] No bundled JAR found in', backendDir);
+    console.log('[jar] No bundled Suwayomi found in', backendDir);
   }
 
   sendStatus('downloading-suwayomi');
@@ -478,18 +554,21 @@ async function ensureJar() {
   console.log('[jar] Ready at', jarPath);
 }
 
-// Scan directory for any JAR file (not just top-level)
-function findBundledJar(dir) {
+// Scan directory for Suwayomi bundle — plain JAR or linux-assets.tar.gz
+function findBundledSuwayomi(dir) {
   try {
     if (!fs.existsSync(dir)) return null;
-    // Top-level scan
     const files = fs.readdirSync(dir);
+    // Prefer linux-assets.tar.gz (has JAR + JRE) on all platforms
+    const tarball = files.find(f => f === 'suwayomi-linux-assets.tar.gz');
+    if (tarball) return { name: tarball, path: path.join(dir, tarball), type: 'tarball' };
+    // Fall back to plain JAR
     const jar = files.find(f => f.startsWith('Suwayomi-Server') && f.endsWith('.jar'));
-    if (jar) return { name: jar, path: path.join(dir, jar) };
-    // Nested scan (some releases unpack into a subfolder)
+    if (jar) return { name: jar, path: path.join(dir, jar), type: 'jar' };
+    // Nested JAR (some releases unpack into subfolder)
     for (const f of files) {
       if (f.endsWith('.jar') && f.includes('Suwayomi')) {
-        return { name: f, path: path.join(dir, f) };
+        return { name: f, path: path.join(dir, f), type: 'jar' };
       }
     }
   } catch (e) {
@@ -1048,8 +1127,10 @@ app.whenReady().then(async () => {
   });
 
   if (autoUpdater && !isDev) {
-    autoUpdater.autoDownload = true;
-    autoUpdater.autoInstallOnAppQuit = true;
+    // Don't autoDownload — we want update-available to fire so the UI shows
+    // the notification banner. The user clicks "Restart now" to trigger install.
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
 
     autoUpdater.on('checking-for-update', () => {
       console.log('[updater] Checking for updates...');

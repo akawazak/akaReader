@@ -71,6 +71,7 @@
           "server.js",
           "package.json",
           "**/*.jar",
+          "**/suwayomi-linux-assets.tar.gz",
           "node_modules/**/*",
           "!node_modules/.cache/**",
           "!node_modules/.bin/**",

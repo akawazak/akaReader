@@ -2456,6 +2456,37 @@ const ServiceErrorModal = memo(({ onRestart }) => {
   );
 });
 
+// ==================== RELEASE NOTES MODAL ====================
+const ReleaseNotesModal = memo(({ notes, version, onClose }) => {
+  if (!notes) return null;
+  // Simple markdown-ish: bold headings, line breaks, code blocks
+  const formatted = notes
+    .replace(/^### (.+)$/gm, '<h3 style="font-size:15px;font-weight:700;color:var(--text);margin:16px 0 6px">$1</h3>')
+    .replace(/^## (.+)$/gm, '<h2 style="font-size:17px;font-weight:800;color:var(--text);margin:20px 0 8px">$1</h2>')
+    .replace(/^# (.+)$/gm, '<h1 style="font-size:19px;font-weight:900;color:var(--text);margin:24px 0 10px">$1</h1>')
+    .replace(/`([^`]+)`/g, '<code style="background:rgba(249,115,22,0.12);color:#f97316;padding:1px 5px;border-radius:4px;font-size:12px">$1</code>')
+    .replace(/\n\n/g, '</p><p style="margin:8px 0;line-height:1.7">')
+    .replace(/\n/g, '<br/>');
+  return (
+    <div className="anim-fadeIn" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(16px)', zIndex: 1600, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+      <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 24, padding: '32px 36px', maxWidth: 560, width: '100%', maxHeight: '80vh', overflowY: 'auto', boxShadow: '0 32px 80px rgba(0,0,0,0.6)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+          <div>
+            <h2 style={{ fontFamily: "'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight: 800, fontSize: 18, margin: 0 }}>Release Notes</h2>
+            <span style={{ fontSize: 12, color: 'var(--muted)', marginTop: 4, display: 'block' }}>v{version}</span>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)', display: 'flex', padding: 8 }}><X size={20} /></button>
+        </div>
+        <div style={{ color: 'var(--text-dim)', fontSize: 13, lineHeight: 1.7, fontFamily: "'Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif" }}
+          dangerouslySetInnerHTML={{ __html: `<p style="margin:8px 0;line-height:1.7">${formatted}</p>` }} />
+        <div style={{ marginTop: 24, display: 'flex', justifyContent: 'center' }}>
+          <Btn onClick={onClose}>Close</Btn>
+        </div>
+      </div>
+    </div>
+  );
+});
+
 // ==================== STARTUP SCREEN ====================
 const StartupScreen = memo(({ onProceed, onRetry, managedStartup = false, backendOnline = null, suwayomiReady = false }) => {
   const [hasFailed, setHasFailed] = useState(false);
@@ -3914,6 +3945,8 @@ const App = memo(() => {
   const [updateAvailable, setUpdateAvailable] = useState(null);
   const [updateDownloaded, setUpdateDownloaded] = useState(false);
   const [updateDownloadPct, setUpdateDownloadPct] = useState(null);
+  const [releaseNotes, setReleaseNotes] = useState('');
+  const [showReleaseNotes, setShowReleaseNotes] = useState(false);
 
   const [tab, setTab] = useState('home');
   const [view, setView] = useState('tabs');
@@ -3952,9 +3985,16 @@ const App = memo(() => {
         } else if (status.startsWith('suwayomi-failed:')) {
           setSuwayomiReady(false);
         } else if (status.startsWith('update-available:')) {
-          setUpdateAvailable(status.split(':')[1]);
+          const ver = status.split(':')[1];
+          setUpdateAvailable(ver);
           setUpdateDownloaded(false);
           setUpdateDownloadPct(null);
+          setReleaseNotes('');
+          // Fetch actual release notes from GitHub API
+          fetch(`https://api.github.com/repos/akawazak/akareader/releases/tags/v${ver}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(data => { if (data?.body) setReleaseNotes(data.body); })
+            .catch(() => {});
         } else if (status.startsWith('update-downloading:')) {
           setUpdateDownloadPct(status.split(':')[1]);
         } else if (status === 'update-downloaded') {
@@ -3964,6 +4004,7 @@ const App = memo(() => {
           setUpdateDownloadPct(null);
         } else if (status.startsWith('update-error:')) {
           setUpdateDownloadPct(null);
+          setUpdateDownloaded(false);
         }
       });
     }
@@ -4681,6 +4722,7 @@ const App = memo(() => {
       {catchUpManga && <CatchUpModal manga={catchUpManga} onClose={() => setCatchUpManga(null)} onJumpTo={ch => { setCatchUpManga(null); openChapter(ch, activeSource?.id || mangaDetail?.sourceId, mangaDetail?.id || selectedManga?.id); }} />}
       {showShareCard && <ShareCardModal library={library} history={history} progress={progress} readChapters={readChapters} settings={settings} onClose={() => setShowShareCard(false)} />}
       {showErrorModal && <ServiceErrorModal onRestart={() => { setShowErrorModal(false); checkHealth(); }} />}
+      {showReleaseNotes && <ReleaseNotesModal notes={releaseNotes} version={updateAvailable} onClose={() => setShowReleaseNotes(false)} />}
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
       {backendOnline && !suwayomiReady && !showErrorModal && (forceProceed || canUseShellOffline) && (
         <div className="anim-slideDown" style={{ position: 'fixed', top: 38, left: 0, right: 0, zIndex: 800, background: 'rgba(15,15,24,0.96)', backdropFilter: 'blur(12px)', borderBottom: '1px solid rgba(249,115,22,0.25)', padding: '9px 20px', display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -4688,16 +4730,22 @@ const App = memo(() => {
           <span style={{ fontSize: 12, color: 'var(--muted)', fontWeight: 500 }}>Suwayomi is starting… browse and extensions will load shortly</span>
         </div>
       )}
-      {updateAvailable && (
+{updateAvailable && (
         <div className="anim-fadeIn" style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 900, background: 'linear-gradient(90deg,rgba(234,179,8,0.95),rgba(251,191,36,0.95))', backdropFilter: 'blur(12px)', padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, pointerEvents: 'auto' }}>
           <BellRing size={16} style={{ color: '#78350f' }} />
           <span style={{ fontSize: 13, fontWeight: 800, color: '#78350f', display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {updateDownloaded ? `akaReader v${updateAvailable} is ready and will install when you close the app` : updateDownloadPct ? `Downloading akaReader v${updateAvailable} in the background (${updateDownloadPct}%)` : `akaReader v${updateAvailable} is downloading in the background`}
+            {updateDownloaded ? `akaReader v${updateAvailable} is ready — click Restart to apply` : updateDownloadPct ? `Downloading v${updateAvailable}… ${updateDownloadPct}%` : `akaReader v${updateAvailable} is available`}
           </span>
-          {updateDownloaded && (
+          {updateDownloaded ? (
             <button onClick={() => window.electronAPI?.installAppUpdate?.()} style={{ background: '#78350f', color: '#fff7ed', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 800, cursor: 'pointer', flexShrink: 0 }}>Restart now</button>
+          ) : (
+            <button onClick={() => window.electronAPI?.downloadAppUpdate?.()} style={{ background: '#78350f', color: '#fff7ed', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 800, cursor: 'pointer', flexShrink: 0 }}>Download</button>
           )}
-          <a href={`https://github.com/akawazak/akareader/releases/tag/v${updateAvailable}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, fontWeight: 700, color: '#78350f', textDecoration: 'underline' }}>Release notes</a>
+          {releaseNotes ? (
+            <button onClick={() => setShowReleaseNotes(true)} style={{ background: 'none', border: 'none', fontSize: 12, fontWeight: 700, color: '#78350f', textDecoration: 'underline', cursor: 'pointer', flexShrink: 0 }}>Release notes</button>
+          ) : (
+            <a href={`https://github.com/akawazak/akareader/releases/tag/v${updateAvailable}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, fontWeight: 700, color: '#78350f', textDecoration: 'underline' }}>Release notes</a>
+          )}
           <button onClick={() => setUpdateAvailable(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: '#78350f', display: 'flex' }}><X size={16} /></button>
         </div>
       )}
