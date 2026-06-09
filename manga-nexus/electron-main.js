@@ -194,7 +194,7 @@ function extractArchive(archivePath, destDir) {
   // and tar.gz (Linux/macOS JRE) without pulling in a Node dep.
   //
   // - Windows: PowerShell's Expand-Archive handles ZIP.
-  // - POSIX:   `unzip` for ZIP, `tar` for tar.gz — both ship by default on
+  // - POSIX:   `tar` for tar.gz, `unzip` for ZIP — both ship by default on
   //            essentially every Linux/macOS desktop install.
   return new Promise((resolve, reject) => {
     const lower = String(archivePath).toLowerCase();
@@ -217,15 +217,27 @@ function extractArchive(archivePath, destDir) {
       return;
     }
 
-    // POSIX path
+    // POSIX path — ensure executable permissions before running
+    const runCmd = (cmd, opts = {}) => {
+      return new Promise((res, rej) => {
+        cp.exec(cmd, { timeout: 300000, ...opts }, (err, stdout, stderr) => {
+          if (err) {
+            // Provide diagnostic context on failure
+            const extra = stderr ? `\nstderr: ${stderr.slice(0, 500)}` : '';
+            rej(new Error(`${err.message}${extra}`));
+          } else {
+            res();
+          }
+        });
+      });
+    };
+
     if (lower.endsWith('.tar.gz') || lower.endsWith('.tgz')) {
-      cp.exec(`tar -xzf ${shellQuote(archivePath)} -C ${shellQuote(destDir)}`,
-        err => err ? reject(err) : resolve());
+      runCmd(`tar -xzf ${shellQuote(archivePath)} -C ${shellQuote(destDir)}`).then(resolve).catch(reject);
       return;
     }
     if (lower.endsWith('.zip')) {
-      cp.exec(`unzip -q -o ${shellQuote(archivePath)} -d ${shellQuote(destDir)}`,
-        err => err ? reject(err) : resolve());
+      runCmd(`unzip -q -o ${shellQuote(archivePath)} -d ${shellQuote(destDir)}`).then(resolve).catch(reject);
       return;
     }
     reject(new Error(`Unsupported archive format: ${archivePath}`));
@@ -383,13 +395,12 @@ async function ensureJre() {
   // Check if we have a bundled JRE in the backend directory
   const bundledJre = path.join(backendDir, 'jre');
   if (fs.existsSync(bundledJre)) {
-    console.log('[jre] Found bundled JRE, copying...');
+    console.log('[jre] Found bundled JRE, copying recursively...');
     sendStatus('installing-bundled-jre');
     fs.mkdirSync(jreDir, { recursive: true });
-    // Copy the bundled JRE recursively into the target directory
-    fs.cpSync(bundledJre, jreDir, { recursive: true });
+    copyDirRecursive(bundledJre, jreDir);
     console.log('[jre] Bundled JRE copied to', jreDir);
-    return; 
+    return;
   }
 
   sendStatus('downloading-jre');
@@ -411,36 +422,51 @@ async function ensureJre() {
   console.log('[jre] Ready at', jreDir);
 }
 
+// Cross-platform recursive copy — replaces fs.cpSync for older Node.js
+function copyDirRecursive(src, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  const entries = fs.readdirSync(src, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyDirRecursive(srcPath, destPath);
+    } else {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
+
 async function ensureJar() {
   if (fs.existsSync(jarPath)) {
-    sendStatus('using-existing-suwayomi');
-    return;
+    const sz = fs.statSync(jarPath).size;
+    if (sz > 1000) {
+      sendStatus('using-existing-suwayomi');
+      return;
+    }
+    console.warn('[jar] Existing JAR too small, replacing:', jarPath);
+    try { fs.unlinkSync(jarPath); } catch {}
   }
 
   // Check if we have a bundled JAR in the backend directory
-  try {
-    if (fs.existsSync(backendDir)) {
-      const files = fs.readdirSync(backendDir);
-      const bundledJar = files.find(f => f.startsWith('Suwayomi-Server') && f.endsWith('.jar'));
-      if (bundledJar) {
-        const bundledPath = path.join(backendDir, bundledJar);
-        console.log('[jar] Found bundled JAR:', bundledJar);
-        sendStatus('installing-bundled-suwayomi');
-        fs.copyFileSync(bundledPath, jarPath);
-        
-        // Validate copied JAR exists and has content
-        if (!fs.existsSync(jarPath) || fs.statSync(jarPath).size < 1000) {
-          console.error('[jar] Bundled JAR copy failed or file too small');
-          fs.unlinkSync(jarPath);
-          throw new Error('Bundled JAR copy failed');
-        }
-        
-        console.log('[jar] Bundled JAR copied to', jarPath, '- size:', fs.statSync(jarPath).size, 'bytes');
+  const bundledJar = findBundledJar(backendDir);
+  if (bundledJar) {
+    console.log('[jar] Found bundled JAR:', bundledJar.name);
+    sendStatus('installing-bundled-suwayomi');
+    try {
+      fs.copyFileSync(bundledJar.path, jarPath);
+      const sz = fs.statSync(jarPath).size;
+      if (sz > 1000) {
+        console.log('[jar] Bundled JAR copied to', jarPath, '- size:', sz, 'bytes');
         return;
       }
+      console.error('[jar] Copied JAR too small:', sz);
+      fs.unlinkSync(jarPath);
+    } catch (e) {
+      console.error('[jar] Copy failed:', e.message);
     }
-  } catch (e) {
-    console.warn('[jar] Failed to check for bundled JAR:', e.message);
+  } else {
+    console.log('[jar] No bundled JAR found in', backendDir);
   }
 
   sendStatus('downloading-suwayomi');
@@ -450,6 +476,26 @@ async function ensureJar() {
     if (pct % 5 === 0) sendStatus('downloading-suwayomi:' + pct);
   });
   console.log('[jar] Ready at', jarPath);
+}
+
+// Scan directory for any JAR file (not just top-level)
+function findBundledJar(dir) {
+  try {
+    if (!fs.existsSync(dir)) return null;
+    // Top-level scan
+    const files = fs.readdirSync(dir);
+    const jar = files.find(f => f.startsWith('Suwayomi-Server') && f.endsWith('.jar'));
+    if (jar) return { name: jar, path: path.join(dir, jar) };
+    // Nested scan (some releases unpack into a subfolder)
+    for (const f of files) {
+      if (f.endsWith('.jar') && f.includes('Suwayomi')) {
+        return { name: f, path: path.join(dir, f) };
+      }
+    }
+  } catch (e) {
+    console.warn('[jar] Scan failed:', e.message);
+  }
+  return null;
 }
 
 async function ensureNssm() {
@@ -626,18 +672,24 @@ async function startSuwayomi() {
 // ── Backend server ────────────────────────────────────────────────────────────
 function startServer() {
   if (serverProc) return;
-  console.log('[server] starting');
+  console.log('[server] starting at', backendDir);
+
+  const env = {
+    ...process.env,
+    PORT: '3001',
+    EXT_DIR: userExtDir,
+    SUWAYOMI_EXT_DIR: path.join(userData, 'suwayomi-data', 'extensions'),
+    SUWAYOMI_URL: 'http://localhost:4567',
+  };
+
   serverProc = utilityProcess.fork(serverPath, [], {
     cwd: backendDir,
-    env: {
-      ...process.env,
-      PORT: '3001',
-      EXT_DIR: userExtDir,
-      SUWAYOMI_EXT_DIR: path.join(userData, 'suwayomi-data', 'extensions'),
-    },
+    env,
     stdio: 'pipe',
     serviceName: 'akaReader-backend',
   });
+
+  let stderrBuffer = '';
   serverProc.stdout.on('data', d => {
     const l = d.toString().trim();
     if (l) console.log('[server]', l);
@@ -645,10 +697,20 @@ function startServer() {
   serverProc.stderr.on('data', d => {
     const l = d.toString().trim();
     if (l) console.error('[server:err]', l);
+    stderrBuffer += l + '\n';
   });
-  serverProc.on('spawn', () => console.log('[server] spawned'));
-  serverProc.on('exit', code => {
-    console.log('[server] exited', code);
+
+  serverProc.on('spawn', () => {
+    console.log('[server] spawned (pid:', serverProc.pid, ')');
+    sendStatus('backend-spawned');
+  });
+  serverProc.on('error', err => {
+    console.error('[server] fork error:', err.message);
+    sendStatus('backend-error:' + err.message);
+  });
+  serverProc.on('exit', (code, signal) => {
+    console.log('[server] exited', code, signal ? `(${signal})` : '');
+    if (stderrBuffer) console.error('[server] final stderr:\n', stderrBuffer.slice(0, 1000));
     serverProc = null;
     if (!isQuitting) setTimeout(startServer, 3000);
   });

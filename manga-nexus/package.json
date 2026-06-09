@@ -70,14 +70,15 @@
         "filter": [
           "server.js",
           "package.json",
-          "*.jar",
+          "**/*.jar",
           "node_modules/**/*",
           "!node_modules/.cache/**",
           "!node_modules/.bin/**",
           "!node_modules/**/test/**",
           "!node_modules/**/tests/**",
           "!node_modules/**/*.md",
-          "!node_modules/**/*.map"
+          "!node_modules/**/*.map",
+          "!**/.*"
         ]
       }
     ],
