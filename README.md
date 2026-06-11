@@ -1,27 +1,62 @@
 # akaReader
 
-akaReader is a Windows-first desktop manga reader powered by Suwayomi. It bundles an Electron app, a local Node/Express proxy, and managed Suwayomi startup so users can browse sources, read chapters, keep a local library, and save chapters for offline reading.
+**A polished desktop manga reader for Windows — powered by Suwayomi.**
 
-## Current Status
+akaReader gives you a native, offline-capable reading experience with a built-in Suwayomi runtime. Browse sources, manage your library, and read chapters even without internet — all from a single, self-contained Electron app.
 
-akaReader is usable as a beta-style desktop app. The renderer builds, the high-risk React hook-order guard passes, and Windows packaging is configured through Electron Builder.
+<!-- Add a screenshot PNG to manga-nexus/public/screenshot.png to show it here -->
 
-The app is not a licensed manga store and does not provide content itself. It depends on user-installed Suwayomi source extensions and their upstream sites.
+---
 
 ## Features
 
-- Browse Suwayomi sources and extension catalogs
-- Search, open manga details, and read chapters
-- Library, history, categories, reading progress, and reading stats
-- Paged, scroll, and webtoon-style reader modes
-- Offline chapter downloads stored in IndexedDB
-- Managed local backend and Suwayomi startup in Electron
-- Source verification popup for sites that require browser challenges
-- Windows installer, portable build, and packaged update flow
+### Reading
+- **Multiple reading modes** — paged, scroll, and webtoon styles
+- **Chapter preloading** — seamless next-chapter continuation
+- **Progress tracking** — remembers exactly where you left off
+- **Reading stats** — time spent reading, history per manga
 
-## Development
+### Library
+- **Personal library** — add manga to your own collection
+- **Categories** — organize with custom tags
+- **Search & browse** — explore any Suwayomi source and extension
 
-Install dependencies separately for the backend and desktop app:
+### Offline
+- **Download chapters** — save pages to IndexedDB
+- **Read anywhere** — chapters load from local storage, no network needed
+- **Cover and metadata** — cached alongside chapter data
+
+### Desktop
+- **Windows installer** — one-click NSIS setup
+- **Portable build** — run from anywhere, no install required
+- **Auto-updates** — patches download in the background
+- **System tray** — minimize to tray, keep Suwayomi running
+- **Source verification** — handles browser-challenge sites (Cloudflare, etc.)
+
+---
+
+## Tech Stack
+
+| Layer | Tech |
+|---|---|
+| Desktop shell | Electron 30 |
+| Frontend | React 18 + Vite 5 |
+| Backend proxy | Node.js + Express |
+| Manga runtime | Suwayomi (bundled) |
+| Icons | Lucide React |
+| Packaging | electron-builder |
+| Updates | electron-updater |
+
+---
+
+## Quick Start
+
+### Prerequisites
+- **Windows 10/11** (64-bit)
+- **Node.js 18+**
+- **Java 17+** (for Suwayomi — auto-installed if missing)
+
+### Install dependencies
 
 ```powershell
 cd backend
@@ -31,41 +66,97 @@ cd ..\manga-nexus
 npm install
 ```
 
-Run the full Electron app:
+### Run in development
 
 ```powershell
 cd manga-nexus
 npm run electron:dev
 ```
 
-Useful validation commands:
+> First run will download the Suwayomi JAR if it's not already present. Give it a minute — it only happens once.
+
+### Validate before packaging
 
 ```powershell
-npm run lint -- --quiet
-npm run check:hook-order
-npm run build
+cd manga-nexus
+npm run validate
 ```
 
-## Packaging
-
-From `manga-nexus/`:
+### Build Windows installer / portable
 
 ```powershell
-npm run validate
+cd manga-nexus
 npm run dist
 ```
 
-This creates Windows NSIS and portable artifacts in `manga-nexus/dist-electron`.
+Output lands in `manga-nexus/dist-electron/`.
 
-See `docs/PUBLISHING.md` before tagging a public release.
+---
 
-## Monetization Notes
+## Project Structure
 
-The safest low-key monetization path is support and convenience, not content access:
+```
+akaReader/
+├── backend/               # Express proxy + Suwayomi JAR
+│   ├── server.js          # REST API fronting Suwayomi
+│   └── package.json
+├── manga-nexus/           # Electron app
+│   ├── electron-main.js   # Main process, service startup
+│   ├── preload.js         # IPC bridge
+│   └── src/                # React renderer
+│       ├── App.jsx         # Main state and UI
+│       ├── components/     # Reader, extensions, etc.
+│       └── views/          # Home, browse, detail views
+├── docs/                  # Architecture & dev notes
+└── README.md
+```
 
-- GitHub Sponsors, Ko-fi, or a small support link in settings
-- Optional supporter themes or app polish features
-- Paid convenience services such as encrypted settings sync or backup
-- Early-access builds for supporters
+---
 
-Avoid monetizing access to manga/source content unless licensing is handled separately.
+## Architecture
+
+```
+React renderer → Express proxy (3001) → Suwayomi (4567) → Source extensions
+                       ↑
+                  Electron main process supervises both
+```
+
+The backend adds caching, retries, and a simplified REST surface. Offline chapters are stored in the renderer's IndexedDB — no backend involvement.
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full picture.
+
+---
+
+## Configuration
+
+Settings are stored in `localStorage` and cover:
+- Reading mode defaults (paged / scroll / webtoon)
+- Image quality and preload behavior
+- Library view preferences
+- App-level preferences (tray, minimize behavior)
+
+Suwayomi source extensions are managed through the app's Extensions tab.
+
+---
+
+## Monetization
+
+akaReader is free and open source. If you want to support development:
+
+- GitHub Sponsors
+- Ko-fi
+- Convenience features (themes, encrypted settings sync) — never content access
+
+The app does not provide manga content. It depends on user-installed Suwayomi extensions and their upstream sites.
+
+---
+
+## Contributing
+
+Found a bug or want a feature? Open an issue. PRs welcome — run `npm run validate` before submitting to catch lint and hook-order issues.
+
+---
+
+## License
+
+MIT — add a `LICENSE` file to the repo root to enable.
