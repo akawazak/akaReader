@@ -196,6 +196,11 @@ function extractArchive(archivePath, destDir) {
   // - Windows: PowerShell's Expand-Archive handles ZIP.
   // - POSIX:   `tar` for tar.gz, `unzip` for ZIP — both ship by default on
   //            essentially every Linux/macOS desktop install.
+  try {
+    fs.mkdirSync(destDir, { recursive: true });
+  } catch (err) {
+    console.warn('[extract] Failed to create destination directory:', err.message);
+  }
   return new Promise((resolve, reject) => {
     const lower = String(archivePath).toLowerCase();
 
@@ -254,13 +259,23 @@ function shellQuote(value) {
 
 function findJava() {
   // 1. Check for downloaded JRE in userData (per-platform binary name)
-  if (fs.existsSync(javaExe)) return javaExe;
+  if (fs.existsSync(javaExe)) {
+    if (process.platform !== 'win32') {
+      try { fs.chmodSync(javaExe, 0o755); } catch (e) { console.warn('[findJava] Failed to chmod javaExe:', e.message); }
+    }
+    return javaExe;
+  }
 
   // 2. Check for bundled JRE in backend resources
   const bundledJava = process.platform === 'win32'
     ? path.join(backendDir, 'jre', 'bin', 'java.exe')
     : path.join(backendDir, 'jre', 'bin', 'java');
-  if (fs.existsSync(bundledJava)) return bundledJava;
+  if (fs.existsSync(bundledJava)) {
+    if (process.platform !== 'win32') {
+      try { fs.chmodSync(bundledJava, 0o755); } catch (e) { console.warn('[findJava] Failed to chmod bundledJava:', e.message); }
+    }
+    return bundledJava;
+  }
 
   // 3. Check JAVA_HOME with the right binary name for the platform
   if (process.env.JAVA_HOME) {
@@ -399,6 +414,9 @@ async function ensureJre() {
     sendStatus('installing-bundled-jre');
     fs.mkdirSync(jreDir, { recursive: true });
     copyDirRecursive(bundledJre, jreDir);
+    if (process.platform !== 'win32') {
+      try { fs.chmodSync(javaExe, 0o755); } catch (e) { console.warn('[jre] Failed to chmod javaExe:', e.message); }
+    }
     console.log('[jre] Bundled JRE copied to', jreDir);
     return;
   }
@@ -422,6 +440,9 @@ async function ensureJre() {
         if (fs.existsSync(srcJre)) {
           if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true });
           copyDirRecursive(srcJre, jreDir);
+          if (process.platform !== 'win32') {
+            try { fs.chmodSync(javaExe, 0o755); } catch (e) { console.warn('[jre] Failed to chmod javaExe:', e.message); }
+          }
           console.log('[jre] Bundled JRE from tarball copied to', jreDir);
           try { fs.rmSync(extractDir, { recursive: true }); } catch {}
           if (hasUsableJava()) {
@@ -451,6 +472,9 @@ async function ensureJre() {
   if (!folder) throw new Error('JRE folder not found');
   if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true });
   fs.renameSync(path.join(extractDir, folder), jreDir);
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(javaExe, 0o755); } catch (e) { console.warn('[jre] Failed to chmod javaExe:', e.message); }
+  }
   try { fs.unlinkSync(archivePath); } catch {}
   try { fs.rmSync(extractDir, { recursive: true }); } catch {}
   console.log('[jre] Ready at', jreDir);
@@ -509,6 +533,9 @@ async function ensureJar() {
         if (fs.existsSync(srcJre)) {
           if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true });
           copyDirRecursive(srcJre, jreDir);
+          if (process.platform !== 'win32') {
+            try { fs.chmodSync(javaExe, 0o755); } catch (e) { console.warn('[jar] Failed to chmod javaExe:', e.message); }
+          }
           console.log('[jar] Bundled JRE copied to', jreDir);
         }
         // Cleanup extract dir
@@ -721,6 +748,11 @@ async function startSuwayomi() {
 
   // FIX: write PID immediately so cleanup works even after forced kill
   fs.writeFileSync(suwayomiPidFile, String(suwayomiProc.pid));
+
+  suwayomiProc.on('error', err => {
+    console.error('[suwayomi] spawn error:', err.message);
+    sendStatus('suwayomi-failed:' + err.message);
+  });
 
   suwayomiProc.stdout.on('data', d => {
     const l = d.toString().trim();

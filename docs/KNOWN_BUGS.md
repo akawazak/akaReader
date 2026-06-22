@@ -225,6 +225,16 @@ Verification run:
 - Fix: removed the stale alternative component set that had drifted away from the real app state surface.
 - Result: future work is less likely to accidentally re-import outdated implementations.
 
+### Fixed 2026-06-22: Suwayomi download, extraction and execution failures on Linux/POSIX
+
+- File: `manga-nexus/electron-main.js`
+- Fix:
+  - `extractArchive()` now recursively creates the destination directory (`destDir`) before running extraction commands. This prevents `tar` from failing on Linux/POSIX where target folders must exist.
+  - Enforced executable permissions (`chmod +x` / `0o755`) on local and bundled Java binaries under `userData` and `backend/` directories when discovered/used in `findJava()`.
+  - Added post-copy and post-extraction permission configuration to ensure the java binary has execute access.
+  - Added an `'error'` event listener to the spawned Suwayomi process in `startSuwayomi()` to catch runtime launch issues (like EACCES permission denials) cleanly and prevent Electron crash loops.
+- Result: Packages installed or extracted on Linux/Ubuntu can now download, extract, and spawn Suwayomi without permission errors or directory missing failures.
+
 ### Improved 2026-06-09: Cross-platform service startup (Linux/macOS local dev)
 
 - File: `manga-nexus/electron-main.js`
