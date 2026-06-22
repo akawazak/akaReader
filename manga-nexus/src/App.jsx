@@ -1305,7 +1305,64 @@ const SettingsPage = memo(() => {
   const [serviceStatus, setServiceStatus] = useState(null);
   const [serviceWorking, setServiceWorking] = useState(false);
   const [runtimeInfo, setRuntimeInfo] = useState({ javaPath: '', jarPath: '', configPath: '' });
-  const [appUpdateState, setAppUpdateState] = useState({ checking: false, message: '' });
+  const [appUpdateState, setAppUpdateState] = useState({ checking: false, message: '', version: null, downloaded: false, downloading: false, pct: null });
+
+  useEffect(() => {
+    let unsub = null;
+    if (window.electronAPI?.onServicesStatus) {
+      unsub = window.electronAPI.onServicesStatus((status) => {
+        if (status.startsWith('update-available:')) {
+          const ver = status.split(':')[1];
+          setAppUpdateState(prev => ({
+            ...prev,
+            message: `Update v${ver} is available`,
+            version: ver,
+            downloading: false,
+            downloaded: false,
+            pct: null
+          }));
+        } else if (status.startsWith('update-downloading:')) {
+          const pct = status.split(':')[1];
+          setAppUpdateState(prev => ({
+            ...prev,
+            message: `Downloading update… ${pct}%`,
+            downloading: true,
+            pct: pct
+          }));
+        } else if (status === 'update-downloaded') {
+          setAppUpdateState(prev => ({
+            ...prev,
+            message: `Update is ready — click Restart to apply`,
+            downloaded: true,
+            downloading: false,
+            pct: null
+          }));
+        } else if (status === 'update-not-available') {
+          setAppUpdateState(prev => ({
+            ...prev,
+            message: 'No update found',
+            version: null,
+            downloading: false,
+            downloaded: false,
+            pct: null
+          }));
+        } else if (status.startsWith('update-error:')) {
+          const err = status.split(':')[1] || 'unknown error';
+          setAppUpdateState(prev => ({
+            ...prev,
+            message: `Update error: ${err}`,
+            downloading: false,
+            downloaded: false,
+            pct: null
+          }));
+        }
+      });
+    }
+    return () => {
+      if (typeof unsub === 'function') unsub();
+    };
+  }, []);
+
   const installedExtCount = useMemo(() => {
     const seen = new Set();
     extensions.forEach(ext => {
@@ -1378,7 +1435,7 @@ const SettingsPage = memo(() => {
       toast('App updater is not available in this build', 'warning');
       return;
     }
-    setAppUpdateState({ checking: true, message: 'Checking...' });
+    setAppUpdateState({ checking: true, message: 'Checking...', version: null, downloaded: false, downloading: false, pct: null });
     const result = await window.electronAPI.checkForAppUpdate();
     if (result?.ok) {
       const msg = result.downloaded
@@ -1390,11 +1447,18 @@ const SettingsPage = memo(() => {
             : result.version
               ? `Update ${result.version} found`
               : 'No update found';
-      setAppUpdateState({ checking: false, message: msg });
+      setAppUpdateState({
+        checking: false,
+        message: msg,
+        version: result.version || null,
+        downloaded: !!result.downloaded,
+        downloading: !!result.downloading,
+        pct: result.downloading ? (result.pct || null) : null
+      });
       toast(msg, result.version || result.downloaded || result.downloading ? 'success' : 'info');
     } else {
       const msg = result?.error || 'Unable to check for updates';
-      setAppUpdateState({ checking: false, message: msg });
+      setAppUpdateState({ checking: false, message: msg, version: null, downloaded: false, downloading: false, pct: null });
       toast(msg, 'warning');
     }
   };
@@ -1493,9 +1557,27 @@ const SettingsPage = memo(() => {
         </Row>
         {window.electronAPI?.checkForAppUpdate && (
           <Row label="App Updates" sub={appUpdateState.message || 'Checks GitHub releases and installs from inside akaReader'}>
-            <Btn variant="outline" size="sm" onClick={checkAppUpdate} disabled={appUpdateState.checking}>
-              <RefreshCw size={14} /> {appUpdateState.checking ? 'Checking' : 'Check'}
-            </Btn>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <Btn variant="outline" size="sm" onClick={checkAppUpdate} disabled={appUpdateState.checking || appUpdateState.downloading}>
+                <RefreshCw size={14} /> {appUpdateState.checking ? 'Checking' : 'Check'}
+              </Btn>
+              {appUpdateState.downloaded ? (
+                <Btn variant="success" size="sm" onClick={() => window.electronAPI?.installAppUpdate?.()}>
+                  Restart now
+                </Btn>
+              ) : appUpdateState.downloading ? (
+                <Btn variant="outline" size="sm" disabled style={{ opacity: 0.6 }}>
+                  Downloading {appUpdateState.pct ? `${appUpdateState.pct}%` : '…'}
+                </Btn>
+              ) : appUpdateState.version ? (
+                <Btn variant="default" size="sm" onClick={() => {
+                  window.electronAPI?.downloadAppUpdate?.();
+                  setAppUpdateState(prev => ({ ...prev, downloading: true, message: 'Starting download…' }));
+                }}>
+                  <Download size={14} /> Download
+                </Btn>
+              ) : null}
+            </div>
           </Row>
         )}
         <Row label="Suwayomi Runtime" sub="The embedded server akaReader manages in the background">
@@ -2506,7 +2588,7 @@ const StartupScreen = memo(({ onProceed, onRetry, managedStartup = false, backen
     'downloading-jre': { msg: 'Downloading Java runtime (first launch only)...', bar: null },
     'extracting-jre': { msg: 'Extracting Java runtime...', bar: 34 },
     'installing-bundled-jre': { msg: 'Preparing bundled Java runtime...', bar: 32 },
-    'using-existing-suwayomi': { msg: 'Using downloaded Suwayomi server...', bar: 42 },
+    'using-existing-suwayomi': { msg: 'Using cached Suwayomi server...', bar: 42 },
     'downloading-suwayomi': { msg: 'Downloading Suwayomi server (first launch only)...', bar: null },
     'installing-bundled-suwayomi': { msg: 'Preparing bundled Suwayomi server...', bar: 42 },
     'suwayomi-starting': { msg: 'Starting Suwayomi server...', bar: 50 },
@@ -4743,24 +4825,33 @@ const App = memo(() => {
         </div>
       )}
 {updateAvailable && (
-        <div className="anim-fadeIn" style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 900, background: 'linear-gradient(90deg,rgba(234,179,8,0.95),rgba(251,191,36,0.95))', backdropFilter: 'blur(12px)', padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, pointerEvents: 'auto' }}>
+        <div className="anim-fadeIn" style={{ position: 'fixed', top: 0, left: 0, right: 0, zIndex: 900, background: 'linear-gradient(90deg,rgba(234,179,8,0.95),rgba(251,191,36,0.95))', backdropFilter: 'blur(12px)', padding: '8px 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, pointerEvents: 'auto', WebkitAppRegion: 'no-drag' }}>
           <BellRing size={16} style={{ color: '#78350f' }} />
           <span style={{ fontSize: 13, fontWeight: 800, color: '#78350f', display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {updateDownloaded ? `akaReader v${updateAvailable} is ready — click Restart to apply` : updateDownloadPct ? `Downloading v${updateAvailable}… ${updateDownloadPct}%` : `akaReader v${updateAvailable} is available`}
           </span>
           {updateDownloaded ? (
-            <button onClick={() => window.electronAPI?.installAppUpdate?.()} style={{ background: '#78350f', color: '#fff7ed', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 800, cursor: 'pointer', flexShrink: 0 }}>Restart now</button>
+            <button onClick={() => window.electronAPI?.installAppUpdate?.()} style={{ background: '#78350f', color: '#fff7ed', border: 'none', borderRadius: 8, padding: '8px 16px', fontWeight: 800, cursor: 'pointer', flexShrink: 0, transition: 'all 0.2s ease', boxShadow: '0 2px 8px rgba(120,53,15,0.2)', WebkitAppRegion: 'no-drag' }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#92400e'; e.currentTarget.style.transform = 'scale(1.03)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = '#78350f'; e.currentTarget.style.transform = ''; }}
+            >Restart now</button>
           ) : updateDownloading ? (
-            <span style={{ background: 'rgba(120,53,15,0.3)', color: '#78350f', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 800, cursor: 'default', flexShrink: 0, fontSize: 12 }}>Downloading…</span>
+            <span style={{ background: 'rgba(120,53,15,0.3)', color: '#78350f', border: 'none', borderRadius: 8, padding: '8px 16px', fontWeight: 800, cursor: 'default', flexShrink: 0, fontSize: 12 }}>Downloading…</span>
           ) : (
-            <button onClick={() => window.electronAPI?.downloadAppUpdate?.()} style={{ background: '#78350f', color: '#fff7ed', border: 'none', borderRadius: 8, padding: '7px 12px', fontWeight: 800, cursor: 'pointer', flexShrink: 0 }}>Download</button>
+            <button onClick={() => window.electronAPI?.downloadAppUpdate?.()} style={{ background: '#78350f', color: '#fff7ed', border: 'none', borderRadius: 8, padding: '8px 16px', fontWeight: 800, cursor: 'pointer', flexShrink: 0, transition: 'all 0.2s ease', boxShadow: '0 2px 8px rgba(120,53,15,0.2)', WebkitAppRegion: 'no-drag' }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#92400e'; e.currentTarget.style.transform = 'scale(1.03)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = '#78350f'; e.currentTarget.style.transform = ''; }}
+            >Download</button>
           )}
           {releaseNotes ? (
-            <button onClick={() => setShowReleaseNotes(true)} style={{ background: 'none', border: 'none', fontSize: 12, fontWeight: 700, color: '#78350f', textDecoration: 'underline', cursor: 'pointer', flexShrink: 0 }}>Release notes</button>
+            <button onClick={() => setShowReleaseNotes(true)} style={{ background: 'none', border: 'none', fontSize: 12, fontWeight: 700, color: '#78350f', textDecoration: 'underline', cursor: 'pointer', flexShrink: 0, WebkitAppRegion: 'no-drag' }}>Release notes</button>
           ) : (
-            <a href={`https://github.com/akawazak/akareader/releases/tag/v${updateAvailable}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, fontWeight: 700, color: '#78350f', textDecoration: 'underline' }}>Release notes</a>
+            <a href={`https://github.com/akawazak/akareader/releases/tag/v${updateAvailable}`} target="_blank" rel="noreferrer" style={{ fontSize: 12, fontWeight: 700, color: '#78350f', textDecoration: 'underline', WebkitAppRegion: 'no-drag' }}>Release notes</a>
           )}
-          <button onClick={() => setUpdateAvailable(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: '#78350f', display: 'flex' }}><X size={16} /></button>
+          <button onClick={() => setUpdateAvailable(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: '#78350f', display: 'flex', transition: 'transform 0.2s', padding: 4, WebkitAppRegion: 'no-drag' }}
+            onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.15)'}
+            onMouseLeave={e => e.currentTarget.style.transform = ''}
+          ><X size={16} /></button>
         </div>
       )}
 

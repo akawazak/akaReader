@@ -235,6 +235,57 @@ Verification run:
   - Added an `'error'` event listener to the spawned Suwayomi process in `startSuwayomi()` to catch runtime launch issues (like EACCES permission denials) cleanly and prevent Electron crash loops.
 - Result: Packages installed or extracted on Linux/Ubuntu can now download, extract, and spawn Suwayomi without permission errors or directory missing failures.
 
+### Fixed 2026-06-22: Linux launcher/server JAR confusion (Ubuntu "Could not find Suwayomi-Server.jar at ..." crash)
+
+- Files:
+  - `manga-nexus/electron-main.js`
+  - `.github/workflows/build.yml`
+  - `manga-nexus/src/App.jsx`
+  - `docs/KNOWN_BUGS.md`
+- Symptom: on Ubuntu the app would sometimes surface an uncaught
+  exception dialog reading
+  `Could not find Suwayomi-Server.jar at '.../akareader/bin/Suwayomi-Server.jar'`
+  even though the UI had just reported
+  `Using downloaded Suwayomi server...`.
+- Root cause: the Linux CI build was downloading
+  `suwayomi-linux-assets.tar.gz` and bundling it as the Suwayomi payload.
+  That tarball is the .deb/.rpm system-install layout and only contains:
+  - `Suwayomi-Launcher.jar` (a Compose Desktop GUI app, not a server)
+  - `suwayomi-server.sh` / `suwayomi-server.service` /
+    `.desktop` / `.tmpfiles` / `.sysusers`
+  It does NOT contain the actual Suwayomi server, and it does NOT
+  contain a bundled JRE — both assumptions were baked into the runtime
+  and a prior changelog entry.
+  `findBundledSuwayomi()` preferred the tarball over any standalone JAR,
+  so the launcher was copied to `~/.config/akareader/suwayomi.jar` and
+  spawned. The launcher then tried to find the real server at the .deb
+  install root (`<install-root>/bin/Suwayomi-Server.jar`), which doesn't
+  exist in akaReader's embedded layout, and crashed with the error above.
+- Fix:
+  - `findBundledSuwayomi()` no longer returns the tarball — it prefers
+    any standalone `Suwayomi-Server*.jar` and explicitly skips
+    `*Launcher*.jar`.
+  - `ensureJar()` enforces a `MIN_SERVER_JAR_SIZE` floor (50 MB) on both
+    the cached and bundled JAR before accepting it. A cached launcher
+    (~16 MB) or truncated download is rejected and replaced.
+  - `ensureJar()` also validates the post-download size so a corrupted
+    network fetch surfaces immediately instead of failing later.
+  - `ensureJre()` no longer walks the linux-assets.tar.gz path for a
+    bundled `jre/` folder (it never had one) — it goes straight to the
+    Temurin 21 download, which is the path that actually works.
+  - Linux CI now downloads the standalone server JAR
+    (`Suwayomi-Server-v*.jar`) the same way the Windows job does,
+    instead of bundling `suwayomi-linux-assets.tar.gz`.
+  - Startup status string for `using-existing-suwayomi` is now
+    `Using cached Suwayomi server...` (was misleadingly
+    `Using downloaded Suwayomi server...` regardless of where the JAR
+    came from).
+- Result: Linux AppImage / .deb installs start the real Suwayomi server
+  out of the box; users who already had a launcher cached in `userData`
+  are auto-recovered on the next launch (the size guard invalidates it
+  and triggers the GitHub fallback download). The misleading crash
+  dialog no longer fires on Ubuntu.
+
 ### Improved 2026-06-09: Cross-platform service startup (Linux/macOS local dev)
 
 - File: `manga-nexus/electron-main.js`

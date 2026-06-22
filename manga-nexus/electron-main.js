@@ -81,6 +81,15 @@ fs.mkdirSync(path.join(userData, 'suwayomi-data'), { recursive: true });
 const settingsPath = path.join(userData, 'electron-settings.json');
 const statePath    = path.join(userData, 'window-state.json');
 
+// The standalone Suwayomi server JAR has been 100+ MB across every release
+// in recent history (Suwayomi-Launcher.jar is ~16 MB). Anything smaller
+// is almost certainly the GUI launcher, which expects to find the real
+// server at <install-root>/bin/Suwayomi-Server.jar (the .deb/.rpm layout)
+// and crashes with "Could not find Suwayomi-Server.jar at ..." in our
+// embedded layout. Use a generous threshold that comfortably separates
+// the two and is robust against compression/junk bytes.
+const MIN_SERVER_JAR_SIZE = 50 * 1024 * 1024; // 50 MB
+
 function loadSettings() {
   try { return JSON.parse(fs.readFileSync(settingsPath, 'utf8')); }
   catch { return { closeToTray: true, startWithWindows: false }; }
@@ -407,7 +416,7 @@ async function ensureJre() {
     return;
   }
 
-  // Check if we have a bundled JRE in the backend directory
+  // Check if we have a bundled JRE in the backend directory.
   const bundledJre = path.join(backendDir, 'jre');
   if (fs.existsSync(bundledJre)) {
     console.log('[jre] Found bundled JRE, copying recursively...');
@@ -421,43 +430,10 @@ async function ensureJre() {
     return;
   }
 
-  // Check if linux-assets.tar.gz is bundled (contains JAR + bundled JRE).
-  // This runs BEFORE ensureJar() extracts it, so we extract the JRE here
-  // so that hasUsableJava() can find it immediately after.
-  const bundled = findBundledSuwayomi(backendDir);
-  if (bundled && bundled.type === 'tarball') {
-    console.log('[jre] Found bundled linux-assets, extracting JRE...');
-    sendStatus('installing-bundled-jre');
-    try {
-      const extractDir = path.join(userData, 'jre-tarball-extract');
-      if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true });
-      fs.mkdirSync(extractDir, { recursive: true });
-      await extractArchive(bundled.path, extractDir);
-      const entries = fs.readdirSync(extractDir, { withFileTypes: true });
-      const serverFolder = entries.find(e => e.isDirectory() && e.name.includes('Suwayomi'));
-      if (serverFolder) {
-        const srcJre = path.join(extractDir, serverFolder.name, 'jre');
-        if (fs.existsSync(srcJre)) {
-          if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true });
-          copyDirRecursive(srcJre, jreDir);
-          if (process.platform !== 'win32') {
-            try { fs.chmodSync(javaExe, 0o755); } catch (e) { console.warn('[jre] Failed to chmod javaExe:', e.message); }
-          }
-          console.log('[jre] Bundled JRE from tarball copied to', jreDir);
-          try { fs.rmSync(extractDir, { recursive: true }); } catch {}
-          if (hasUsableJava()) {
-            console.log('[jre] Bundled JRE is usable at', findJava());
-            sendStatus('using-system-java');
-            return;
-          }
-        }
-      }
-      try { fs.rmSync(extractDir, { recursive: true }); } catch {}
-    } catch (e) {
-      console.warn('[jre] Failed to extract bundled JRE from tarball:', e.message);
-    }
-  }
-
+  // No bundled JRE: download a platform-matched Temurin 21 LTS JRE.
+  // (The previously-handled linux-assets.tar.gz contained only the GUI
+  // launcher + .deb/.rpm service scripts, never a jre/ folder, so this
+  // path is the real one for Linux. We download regardless of platform.)
   sendStatus('downloading-jre');
   const jreUrl = getJreUrl();
   const isTarGz = jreUrl.endsWith('.tar.gz');
@@ -498,78 +474,37 @@ function copyDirRecursive(src, dest) {
 async function ensureJar() {
   if (fs.existsSync(jarPath)) {
     const sz = fs.statSync(jarPath).size;
-    if (sz > 1000) {
+    // The cached JAR must look like the actual Suwayomi server (100+ MB),
+    // not the GUI launcher (~16 MB). A stale launcher in userData would
+    // boot, fail to find the real server, and surface as
+    // "Could not find Suwayomi-Server.jar at ..." — exactly the regression
+    // we're guarding against here.
+    if (sz >= MIN_SERVER_JAR_SIZE) {
       sendStatus('using-existing-suwayomi');
       return;
     }
-    console.warn('[jar] Existing JAR too small, replacing:', jarPath);
+    console.warn('[jar] Existing JAR is too small (', sz, 'bytes), replacing:', jarPath);
     try { fs.unlinkSync(jarPath); } catch {}
   }
 
-  // Check if we have a bundled Suwayomi package in the backend directory
   const bundled = findBundledSuwayomi(backendDir);
   if (bundled) {
-    if (bundled.type === 'tarball') {
-      // linux-assets.tar.gz — contains both JAR and bundled JRE
-      console.log('[jar] Found bundled Suwayomi tarball:', bundled.name);
-      sendStatus('installing-bundled-suwayomi');
-      try {
-        const extractDir = path.join(userData, 'suwayomi-extract');
-        if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true });
-        fs.mkdirSync(extractDir, { recursive: true });
-        await extractArchive(bundled.path, extractDir);
-        // The tarball extracts into a folder like Suwayomi-Server-<version>/
-        const entries = fs.readdirSync(extractDir, { withFileTypes: true });
-        const serverFolder = entries.find(e => e.isDirectory() && e.name.includes('Suwayomi'));
-        if (!serverFolder) throw new Error('Could not find Suwayomi server folder in tarball');
-        const serverDir = path.join(extractDir, serverFolder.name);
-        // Copy the JAR
-        const jarFiles = fs.readdirSync(serverDir).filter(f => f.endsWith('.jar'));
-        if (!jarFiles.length) throw new Error('No JAR found in tarball');
-        const srcJar = path.join(serverDir, jarFiles[0]);
-        fs.copyFileSync(srcJar, jarPath);
-        // Copy the bundled JRE to userData/suwayomi-data/jre
-        const srcJre = path.join(serverDir, 'jre');
-        if (fs.existsSync(srcJre)) {
-          if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true });
-          copyDirRecursive(srcJre, jreDir);
-          if (process.platform !== 'win32') {
-            try { fs.chmodSync(javaExe, 0o755); } catch (e) { console.warn('[jar] Failed to chmod javaExe:', e.message); }
-          }
-          console.log('[jar] Bundled JRE copied to', jreDir);
-        }
-        // Cleanup extract dir
-        try { fs.rmSync(extractDir, { recursive: true }); } catch {}
-        const sz = fs.statSync(jarPath).size;
-        if (sz > 1000) {
-          console.log('[jar] Bundled Suwayomi (with JRE) ready at', jarPath);
-          sendStatus('using-existing-suwayomi');
-          return;
-        }
-        fs.unlinkSync(jarPath);
-      } catch (e) {
-        console.error('[jar] Tarball extraction failed:', e.message);
-        try { fs.unlinkSync(bundled.path); } catch {}
+    console.log('[jar] Found bundled JAR:', bundled.name);
+    sendStatus('installing-bundled-suwayomi');
+    try {
+      fs.copyFileSync(bundled.path, jarPath);
+      const sz = fs.statSync(jarPath).size;
+      if (sz >= MIN_SERVER_JAR_SIZE) {
+        console.log('[jar] Bundled JAR copied to', jarPath, '- size:', sz, 'bytes');
+        return;
       }
-    } else {
-      // Plain JAR — just copy it
-      console.log('[jar] Found bundled JAR:', bundled.name);
-      sendStatus('installing-bundled-suwayomi');
-      try {
-        fs.copyFileSync(bundled.path, jarPath);
-        const sz = fs.statSync(jarPath).size;
-        if (sz > 1000) {
-          console.log('[jar] Bundled JAR copied to', jarPath, '- size:', sz, 'bytes');
-          return;
-        }
-        console.error('[jar] Copied JAR too small:', sz);
-        fs.unlinkSync(jarPath);
-      } catch (e) {
-        console.error('[jar] Copy failed:', e.message);
-      }
+      console.error('[jar] Copied JAR too small (', sz, 'bytes), removing and falling back to download');
+      fs.unlinkSync(jarPath);
+    } catch (e) {
+      console.error('[jar] Copy failed:', e.message);
     }
   } else {
-    console.log('[jar] No bundled Suwayomi found in', backendDir);
+    console.log('[jar] No bundled Suwayomi JAR found in', backendDir);
   }
 
   sendStatus('downloading-suwayomi');
@@ -578,23 +513,43 @@ async function ensureJar() {
   await download(url, jarPath, pct => {
     if (pct % 5 === 0) sendStatus('downloading-suwayomi:' + pct);
   });
-  console.log('[jar] Ready at', jarPath);
+  // Sanity-check what we just downloaded; a truncated/corrupt download
+  // would otherwise be picked up on the next launch and silently fail.
+  const downloadedSz = fs.statSync(jarPath).size;
+  if (downloadedSz < MIN_SERVER_JAR_SIZE) {
+    fs.unlinkSync(jarPath);
+    throw new Error(`Downloaded Suwayomi JAR is suspiciously small (${downloadedSz} bytes); aborting.`);
+  }
+  console.log('[jar] Ready at', jarPath, '- size:', downloadedSz, 'bytes');
 }
 
-// Scan directory for Suwayomi bundle — plain JAR or linux-assets.tar.gz
+// Scan directory for a bundled Suwayomi server JAR.
+//
+// We intentionally ignore linux-assets.tar.gz here. That tarball ships
+// with the .deb/.rpm-style system install and only contains:
+//   - Suwayomi-Launcher.jar (a Compose Desktop GUI app, not a server)
+//   - suwayomi-server.sh, suwayomi-server.service, .desktop, .tmpfiles, ...
+// The launcher expects to find the real server at
+// <install-root>/bin/Suwayomi-Server.jar (the .deb layout, e.g.
+// /usr/share/java/suwayomi-server/bin/Suwayomi-Server.jar) and crashes
+// with "Could not find Suwayomi-Server.jar at ..." in akaReader's
+// embedded layout. Use the standalone Suwayomi-Server-v*.jar instead —
+// it's the actual server, same asset Windows already uses.
 function findBundledSuwayomi(dir) {
   try {
     if (!fs.existsSync(dir)) return null;
     const files = fs.readdirSync(dir);
-    // Prefer linux-assets.tar.gz (has JAR + JRE) on all platforms
-    const tarball = files.find(f => f === 'suwayomi-linux-assets.tar.gz');
-    if (tarball) return { name: tarball, path: path.join(dir, tarball), type: 'tarball' };
-    // Fall back to plain JAR
-    const jar = files.find(f => f.startsWith('Suwayomi-Server') && f.endsWith('.jar'));
+    // Prefer the standalone server JAR. Match the Suwayomi-Server prefix
+    // (with or without version) but explicitly exclude the GUI launcher.
+    const jar = files.find(f =>
+      f.startsWith('Suwayomi-Server') &&
+      f.endsWith('.jar') &&
+      !f.toLowerCase().includes('launcher')
+    );
     if (jar) return { name: jar, path: path.join(dir, jar), type: 'jar' };
-    // Nested JAR (some releases unpack into subfolder)
+    // Nested JAR (some releases unpack into a subfolder)
     for (const f of files) {
-      if (f.endsWith('.jar') && f.includes('Suwayomi')) {
+      if (f.endsWith('.jar') && f.includes('Suwayomi') && !f.toLowerCase().includes('launcher')) {
         return { name: f, path: path.join(dir, f), type: 'jar' };
       }
     }

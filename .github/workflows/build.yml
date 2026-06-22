@@ -95,14 +95,22 @@ jobs:
         working-directory: backend
         run: npm install --no-audit --no-fund
 
-      - name: Download Suwayomi linux-assets (for bundled JRE)
+      - name: Download Suwayomi JAR (Linux)
+        # The standalone server JAR is the only Linux asset akaReader can
+        # actually use. linux-assets.tar.gz from this repo is intended for
+        # the .deb/.rpm install path and only contains the GUI launcher
+        # plus system-service scripts — running it from akaReader's
+        # embedded layout crashes with "Could not find Suwayomi-Server.jar
+        # at ..." because the launcher expects the server at the .deb
+        # install root (/usr/share/java/suwayomi-server/bin/...).
+        shell: bash
         run: |
           curl -sL "https://api.github.com/repos/Suwayomi/Suwayomi-Server/releases/latest" \
             -H "Accept: application/vnd.github.v3+json" \
             -o release.json
-          ASSET_URL=$(grep -o '"browser_download_url": "[^"]*linux-assets.tar.gz"' release.json | grep -o 'https://[^"]*')
+          ASSET_URL=$(grep -o '"browser_download_url": "[^"]*Suwayomi-Server-v[^"]*\.jar"' release.json | head -1 | grep -o 'https://[^"]*')
           echo "Downloading: $ASSET_URL"
-          curl -sL "$ASSET_URL" -o backend/suwayomi-linux-assets.tar.gz
+          curl -sL "$ASSET_URL" -o backend/Suwayomi-Server.jar
           rm release.json
 
       - name: Validate renderer
