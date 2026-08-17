@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import process from 'node:process';
@@ -6,7 +7,8 @@ import { spawn, spawnSync } from 'node:child_process';
 const packageRoot = path.resolve(process.argv[2] || (
   process.platform === 'win32' ? 'dist-electron/win-unpacked' : 'dist-electron/linux-unpacked'
 ));
-const executable = path.join(packageRoot, process.platform === 'win32' ? 'akaReader.exe' : 'akaReader');
+const executableName = process.platform === 'win32' ? 'akaReader.exe' : 'akareader';
+const executable = path.join(packageRoot, executableName);
 const timeoutMs = 60000;
 
 function canConnect(port) {
@@ -37,6 +39,13 @@ async function waitForPort(port, child) {
 
 if (await canConnect(3001)) {
   throw new Error('Port 3001 is already in use; refusing a false-positive smoke test.');
+}
+
+if (!fs.existsSync(executable)) {
+  const packagedFiles = fs.existsSync(packageRoot)
+    ? fs.readdirSync(packageRoot).sort().join(', ')
+    : '(package directory does not exist)';
+  throw new Error(`Packaged executable ${executableName} was not found in ${packageRoot}. Found: ${packagedFiles}`);
 }
 
 const child = spawn(executable, ['--disable-gpu'], {
