@@ -133,7 +133,7 @@ Run the backend security regression from `backend/`:
 npm test
 ```
 
-The release workflow runs this backend suite on both Windows and Linux before packaging, in addition to the renderer validation bundle. After packaging, it checks each unpacked app for the backend entry files and production dependencies, then actually launches it and requires port 3001 to open; Linux uses Xvfb. Missing dependencies or a non-starting backend fail the build instead of producing a disconnected release. Electron shares the required-file manifest and checks installed files before starting the utility process, while repeated runtime crashes use bounded backoff and end in an actionable repair state.
+The release workflow runs this backend suite on both Windows and Linux before packaging, in addition to the renderer validation bundle. After packaging, it checks each unpacked app for the backend entry files and production dependencies, then actually launches it and requires port 3001 to open. Linux restores the unpacked Electron `chrome-sandbox` to root ownership and mode `4755` before launching under Xvfb; do not replace this with `--no-sandbox`. Missing dependencies or a non-starting backend fail the build instead of producing a disconnected release, and the smoke script reports a bounded Electron output tail when startup fails. Electron shares the required-file manifest and checks installed files before starting the utility process, while repeated runtime crashes use bounded backoff and end in an actionable repair state.
 
 That means safe debugging depends on targeted manual verification.
 

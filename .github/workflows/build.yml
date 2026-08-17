@@ -156,6 +156,13 @@ jobs:
         working-directory: manga-nexus
         run: npm run check:packaged-runtime -- dist-electron/linux-unpacked
 
+      - name: Prepare Chromium sandbox (Linux)
+        working-directory: manga-nexus
+        run: |
+          sudo chown root:root dist-electron/linux-unpacked/chrome-sandbox
+          sudo chmod 4755 dist-electron/linux-unpacked/chrome-sandbox
+          test "$(stat -c '%U:%G %a' dist-electron/linux-unpacked/chrome-sandbox)" = "root:root 4755"
+
       - name: Smoke-test packaged runtime (Linux)
         working-directory: manga-nexus
         run: xvfb-run -a npm run smoke:packaged-runtime -- dist-electron/linux-unpacked

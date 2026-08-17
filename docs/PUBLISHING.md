@@ -48,7 +48,7 @@ npm audit --audit-level=high
 3. Commit the release changes.
 4. Tag the commit as `vX.Y.Z`.
 5. Push the tag to GitHub.
-6. Confirm the `Build and Release` workflow passes renderer and backend tests on both operating systems, then uploads Windows installer/portable plus Linux AppImage/deb artifacts.
+6. Confirm the `Build and Release` workflow passes renderer and backend tests on both operating systems, including the sandboxed Linux Xvfb launch, then uploads Windows installer/portable plus Linux AppImage/deb artifacts.
 
 ## Publishing Notes
 
