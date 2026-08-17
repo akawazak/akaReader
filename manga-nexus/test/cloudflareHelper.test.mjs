@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import path from 'node:path';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -16,13 +15,17 @@ test('describes both the private helper profile and exact shared driver path', (
     { APPDATA: 'C:\\Users\\reader\\AppData\\Roaming', KEEP_ME: 'yes' },
     'C:\\Users\\reader\\AppData\\Roaming\\akareader',
     '4321-123456',
+    'win32',
   );
 
   assert.equal(runtime.env.KEEP_ME, 'yes');
   assert.equal(runtime.env.APPDATA, runtime.sessionDir);
   assert.equal(runtime.env.LOCALAPPDATA, runtime.sessionDir);
   assert.equal(runtime.env.DISABLE_MEDIA, 'true');
-  assert.equal(runtime.sessionDir, path.join(runtime.rootDir, '4321-123456'));
+  assert.equal(
+    runtime.sessionDir,
+    'C:\\Users\\reader\\AppData\\Roaming\\akareader\\flaresolverr-sessions\\4321-123456',
+  );
   assert.equal(
     runtime.sharedDriverPath,
     'C:\\Users\\reader\\AppData\\Roaming\\undetected_chromedriver\\chromedriver.exe',
