@@ -10,6 +10,16 @@ const packageRoot = path.resolve(process.argv[2] || (
 const executableName = process.platform === 'win32' ? 'akaReader.exe' : 'akareader';
 const executable = path.join(packageRoot, executableName);
 const timeoutMs = 60000;
+const maxDiagnosticChars = 12000;
+let diagnosticOutput = '';
+let childError = null;
+
+function captureDiagnostic(stream, chunk) {
+  diagnosticOutput += `[${stream}] ${chunk.toString()}`;
+  if (diagnosticOutput.length > maxDiagnosticChars) {
+    diagnosticOutput = diagnosticOutput.slice(-maxDiagnosticChars);
+  }
+}
 
 function canConnect(port) {
   return new Promise(resolve => {
@@ -29,6 +39,9 @@ async function waitForPort(port, child) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     if (await canConnect(port)) return Date.now() - startedAt;
+    if (childError) {
+      throw new Error(`Packaged akaReader could not launch: ${childError.message}`);
+    }
     if (child.exitCode !== null) {
       throw new Error(`Packaged akaReader exited before port ${port} opened (exit ${child.exitCode}).`);
     }
@@ -50,12 +63,19 @@ if (!fs.existsSync(executable)) {
 
 const child = spawn(executable, ['--disable-gpu'], {
   detached: process.platform !== 'win32',
-  stdio: 'ignore',
+  stdio: ['ignore', 'pipe', 'pipe'],
 });
+child.stdout.on('data', chunk => captureDiagnostic('stdout', chunk));
+child.stderr.on('data', chunk => captureDiagnostic('stderr', chunk));
+child.once('error', error => { childError = error; });
 
 try {
   const elapsedMs = await waitForPort(3001, child);
   console.log(`Packaged runtime smoke test passed: port 3001 ready in ${(elapsedMs / 1000).toFixed(1)}s.`);
+} catch (error) {
+  const detail = diagnosticOutput.trim();
+  if (detail) error.message += `\nPackaged app output (tail):\n${detail}`;
+  throw error;
 } finally {
   if (process.platform === 'win32') {
     spawnSync('taskkill', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore' });
