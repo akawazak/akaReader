@@ -41,9 +41,10 @@ function buildManagedCloudflareRuntime(baseEnv, userData, sessionId, platform = 
   const safeSessionId = String(sessionId || '').replace(/[^a-zA-Z0-9_-]/g, '');
   if (!userData || !safeSessionId) throw new Error('A managed helper session directory is required.');
 
-  const rootDir = path.join(userData, 'flaresolverr-sessions');
-  const sessionDir = path.join(rootDir, safeSessionId);
-  const sharedAppDataDir = baseEnv.APPDATA || path.dirname(userData);
+  const platformPath = platform === 'win32' ? path.win32 : path.posix;
+  const rootDir = platformPath.join(userData, 'flaresolverr-sessions');
+  const sessionDir = platformPath.join(rootDir, safeSessionId);
+  const sharedAppDataDir = baseEnv.APPDATA || platformPath.dirname(userData);
   const privatePlatformEnv = platform === 'win32'
     ? { APPDATA: sessionDir, LOCALAPPDATA: sessionDir }
     : {
@@ -54,7 +55,7 @@ function buildManagedCloudflareRuntime(baseEnv, userData, sessionId, platform = 
   return {
     rootDir,
     sessionDir,
-    sharedDriverPath: path.join(sharedAppDataDir, 'undetected_chromedriver', 'chromedriver.exe'),
+    sharedDriverPath: platformPath.join(sharedAppDataDir, 'undetected_chromedriver', 'chromedriver.exe'),
     env: {
       ...baseEnv,
       // Some FlareSolverr builds honor these paths. The packaged Windows build
