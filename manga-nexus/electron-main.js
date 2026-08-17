@@ -3,27 +3,69 @@
  * Fixes: instant window, full process-tree kill, async service check
  */
 const {
-  app, BrowserWindow, Menu, shell,
-  Tray, globalShortcut, ipcMain, screen, utilityProcess
+  app, BrowserWindow, Menu, shell, WebContentsView,
+  Tray, globalShortcut, ipcMain, screen, utilityProcess, dialog
 } = require('electron');
 const path  = require('path');
 const http  = require('http');
 const https = require('https');
 const fs    = require('fs');
 const cp    = require('child_process');
+const crypto = require('crypto');
+const {
+  REQUIRED_JAVA_MAJOR,
+  REQUIRED_JAVA_VERSION,
+  classifySuwayomiFailure,
+  isCompatibleJavaVersion,
+  parseJavaVersionOutput,
+} = require('./runtime/java-runtime.cjs');
+const {
+  DEFAULT_EXTENSION_STORES,
+  buildSuwayomiConfig,
+  configureCloudflareHelper,
+  configuredExtensionStores,
+  isValidExtensionStoreUrl,
+  normalizeExtensionStoreUrls,
+} = require('./runtime/extension-stores.cjs');
+const {
+  getSourceVerificationViewBounds,
+  hasSourceChallengeSignals,
+  isCloudflareClearanceCookie,
+  isSourcePageReadyForReturn,
+  normalizedHostname,
+} = require('./runtime/source-verification.cjs');
+const {
+  FLARESOLVERR_VERSION,
+  SUWAYOMI_CLOUDFLARE_SESSION,
+  buildManagedCloudflareRuntime,
+  getManagedCloudflareRelease,
+  hasCloudflareSession,
+} = require('./runtime/cloudflare-helper.cjs');
+const { getMissingBackendFiles } = require('./runtime/backend-runtime.cjs');
 
 let autoUpdater = null;
 try { autoUpdater = require('electron-updater').autoUpdater; } catch {}
 
 const isDev = !app.isPackaged;
+const backendApiToken = crypto.randomBytes(32).toString('base64url');
 
 let mainWindow   = null;
-let verificationWindow = null;
+let verificationView = null;
+let verificationPromise = null;
+let cancelSourceVerification = null;
+let completeSourceVerification = null;
+let sourceVerificationState = { active: false };
 let tray         = null;
 let serverProc   = null;
+let serverRestartTimer = null;
+let serverRestartAttempts = 0;
 let suwayomiProc = null;
+let cloudflareHelperProc = null;
+let cloudflareHelperInstallPromise = null;
+let cloudflareSessionWarmupPromise = null;
 let isQuitting   = false;
 let serviceMode  = false;
+let lastServiceIssue = null;
 let updateState  = {
   checking: false,
   downloading: false,
@@ -50,7 +92,10 @@ const serverPath      = path.join(backendDir, 'server.js');
 const preloadPath     = path.join(__dirname, 'preload.js');
 const userData        = app.getPath('userData');
 const userExtDir      = path.join(userData, 'extensions');
-const jarPath         = path.join(userData, 'suwayomi.jar');
+const suwayomiRuntimeDir = path.join(userData, 'suwayomi-runtime');
+const suwayomiWorkDir = path.join(suwayomiRuntimeDir, 'work');
+const jarPath         = path.join(suwayomiRuntimeDir, 'suwayomi.jar');
+const legacyJarPath   = path.join(userData, 'suwayomi.jar');
 const jreDir          = path.join(userData, 'jre');
 // Platform-aware Java binary path. Windows uses java.exe inside bin/;
 // POSIX (Linux/macOS) uses the undecorated `java` binary.
@@ -60,10 +105,18 @@ const javaExe         = process.platform === 'win32'
 const nssmExe         = path.join(userData, 'nssm.exe');
 const suwayomiPidFile = path.join(userData, 'suwayomi.pid');
 const suwayomiConfigPath = path.join(userData, 'suwayomi-data', 'server.conf');
-const defaultExtensionRepos = [
-  'https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.min.json',
-];
-
+const cloudflareHelperDir = path.join(userData, 'flaresolverr');
+const cloudflareHelperPidFile = path.join(userData, 'flaresolverr.pid');
+const managedCloudflareRelease = getManagedCloudflareRelease(process.platform, process.arch);
+const cloudflareHelperArchive = path.join(
+  userData,
+  managedCloudflareRelease?.archiveName || 'flaresolverr-download.unsupported',
+);
+const cloudflareHelperRuntime = buildManagedCloudflareRuntime(
+  process.env,
+  userData,
+  `${process.pid}-${Date.now()}`,
+);
 // Platform-aware icon paths. Linux/GTK trays expect a PNG; .ico works
 // (mostly) on Windows/macOS. We keep the .ico as the canonical icon for
 // packaging and fall back to a sibling PNG when the platform wants one.
@@ -92,7 +145,7 @@ const MIN_SERVER_JAR_SIZE = 50 * 1024 * 1024; // 50 MB
 
 function loadSettings() {
   try { return JSON.parse(fs.readFileSync(settingsPath, 'utf8')); }
-  catch { return { closeToTray: true, startWithWindows: false }; }
+  catch { return {}; }
 }
 function saveSettings(obj) {
   try { fs.writeFileSync(settingsPath, JSON.stringify(obj)); } catch {}
@@ -105,23 +158,79 @@ function saveWindowState(win) {
   try { fs.writeFileSync(statePath, JSON.stringify(win.getBounds())); } catch {}
 }
 
-let appSettings = loadSettings();
+let appSettings = {
+  closeToTray: true,
+  startWithWindows: false,
+  cloudflareHelperEnabled: false,
+  extensionRepos: [],
+  ...loadSettings(),
+};
+appSettings.extensionRepos = normalizeExtensionStoreUrls(appSettings.extensionRepos);
 
 // ── Status helper ─────────────────────────────────────────────────────────────
 // Messages fired before the renderer finishes loading are queued and flushed
 // the moment React is ready — otherwise early statuses (download progress etc.)
 // are silently dropped and the startup screen never shows what's happening.
 let _statusQueue = [];
+let rendererStatusReady = false;
 function sendStatus(status) {
   console.log('[status]', status);
-  if (!mainWindow || mainWindow.isDestroyed()) { _statusQueue.push(status); return; }
-  if (mainWindow.webContents.isLoading()) { _statusQueue.push(status); return; }
+  if (!mainWindow || mainWindow.isDestroyed() || !rendererStatusReady || mainWindow.webContents.isLoading()) {
+    _statusQueue.push(status);
+    return;
+  }
   mainWindow.webContents.send('services-status', status);
 }
 function flushStatusQueue() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  rendererStatusReady = true;
   _statusQueue.forEach(s => mainWindow.webContents.send('services-status', s));
   _statusQueue = [];
+}
+
+function sendSourceVerificationState(state) {
+  sourceVerificationState = { active: false, ...state };
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading()) return;
+  mainWindow.webContents.send('source-verification-state', sourceVerificationState);
+}
+
+function layoutSourceVerificationView() {
+  if (!verificationView || !mainWindow || mainWindow.isDestroyed()) return;
+  verificationView.setBounds(getSourceVerificationViewBounds(mainWindow.getContentSize()));
+}
+
+function removeSourceVerificationView() {
+  const view = verificationView;
+  verificationView = null;
+  if (!view) return;
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(view);
+  } catch {}
+  try {
+    if (!view.webContents.isDestroyed()) view.webContents.close();
+  } catch {}
+}
+
+function setServiceIssue(issue) {
+  lastServiceIssue = {
+    code: issue?.code || 'service-start-failed',
+    title: issue?.title || 'Service could not start',
+    message: issue?.message || 'akaReader could not start its local services.',
+    detail: issue?.detail || '',
+    canRepairJava: !!issue?.canRepairJava,
+    requiredJavaMajor: REQUIRED_JAVA_MAJOR,
+    requiredJavaVersion: REQUIRED_JAVA_VERSION,
+    detectedJavaMajor: issue?.detectedJavaMajor ?? null,
+    detectedJavaVersion: issue?.detectedJavaVersion || '',
+    javaPath: issue?.javaPath || '',
+    occurredAt: Date.now(),
+  };
+  sendStatus(`service-issue:${lastServiceIssue.code}`);
+  return lastServiceIssue;
+}
+
+function clearServiceIssue() {
+  lastServiceIssue = null;
 }
 
 // ── HTTPS download with progress ──────────────────────────────────────────────
@@ -179,8 +288,8 @@ function getJreUrl() {
   // Platform-aware JRE download. We pin the Temurin 21 LTS build that
   // matches what the bundled Windows installer is known to work with, but
   // swap the asset for the current platform.
-  const version = '21.0.4';
-  const build = '7';
+  const version = '21.0.11';
+  const build = '10';
   if (process.platform === 'win32') {
     return `https://github.com/adoptium/temurin21-binaries/releases/download/jdk-${version}%2B${build}/OpenJDK21U-jre_x64_windows_hotspot_${version}_${build}.zip`;
   }
@@ -266,32 +375,27 @@ function shellQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
 
-function findJava() {
-  // 1. Check for downloaded JRE in userData (per-platform binary name)
-  if (fs.existsSync(javaExe)) {
-    if (process.platform !== 'win32') {
-      try { fs.chmodSync(javaExe, 0o755); } catch (e) { console.warn('[findJava] Failed to chmod javaExe:', e.message); }
-    }
-    return javaExe;
-  }
+function getJavaCandidates() {
+  const candidates = [];
+  const addCandidate = (candidatePath, source) => {
+    if (!candidatePath) return;
+    const key = process.platform === 'win32' ? candidatePath.toLowerCase() : candidatePath;
+    if (candidates.some(candidate => candidate.key === key)) return;
+    candidates.push({ key, path: candidatePath, source });
+  };
 
-  // 2. Check for bundled JRE in backend resources
+  addCandidate(javaExe, 'managed');
+
   const bundledJava = process.platform === 'win32'
     ? path.join(backendDir, 'jre', 'bin', 'java.exe')
     : path.join(backendDir, 'jre', 'bin', 'java');
-  if (fs.existsSync(bundledJava)) {
-    if (process.platform !== 'win32') {
-      try { fs.chmodSync(bundledJava, 0o755); } catch (e) { console.warn('[findJava] Failed to chmod bundledJava:', e.message); }
-    }
-    return bundledJava;
-  }
+  addCandidate(bundledJava, 'bundled');
 
-  // 3. Check JAVA_HOME with the right binary name for the platform
   if (process.env.JAVA_HOME) {
-    const p = process.platform === 'win32'
+    const javaHomePath = process.platform === 'win32'
       ? path.join(process.env.JAVA_HOME, 'bin', 'java.exe')
       : path.join(process.env.JAVA_HOME, 'bin', 'java');
-    if (fs.existsSync(p)) return p;
+    addCandidate(javaHomePath, 'java-home');
   }
 
   // 4. Check common install roots for the active platform.
@@ -310,7 +414,7 @@ function findJava() {
           .map(d => path.join(root, d.name));
         for (const dir of dirs) {
           const candidate = path.join(dir, 'bin', 'java.exe');
-          if (fs.existsSync(candidate)) return candidate;
+          addCandidate(candidate, 'system');
         }
       } catch {}
     }
@@ -329,7 +433,7 @@ function findJava() {
             continue;
           }
           const candidate = path.join(base, 'bin', 'java');
-          if (fs.existsSync(candidate)) return candidate;
+          addCandidate(candidate, 'system');
         }
       } catch {}
     }
@@ -348,7 +452,7 @@ function findJava() {
             base = path.join(root, e.name);
             if (base.includes('jdk') || base.includes('jre') || base.includes('openjdk')) {
               const candidate = path.join(base, 'Contents', 'Home', 'bin', 'java');
-              if (fs.existsSync(candidate)) return candidate;
+              addCandidate(candidate, 'system');
             }
           }
         }
@@ -356,51 +460,78 @@ function findJava() {
     }
   }
 
-  // 5. Last resort: assume `java` is on PATH.
-  return 'java';
+  addCandidate('java', 'path');
+  return candidates.map(({ path: candidatePath, source }) => ({ path: candidatePath, source }));
 }
 
-function hasUsableJava(javaPath = findJava()) {
+function inspectJava(candidate) {
+  const javaPath = typeof candidate === 'string' ? candidate : candidate.path;
+  const source = typeof candidate === 'string' ? 'unknown' : candidate.source;
+  if (javaPath !== 'java' && !fs.existsSync(javaPath)) {
+    return { path: javaPath, source, available: false, version: '', major: null, compatible: false };
+  }
+  if (process.platform !== 'win32' && javaPath !== 'java') {
+    try { fs.chmodSync(javaPath, 0o755); } catch {}
+  }
   try {
     const result = cp.spawnSync(javaPath, ['-version'], {
       windowsHide: true,
       timeout: 10000,
       encoding: 'utf8',
     });
-    return !result.error && result.status === 0;
+    const available = !result.error && result.status === 0;
+    const parsed = parseJavaVersionOutput(`${result.stderr || ''}\n${result.stdout || ''}`);
+    return {
+      path: javaPath,
+      source,
+      available,
+      version: parsed.version,
+      major: parsed.major,
+      compatible: available && isCompatibleJavaVersion(parsed.version),
+    };
   } catch {
-    return false;
+    return { path: javaPath, source, available: false, version: '', major: null, compatible: false };
   }
+}
+
+function getJavaRuntimeState() {
+  const inspected = getJavaCandidates().map(inspectJava);
+  const selected = inspected.find(candidate => candidate.compatible) || null;
+  const detected = selected || inspected.find(candidate => candidate.available) || null;
+  return { requiredMajor: REQUIRED_JAVA_MAJOR, requiredVersion: REQUIRED_JAVA_VERSION, selected, detected };
+}
+
+function findJava() {
+  const state = getJavaRuntimeState();
+  return state.selected?.path || state.detected?.path || 'java';
+}
+
+function publicJavaInfo() {
+  const state = getJavaRuntimeState();
+  const current = state.selected || state.detected;
+  return {
+    path: current?.path || '',
+    source: current?.source || 'missing',
+    version: current?.version || '',
+    major: current?.major ?? null,
+    compatible: !!state.selected,
+    requiredMajor: REQUIRED_JAVA_MAJOR,
+    requiredVersion: REQUIRED_JAVA_VERSION,
+  };
 }
 
 function ensureSuwayomiConfig(dataRoot) {
   fs.mkdirSync(dataRoot, { recursive: true });
 
   const configPath = path.join(dataRoot, 'server.conf');
-  const managedStart = '# akaReader managed settings';
-  const managedEnd = '# /akaReader managed settings';
-  const managedBlock = [
-    managedStart,
-    'server.initialOpenInBrowserEnabled = false',
-    'server.systemTrayEnabled = false',
-    `server.extensionRepos = ${JSON.stringify(defaultExtensionRepos)}`,
-    managedEnd,
-    '',
-  ].join('\n');
-
   let existing = '';
   try {
     existing = fs.readFileSync(configPath, 'utf8');
   } catch {}
-
-  const blockPattern = new RegExp(
-    `${managedStart.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*?${managedEnd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`,
-    'm'
-  );
-
-  const next = existing.match(blockPattern)
-    ? existing.replace(blockPattern, managedBlock)
-    : `${existing.trimEnd()}${existing.trim() ? '\n\n' : ''}${managedBlock}`;
+  let next = buildSuwayomiConfig(existing, appSettings.extensionRepos);
+  if (appSettings.cloudflareHelperEnabled) {
+    next = configureCloudflareHelper(next);
+  }
 
   if (next !== existing) {
     fs.writeFileSync(configPath, next, 'utf8');
@@ -409,69 +540,368 @@ function ensureSuwayomiConfig(dataRoot) {
   return configPath;
 }
 
-async function ensureJre() {
-  if (hasUsableJava()) {
-    console.log('[jre] Using existing Java runtime:', findJava());
-    sendStatus('using-system-java');
-    return;
-  }
-
-  // Check if we have a bundled JRE in the backend directory.
-  const bundledJre = path.join(backendDir, 'jre');
-  if (fs.existsSync(bundledJre)) {
-    console.log('[jre] Found bundled JRE, copying recursively...');
-    sendStatus('installing-bundled-jre');
-    fs.mkdirSync(jreDir, { recursive: true });
-    copyDirRecursive(bundledJre, jreDir);
-    if (process.platform !== 'win32') {
-      try { fs.chmodSync(javaExe, 0o755); } catch (e) { console.warn('[jre] Failed to chmod javaExe:', e.message); }
-    }
-    console.log('[jre] Bundled JRE copied to', jreDir);
-    return;
-  }
-
-  // No bundled JRE: download a platform-matched Temurin 21 LTS JRE.
-  // (The previously-handled linux-assets.tar.gz contained only the GUI
-  // launcher + .deb/.rpm service scripts, never a jre/ folder, so this
-  // path is the real one for Linux. We download regardless of platform.)
+async function installManagedJre() {
   sendStatus('downloading-jre');
   const jreUrl = getJreUrl();
   const isTarGz = jreUrl.endsWith('.tar.gz');
   const archivePath = path.join(userData, isTarGz ? 'jre-download.tar.gz' : 'jre-download.zip');
+  let lastReportedPct = -1;
   await download(jreUrl, archivePath, pct => {
-    if (pct % 10 === 0) sendStatus('downloading-jre:' + pct);
+    if (pct % 10 === 0 && pct !== lastReportedPct) {
+      lastReportedPct = pct;
+      sendStatus('downloading-jre:' + pct);
+    }
   });
   sendStatus('extracting-jre');
-  const extractDir = path.join(userData, 'jre-extract');
+  const extractDir = path.join(userData, 'jre-installing');
+  const backupDir = path.join(userData, 'jre-backup');
+  try { fs.rmSync(extractDir, { recursive: true, force: true }); } catch {}
   await extractArchive(archivePath, extractDir);
   const folder = fs.readdirSync(extractDir).find(e => e.startsWith('jdk') || e.startsWith('OpenJDK'));
   if (!folder) throw new Error('JRE folder not found');
-  if (fs.existsSync(jreDir)) fs.rmSync(jreDir, { recursive: true });
-  fs.renameSync(path.join(extractDir, folder), jreDir);
+  const stagedJreDir = path.join(extractDir, folder);
+  const stagedJava = process.platform === 'win32'
+    ? path.join(stagedJreDir, 'bin', 'java.exe')
+    : path.join(stagedJreDir, 'bin', 'java');
+  const stagedInfo = inspectJava({ path: stagedJava, source: 'managed' });
+  if (!stagedInfo.compatible) {
+    throw new Error(`Downloaded Java is not compatible. Java ${REQUIRED_JAVA_VERSION} or newer is required.`);
+  }
+
+  try { fs.rmSync(backupDir, { recursive: true, force: true }); } catch {}
+  if (fs.existsSync(jreDir)) fs.renameSync(jreDir, backupDir);
+  try {
+    fs.renameSync(stagedJreDir, jreDir);
+  } catch (error) {
+    if (!fs.existsSync(jreDir) && fs.existsSync(backupDir)) fs.renameSync(backupDir, jreDir);
+    throw error;
+  }
+  try { fs.rmSync(backupDir, { recursive: true, force: true }); } catch {}
   if (process.platform !== 'win32') {
     try { fs.chmodSync(javaExe, 0o755); } catch (e) { console.warn('[jre] Failed to chmod javaExe:', e.message); }
   }
   try { fs.unlinkSync(archivePath); } catch {}
   try { fs.rmSync(extractDir, { recursive: true }); } catch {}
   console.log('[jre] Ready at', jreDir);
+  sendStatus('java-repaired');
+  return publicJavaInfo();
+}
+
+function findManagedCloudflareHelperExecutable(root = cloudflareHelperDir, depth = 0) {
+  if (!managedCloudflareRelease || depth > 3 || !fs.existsSync(root)) return '';
+  try {
+    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      const candidate = path.join(root, entry.name);
+      if (entry.isFile() && entry.name.toLowerCase() === managedCloudflareRelease.executableName) return candidate;
+      if (entry.isDirectory()) {
+        const nested = findManagedCloudflareHelperExecutable(candidate, depth + 1);
+        if (nested) return nested;
+      }
+    }
+  } catch {}
+  return '';
+}
+
+function hashFileSha256(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', reject);
+    stream.on('data', chunk => hash.update(chunk));
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+function probeCloudflareHelper(timeoutMs = 1500) {
+  return new Promise(resolve => {
+    const req = http.get('http://127.0.0.1:8191/', res => {
+      let body = '';
+      res.on('data', chunk => { if (body.length < 8192) body += chunk; });
+      res.on('end', () => {
+        const location = String(res.headers.location || '').toLowerCase();
+        const text = body.toLowerCase();
+        const recognized = text.includes('flaresolverr') || text.includes('byparr') || location.startsWith('/docs');
+        resolve(recognized ? { ready: true, kind: text.includes('byparr') || location.startsWith('/docs') ? 'Byparr' : 'FlareSolverr' } : { ready: false });
+      });
+    });
+    req.on('error', () => resolve({ ready: false }));
+    req.setTimeout(timeoutMs, () => { req.destroy(); resolve({ ready: false }); });
+  });
+}
+
+function callCloudflareHelper(body, timeoutMs = 90000) {
+  return new Promise((resolve, reject) => {
+    const payload = Buffer.from(JSON.stringify(body));
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port: 8191,
+      path: '/v1',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': payload.length,
+      },
+    }, res => {
+      let responseBody = '';
+      res.on('data', chunk => {
+        if (responseBody.length < 1024 * 1024) responseBody += chunk;
+      });
+      res.on('end', () => {
+        let parsed;
+        try { parsed = JSON.parse(responseBody); } catch {
+          reject(new Error(`The Cloudflare helper returned an invalid response (${res.statusCode || 0}).`));
+          return;
+        }
+        if ((res.statusCode || 500) >= 400 || parsed.status === 'error') {
+          reject(new Error(parsed.message || `The Cloudflare helper returned ${res.statusCode || 500}.`));
+          return;
+        }
+        resolve(parsed);
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('The protected-source browser session took too long to start.')));
+    req.end(payload);
+  });
+}
+
+async function warmCloudflareSession() {
+  if (cloudflareSessionWarmupPromise) return cloudflareSessionWarmupPromise;
+  cloudflareSessionWarmupPromise = (async () => {
+    const current = await callCloudflareHelper({ cmd: 'sessions.list' }, 10000);
+    if (hasCloudflareSession(current)) return { ready: true, existing: true };
+
+    sendStatus('warming-cloudflare-session');
+    const created = await callCloudflareHelper({
+      cmd: 'sessions.create',
+      session: SUWAYOMI_CLOUDFLARE_SESSION,
+    });
+    if (created.status !== 'ok') {
+      throw new Error(created.message || 'The protected-source browser session could not start.');
+    }
+    return { ready: true, existing: false };
+  })().finally(() => { cloudflareSessionWarmupPromise = null; });
+  return cloudflareSessionWarmupPromise;
+}
+
+async function waitForCloudflareHelper(timeoutMs = 90000, proc = cloudflareHelperProc) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const state = await probeCloudflareHelper();
+    if (state.ready) return state;
+    if (proc && (proc.exitCode !== null || proc.signalCode)) {
+      throw new Error(`The Cloudflare helper stopped during startup${proc.exitCode !== null ? ` (exit ${proc.exitCode})` : ''}.`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  throw new Error('The Cloudflare helper did not become ready in time.');
+}
+
+async function installManagedCloudflareHelper() {
+  if (cloudflareHelperInstallPromise) return cloudflareHelperInstallPromise;
+  cloudflareHelperInstallPromise = (async () => {
+    if (!managedCloudflareRelease) {
+      throw new Error('Automatic Cloudflare helper setup is available on Windows x64 and Linux x64.');
+    }
+
+    sendStatus('downloading-cloudflare-helper');
+    let lastReportedPct = -1;
+    await download(managedCloudflareRelease.url, cloudflareHelperArchive, pct => {
+      if (pct % 5 === 0 && pct !== lastReportedPct) {
+        lastReportedPct = pct;
+        sendStatus(`downloading-cloudflare-helper:${pct}`);
+      }
+    });
+
+    const archiveSize = fs.statSync(cloudflareHelperArchive).size;
+    if (archiveSize !== managedCloudflareRelease.size) {
+      throw new Error('The downloaded Cloudflare helper has an unexpected size.');
+    }
+    const archiveDigest = await hashFileSha256(cloudflareHelperArchive);
+    if (archiveDigest !== managedCloudflareRelease.sha256) {
+      throw new Error('The downloaded Cloudflare helper failed its security check.');
+    }
+
+    sendStatus('extracting-cloudflare-helper');
+    const stagingDir = path.join(userData, 'flaresolverr-installing');
+    const backupDir = path.join(userData, 'flaresolverr-backup');
+    try { fs.rmSync(stagingDir, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(backupDir, { recursive: true, force: true }); } catch {}
+    await extractArchive(cloudflareHelperArchive, stagingDir);
+    if (!findManagedCloudflareHelperExecutable(stagingDir)) {
+      throw new Error(`The downloaded Cloudflare helper did not contain ${managedCloudflareRelease.executableName}.`);
+    }
+
+    if (fs.existsSync(cloudflareHelperDir)) fs.renameSync(cloudflareHelperDir, backupDir);
+    try {
+      fs.renameSync(stagingDir, cloudflareHelperDir);
+    } catch (error) {
+      if (!fs.existsSync(cloudflareHelperDir) && fs.existsSync(backupDir)) fs.renameSync(backupDir, cloudflareHelperDir);
+      throw error;
+    }
+    try { fs.rmSync(backupDir, { recursive: true, force: true }); } catch {}
+    try { fs.unlinkSync(cloudflareHelperArchive); } catch {}
+    const executable = findManagedCloudflareHelperExecutable();
+    if (process.platform !== 'win32') fs.chmodSync(executable, 0o755);
+    sendStatus('cloudflare-helper-installed');
+    return executable;
+  })().finally(() => { cloudflareHelperInstallPromise = null; });
+  return cloudflareHelperInstallPromise;
+}
+
+async function startManagedCloudflareHelper() {
+  const existing = await probeCloudflareHelper();
+  if (existing.ready) return existing;
+
+  const executable = findManagedCloudflareHelperExecutable();
+  if (!executable) return { ready: false, needsInstall: true };
+  if (process.platform !== 'win32') {
+    try { fs.chmodSync(executable, 0o755); } catch (error) {
+      throw new Error(`The Cloudflare helper is not executable: ${error.message}`);
+    }
+  }
+  if (cloudflareHelperProc) return waitForCloudflareHelper(90000, cloudflareHelperProc);
+
+  killStaleCloudflareDriver();
+
+  sendStatus('starting-cloudflare-helper');
+  try {
+    fs.mkdirSync(cloudflareHelperRuntime.rootDir, { recursive: true });
+    for (const entry of fs.readdirSync(cloudflareHelperRuntime.rootDir, { withFileTypes: true })) {
+      const candidate = path.join(cloudflareHelperRuntime.rootDir, entry.name);
+      if (entry.isDirectory() && candidate !== cloudflareHelperRuntime.sessionDir) {
+        try { fs.rmSync(candidate, { recursive: true, force: true }); } catch {}
+      }
+    }
+    fs.mkdirSync(cloudflareHelperRuntime.sessionDir, { recursive: true });
+  } catch (error) {
+    throw new Error(`The Cloudflare helper profile could not be prepared: ${error.message}`);
+  }
+  const proc = cp.spawn(executable, [], {
+    cwd: path.dirname(executable),
+    env: {
+      ...cloudflareHelperRuntime.env,
+      HOST: '127.0.0.1',
+      PORT: '8191',
+      LOG_LEVEL: 'info',
+      HEADLESS: 'true',
+      CAPTCHA_SOLVER: 'none',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    detached: false,
+  });
+  cloudflareHelperProc = proc;
+  fs.writeFileSync(cloudflareHelperPidFile, String(proc.pid));
+  proc.stdout.on('data', data => {
+    const line = data.toString().trim();
+    if (line) console.log('[cloudflare-helper]', line.slice(0, 200));
+  });
+  proc.stderr.on('data', data => {
+    const line = data.toString().trim();
+    if (line) console.error('[cloudflare-helper:err]', line.slice(0, 200));
+  });
+  proc.on('exit', code => {
+    console.log('[cloudflare-helper] exited', code);
+    if (cloudflareHelperProc === proc) cloudflareHelperProc = null;
+    try { fs.unlinkSync(cloudflareHelperPidFile); } catch {}
+    if (code) killStaleCloudflareDriver();
+  });
+  proc.on('error', error => console.error('[cloudflare-helper] spawn error:', error.message));
+
+  return waitForCloudflareHelper(90000, proc);
+}
+
+function enableCloudflareHelperConfig() {
+  let existing = '';
+  try { existing = fs.readFileSync(suwayomiConfigPath, 'utf8'); } catch {}
+  const next = configureCloudflareHelper(existing);
+  const changed = next !== existing;
+  if (changed) fs.writeFileSync(suwayomiConfigPath, next, 'utf8');
+  if (!appSettings.cloudflareHelperEnabled) {
+    appSettings.cloudflareHelperEnabled = true;
+    saveSettings(appSettings);
+  }
+  return changed;
+}
+
+async function prepareCloudflareHelper({ allowInstall = false } = {}) {
+  let helper = await probeCloudflareHelper();
+  if (!helper.ready) helper = await startManagedCloudflareHelper();
+  if (!helper.ready && helper.needsInstall && !allowInstall) return helper;
+  if (!helper.ready && helper.needsInstall) {
+    await installManagedCloudflareHelper();
+    helper = await startManagedCloudflareHelper();
+  }
+  if (!helper.ready) throw new Error('The Cloudflare helper could not start.');
+
+  let sessionReady = false;
+  try {
+    sessionReady = (await warmCloudflareSession()).ready;
+  } catch (error) {
+    // Session warming is only an optimization. Suwayomi can still request the
+    // named session when the first protected source is opened.
+    console.warn('[cloudflare-helper] Session warm-up was unavailable:', error.message);
+  }
+
+  const configChanged = enableCloudflareHelperConfig();
+  if (configChanged) {
+    const restarted = await ensureManagedServices({ restart: true });
+    if (!restarted) throw new Error('Suwayomi could not restart with the Cloudflare helper enabled.');
+  }
+  sendStatus('cloudflare-helper-ready');
+  return { ready: true, kind: helper.kind || 'FlareSolverr', restarted: configChanged, sessionReady };
 }
 
 // Cross-platform recursive copy — replaces fs.cpSync for older Node.js
-function copyDirRecursive(src, dest) {
-  fs.mkdirSync(dest, { recursive: true });
-  const entries = fs.readdirSync(src, { withFileTypes: true });
-  for (const entry of entries) {
-    const srcPath = path.join(src, entry.name);
-    const destPath = path.join(dest, entry.name);
-    if (entry.isDirectory()) {
-      copyDirRecursive(srcPath, destPath);
-    } else {
-      fs.copyFileSync(srcPath, destPath);
-    }
+async function ensureJre() {
+  const state = getJavaRuntimeState();
+  if (state.selected) {
+    console.log(`[jre] Using Java ${state.selected.version}:`, state.selected.path);
+    sendStatus(state.selected.source === 'managed' ? 'using-managed-java' : 'using-system-java');
+    return state.selected;
+  }
+
+  if (state.detected) {
+    console.warn(`[jre] Java ${state.detected.version || 'unknown'} is too old; Java ${REQUIRED_JAVA_VERSION}+ is required.`);
+    sendStatus(`java-incompatible:${state.detected.version || 'unknown'}`);
+  } else {
+    sendStatus('java-missing');
+  }
+
+  try {
+    await installManagedJre();
+    return getJavaRuntimeState().selected;
+  } catch (error) {
+    error.serviceIssue = {
+      code: state.detected ? 'java-incompatible' : 'java-missing',
+      title: state.detected ? 'Java needs an update' : 'Java is required',
+      message: state.detected
+        ? `Java ${state.detected.version || 'unknown'} was found, but Suwayomi requires Java ${REQUIRED_JAVA_VERSION} or newer.`
+        : `Suwayomi requires Java ${REQUIRED_JAVA_VERSION} or newer.`,
+      detail: `The automatic Java installation failed: ${error.message}`,
+      canRepairJava: true,
+      detectedJavaMajor: state.detected?.major ?? null,
+      detectedJavaVersion: state.detected?.version || '',
+      javaPath: state.detected?.path || '',
+    };
+    throw error;
   }
 }
 
 async function ensureJar() {
+  fs.mkdirSync(suwayomiRuntimeDir, { recursive: true });
+  if (!fs.existsSync(jarPath) && fs.existsSync(legacyJarPath)) {
+    const legacySize = fs.statSync(legacyJarPath).size;
+    if (legacySize >= MIN_SERVER_JAR_SIZE) {
+      try {
+        fs.renameSync(legacyJarPath, jarPath);
+      } catch {
+        fs.copyFileSync(legacyJarPath, jarPath);
+      }
+      console.log('[jar] Migrated cached Suwayomi JAR to its isolated runtime directory');
+    }
+  }
   if (fs.existsSync(jarPath)) {
     const sz = fs.statSync(jarPath).size;
     // The cached JAR must look like the actual Suwayomi server (100+ MB),
@@ -510,8 +940,12 @@ async function ensureJar() {
   sendStatus('downloading-suwayomi');
   const { url, version } = await getLatestJarUrl();
   console.log('[jar] Latest:', version);
+  let lastReportedPct = -1;
   await download(url, jarPath, pct => {
-    if (pct % 5 === 0) sendStatus('downloading-suwayomi:' + pct);
+    if (pct % 5 === 0 && pct !== lastReportedPct) {
+      lastReportedPct = pct;
+      sendStatus('downloading-suwayomi:' + pct);
+    }
   });
   // Sanity-check what we just downloaded; a truncated/corrupt download
   // would otherwise be picked up on the next launch and silently fail.
@@ -633,6 +1067,53 @@ function killSuwayomi() {
   }
 }
 
+function killStaleCloudflareDriver() {
+  if (process.platform !== 'win32') return [];
+  const command = [
+    "Get-Process chromedriver -ErrorAction SilentlyContinue",
+    "Where-Object { $_.Path -eq $env:AKAREADER_FLARESOLVERR_DRIVER }",
+    'ForEach-Object { $_.Id }',
+  ].join(' | ');
+  let result;
+  try {
+    result = cp.spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+      env: { ...process.env, AKAREADER_FLARESOLVERR_DRIVER: cloudflareHelperRuntime.sharedDriverPath },
+      windowsHide: true,
+      encoding: 'utf8',
+      timeout: 5000,
+    });
+  } catch {
+    return [];
+  }
+  const pids = String(result.stdout || '')
+    .split(/\s+/)
+    .map(value => Number.parseInt(value, 10))
+    .filter(Number.isInteger);
+  for (const pid of pids) killPid(pid);
+  if (pids.length) console.log('[cloudflare-helper] removed stale managed driver process', pids.join(', '));
+  return pids;
+}
+
+function killCloudflareHelper() {
+  const pid = cloudflareHelperProc?.pid;
+  cloudflareHelperProc = null;
+  if (pid) killPid(pid);
+  try { fs.unlinkSync(cloudflareHelperPidFile); } catch {}
+  try { fs.rmSync(cloudflareHelperRuntime.sessionDir, { recursive: true, force: true }); } catch {}
+}
+
+function killOrphanedCloudflareHelper() {
+  try {
+    if (!fs.existsSync(cloudflareHelperPidFile)) return;
+    const pid = parseInt(fs.readFileSync(cloudflareHelperPidFile, 'utf8').trim(), 10);
+    if (!Number.isNaN(pid)) {
+      killPid(pid);
+      console.log('[cleanup] Killed orphaned Cloudflare helper PID', pid);
+    }
+    fs.unlinkSync(cloudflareHelperPidFile);
+  } catch {}
+}
+
 // Cleanup orphaned process from a previous forced-quit (Task Manager kill, power cut, etc.)
 function killOrphanedSuwayomi() {
   try {
@@ -644,7 +1125,9 @@ function killOrphanedSuwayomi() {
 }
 
 // ── Suwayomi ─────────────────────────────────────────────────────────────────
-function waitForSuwayomi(timeoutMs = 90000) {
+const SUWAYOMI_STARTUP_TIMEOUT_MS = 10 * 60 * 1000;
+
+function waitForSuwayomi(timeoutMs = SUWAYOMI_STARTUP_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const start   = Date.now();
     const attempt = () => {
@@ -689,60 +1172,129 @@ async function startSuwayomi() {
   const dataRoot = path.join(userData, 'suwayomi-data');
   sendStatus('configuring-suwayomi');
   ensureSuwayomiConfig(dataRoot);
+  fs.mkdirSync(suwayomiWorkDir, { recursive: true });
   sendStatus('starting-suwayomi');
   console.log('[suwayomi] Launching…');
 
-  suwayomiProc = cp.spawn(java, [
+  const proc = cp.spawn(java, [
     `-Dsuwayomi.tachidesk.config.server.rootDir=${dataRoot}`,
     '-Xmx512m', '-jar', jarPath,
     '--server.port=4567',
   ], {
-    cwd: userData, stdio: ['ignore', 'pipe', 'pipe'],
+    // Keep the executable JAR and working directory isolated from the managed
+    // Java and user data. Current Windows standalone releases can otherwise
+    // fail their migration/GraphQL self-scan even with a valid JAR and Java.
+    cwd: suwayomiWorkDir, stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true, detached: false,
   });
+  suwayomiProc = proc;
+  let stderrBuffer = '';
+  let startupComplete = false;
+  let rejectEarlyExit;
+  const earlyExit = new Promise((_, reject) => { rejectEarlyExit = reject; });
 
   // FIX: write PID immediately so cleanup works even after forced kill
-  fs.writeFileSync(suwayomiPidFile, String(suwayomiProc.pid));
+  fs.writeFileSync(suwayomiPidFile, String(proc.pid));
 
-  suwayomiProc.on('error', err => {
+  proc.on('error', err => {
     console.error('[suwayomi] spawn error:', err.message);
-    sendStatus('suwayomi-failed:' + err.message);
+    if (!startupComplete) rejectEarlyExit(err);
   });
 
-  suwayomiProc.stdout.on('data', d => {
+  proc.stdout.on('data', d => {
     const l = d.toString().trim();
     if (l) console.log('[suwayomi]', l.slice(0, 120));
+    const setupProgress = [...l.matchAll(/Downloading\s+(\d{1,3})%\s+of/gi)].at(-1);
+    if (setupProgress) sendStatus(`preparing-suwayomi:${Math.min(100, Number(setupProgress[1]))}`);
   });
-  suwayomiProc.stderr.on('data', d => {
+  proc.stderr.on('data', d => {
     const l = d.toString().trim();
     if (l) console.error('[suwayomi:err]', l.slice(0, 120));
+    stderrBuffer += `${l}\n`;
   });
-  suwayomiProc.on('exit', code => {
+  proc.on('exit', code => {
     console.log('[suwayomi] exited', code);
-    suwayomiProc = null;
+    if (suwayomiProc === proc) suwayomiProc = null;
     try { fs.unlinkSync(suwayomiPidFile); } catch {}
-    if (!isQuitting) sendStatus('crashed');
+    if (isQuitting) return;
+    const issue = classifySuwayomiFailure(stderrBuffer, code);
+    const error = new Error(issue.message);
+    error.serviceIssue = issue;
+    if (!startupComplete) rejectEarlyExit(error);
+    else {
+      setServiceIssue(issue);
+      sendStatus('crashed');
+    }
   });
 
   try {
-    await waitForSuwayomi(90000);
+    await Promise.race([waitForSuwayomi(), earlyExit]);
+    startupComplete = true;
     console.log('[suwayomi] Ready!');
     return true;
   } catch (e) {
     console.error('[suwayomi] Failed:', e.message);
-    sendStatus('suwayomi-failed:' + e.message);
-    return false;
+    throw e;
   }
 }
 
 // ── Backend server ────────────────────────────────────────────────────────────
+function assertBackendRuntime() {
+  const missing = getMissingBackendFiles(backendDir);
+  if (!missing.length) return;
+  const error = new Error(`The local service installation is incomplete (${missing.join(', ')}).`);
+  error.serviceIssue = {
+    code: 'backend-runtime-incomplete',
+    title: 'akaReader needs repair',
+    message: 'The local service files are incomplete.',
+    detail: 'Reinstall akaReader using the latest installer or portable package.',
+    canRepairJava: false,
+  };
+  throw error;
+}
+
+function scheduleServerRestart(stderrBuffer = '') {
+  if (isQuitting || serverRestartTimer) return;
+  serverRestartAttempts += 1;
+  if (serverRestartAttempts > 5) {
+    const firstErrorLine = String(stderrBuffer).split(/\r?\n/).find(Boolean) || '';
+    setServiceIssue({
+      code: 'backend-crash-loop',
+      title: 'Local service keeps stopping',
+      message: 'akaReader could not keep its local service running.',
+      detail: firstErrorLine || 'Restart akaReader. If this continues, reinstall the latest release.',
+      canRepairJava: false,
+    });
+    sendStatus('service-issue:backend-crash-loop');
+    return;
+  }
+  const delayMs = Math.min(3000 * (2 ** (serverRestartAttempts - 1)), 30000);
+  sendStatus(`backend-restarting:${serverRestartAttempts}`);
+  serverRestartTimer = setTimeout(() => {
+    serverRestartTimer = null;
+    try { startServer(); } catch (error) {
+      setServiceIssue(error.serviceIssue || {
+        code: 'backend-start-failed',
+        title: 'Local service could not start',
+        message: error.message,
+        detail: 'Reinstall akaReader using the latest release.',
+        canRepairJava: false,
+      });
+      sendStatus('service-issue:backend-start-failed');
+    }
+  }, delayMs);
+}
+
 function startServer() {
   if (serverProc) return;
+  assertBackendRuntime();
   console.log('[server] starting at', backendDir);
 
   const env = {
     ...process.env,
     PORT: '3001',
+    HOST: '127.0.0.1',
+    AKAREADER_API_TOKEN: backendApiToken,
     EXT_DIR: userExtDir,
     SUWAYOMI_EXT_DIR: path.join(userData, 'suwayomi-data', 'extensions'),
     SUWAYOMI_URL: 'http://localhost:4567',
@@ -778,11 +1330,14 @@ function startServer() {
     console.log('[server] exited', code, signal ? `(${signal})` : '');
     if (stderrBuffer) console.error('[server] final stderr:\n', stderrBuffer.slice(0, 1000));
     serverProc = null;
-    if (!isQuitting) setTimeout(startServer, 3000);
+    scheduleServerRestart(stderrBuffer);
   });
 }
 
 function killServer() {
+  if (serverRestartTimer) clearTimeout(serverRestartTimer);
+  serverRestartTimer = null;
+  serverRestartAttempts = 0;
   if (!serverProc) return;
   const p = serverProc; serverProc = null;
   try { p.kill(); } catch {}
@@ -794,7 +1349,12 @@ function waitForServer(retries = 30, delayMs = 300) {
   return new Promise(resolve => {
     let attempts = 0;
     const check = () => {
-      const req = http.get(`http://localhost:${SERVER_PORT}/api/ping`, res => { resolve(res.statusCode === 200); });
+      const req = http.get({
+        hostname: '127.0.0.1',
+        port: SERVER_PORT,
+        path: '/api/ping',
+        headers: { 'X-AkaReader-Token': backendApiToken },
+      }, res => { resolve(res.statusCode === 200); });
       req.on('error', () => {
         attempts++;
         if (attempts >= retries) return resolve(false);
@@ -824,10 +1384,13 @@ function setWindowsStartup(enable) {
 
 let servicesPromise = null;
 async function ensureManagedServices({ restart = false } = {}) {
-  if (servicesPromise && !restart) return servicesPromise;
+  // A retry during a slow first-run download must join the existing work.
+  // Starting a second attempt would make both downloads write the same file.
+  if (servicesPromise) return servicesPromise;
 
   servicesPromise = (async () => {
     try {
+      clearServiceIssue();
       if (restart) {
         if (suwayomiProc) killSuwayomi();
         killServer();
@@ -837,12 +1400,24 @@ async function ensureManagedServices({ restart = false } = {}) {
 
       sendStatus('starting-backend');
       startServer();
-      const serverOk = await waitForServer(40, 250);
+      // Cold Windows starts can spend more than ten seconds loading the
+      // backend through Defender before the loopback listener is available.
+      const serverOk = await waitForServer(120, 250);
       if (!serverOk) {
         sendStatus('offline');
         return false;
       }
+      serverRestartAttempts = 0;
       sendStatus('backend-ready');
+
+      if (appSettings.cloudflareHelperEnabled && findManagedCloudflareHelperExecutable()) {
+        // Only previous protected-source users pay this cost. Start it beside
+        // Java/Suwayomi so Chromium is ready by the time browsing is usable;
+        // this detached warm-up never blocks the main readiness path.
+        prepareCloudflareHelper({ allowInstall: false }).catch(error => {
+          console.warn('[cloudflare-helper] Background warm-up was unavailable:', error.message);
+        });
+      }
 
       sendStatus('suwayomi-starting');
       // Wrap JRE/JAR setup in try/catch to avoid unhandled rejections
@@ -858,18 +1433,26 @@ async function ensureManagedServices({ restart = false } = {}) {
       if (await isServiceRunning()) {
         console.log('[startup] Service already running, waiting for it to be ready...');
         serviceMode = true;
-        await waitForSuwayomi(90000);
+        await waitForSuwayomi();
       } else {
         serviceMode = false;
         const started = await startSuwayomi();
         if (!started) return false;
       }
 
+      clearServiceIssue();
       sendStatus('suwayomi-ready');
       sendStatus('online');
       return true;
     } catch (e) {
       console.error('[startup] Service error:', e.message);
+      setServiceIssue(e.serviceIssue || {
+        code: 'service-start-failed',
+        title: 'Local service could not start',
+        message: e.message || 'akaReader could not start Suwayomi.',
+        detail: 'Retry the service. If the problem continues, open the data folder and check the Suwayomi logs.',
+        canRepairJava: false,
+      });
       sendStatus('suwayomi-failed:' + e.message);
       return false;
     } finally {
@@ -880,11 +1463,199 @@ async function ensureManagedServices({ restart = false } = {}) {
   return servicesPromise;
 }
 
+const BACKUP_SCHEMA = 'akareader-backup';
+const BACKUP_VERSION = 3;
+const BACKUP_MAX_BYTES = 10 * 1024 * 1024;
+const AUTO_BACKUP_LIMIT = 5;
+
+function validateBackupPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('The backup data is invalid.');
+  }
+  const isLegacyV2 = !payload.schema && payload.version === 2
+    && (Array.isArray(payload.library) || Array.isArray(payload.history));
+  if (!isLegacyV2 && (payload.schema !== BACKUP_SCHEMA || !Number.isInteger(payload.version) || payload.version < 2 || payload.version > BACKUP_VERSION)) {
+    throw new Error('The backup format is not supported.');
+  }
+  if (!isLegacyV2 && (!payload.data || typeof payload.data !== 'object' || Array.isArray(payload.data))) {
+    throw new Error('The backup contains no app data.');
+  }
+  const text = JSON.stringify(payload, null, 2);
+  if (Buffer.byteLength(text, 'utf8') > BACKUP_MAX_BYTES) {
+    throw new Error('The backup is unexpectedly large and was not saved.');
+  }
+  return text;
+}
+
+function writeJsonAtomically(targetPath, text) {
+  const temporaryPath = `${targetPath}.${process.pid}.tmp`;
+  fs.writeFileSync(temporaryPath, text, { encoding: 'utf8', mode: 0o600 });
+  try {
+    fs.renameSync(temporaryPath, targetPath);
+  } catch (error) {
+    try { fs.unlinkSync(temporaryPath); } catch {}
+    throw error;
+  }
+}
+
+function automaticBackupPath() {
+  const backupDir = path.join(userData, 'backups');
+  fs.mkdirSync(backupDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  return path.join(backupDir, `akareader-before-update-${stamp}.json`);
+}
+
+function pruneAutomaticBackups() {
+  const backupDir = path.join(userData, 'backups');
+  if (!fs.existsSync(backupDir)) return;
+  const backups = fs.readdirSync(backupDir, { withFileTypes: true })
+    .filter(entry => entry.isFile() && /^akareader-before-update-.*\.json$/i.test(entry.name))
+    .map(entry => ({ name: entry.name, path: path.join(backupDir, entry.name) }))
+    .sort((left, right) => right.name.localeCompare(left.name));
+  for (const backup of backups.slice(AUTO_BACKUP_LIMIT)) {
+    try { fs.unlinkSync(backup.path); } catch {}
+  }
+}
+
+function probeSuwayomiOnce(timeoutMs = 1500) {
+  return new Promise(resolve => {
+    const req = http.request('http://127.0.0.1:4567/api/graphql', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    }, res => {
+      let body = '';
+      res.on('data', chunk => { if (body.length < 32768) body += chunk; });
+      res.on('end', () => {
+        try {
+          const version = JSON.parse(body)?.data?.aboutServer?.version || '';
+          resolve({ ready: res.statusCode >= 200 && res.statusCode < 300 && !!version, version });
+        } catch {
+          resolve({ ready: false, version: '' });
+        }
+      });
+    });
+    req.on('error', () => resolve({ ready: false, version: '' }));
+    req.setTimeout(timeoutMs, () => { req.destroy(); resolve({ ready: false, version: '' }); });
+    req.write(JSON.stringify({ query: 'query { aboutServer { version } }' }));
+    req.end();
+  });
+}
+
+function getDiskSpace() {
+  try {
+    const stat = fs.statfsSync(userData);
+    return {
+      freeBytes: Number(stat.bavail) * Number(stat.bsize),
+      totalBytes: Number(stat.blocks) * Number(stat.bsize),
+    };
+  } catch {
+    return { freeBytes: null, totalBytes: null };
+  }
+}
+
+function testDataDirectoryWritable() {
+  const checkPath = path.join(userData, `.akareader-write-check-${process.pid}-${Date.now()}`);
+  try {
+    fs.writeFileSync(checkPath, 'ok', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    fs.unlinkSync(checkPath);
+    return true;
+  } catch {
+    try { fs.unlinkSync(checkPath); } catch {}
+    return false;
+  }
+}
+
+async function getSystemDiagnostics() {
+  const [backendReady, suwayomi, helper] = await Promise.all([
+    waitForServer(1, 0),
+    probeSuwayomiOnce(),
+    probeCloudflareHelper(),
+  ]);
+  const java = publicJavaInfo();
+  const missingBackendFiles = getMissingBackendFiles(backendDir);
+  const jarSize = fs.existsSync(jarPath) ? fs.statSync(jarPath).size : 0;
+  const disk = getDiskSpace();
+  const writable = testDataDirectoryWritable();
+  const checks = [
+    {
+      id: 'backend', label: 'Local API',
+      status: missingBackendFiles.length ? 'fail' : backendReady ? 'pass' : 'fail',
+      detail: missingBackendFiles.length
+        ? `Packaged files are missing: ${missingBackendFiles.join(', ')}`
+        : backendReady ? 'The local API is responding.' : 'The local API is not responding.',
+      repair: missingBackendFiles.length ? 'reinstall-app' : 'restart-services',
+    },
+    {
+      id: 'java', label: 'Java runtime', status: java.compatible ? 'pass' : 'fail',
+      detail: java.compatible
+        ? `Java ${java.version || java.major} is compatible (${java.source}).`
+        : `Java ${REQUIRED_JAVA_VERSION} or newer is required.`,
+      repair: java.compatible ? null : 'install-java',
+    },
+    {
+      id: 'suwayomi', label: 'Suwayomi server', status: suwayomi.ready ? 'pass' : 'fail',
+      detail: suwayomi.ready ? `Suwayomi ${suwayomi.version} is responding.` : 'Suwayomi is not responding.',
+      repair: 'restart-services',
+    },
+    {
+      id: 'jar', label: 'Embedded server files', status: jarSize >= MIN_SERVER_JAR_SIZE ? 'pass' : 'fail',
+      detail: jarSize >= MIN_SERVER_JAR_SIZE ? 'The Suwayomi server package is present.' : 'The Suwayomi server package is missing or incomplete.',
+      repair: 'restart-services',
+    },
+    {
+      id: 'storage', label: 'Data storage',
+      status: !writable ? 'fail' : (disk.freeBytes !== null && disk.freeBytes < 512 * 1024 * 1024) ? 'warn' : 'pass',
+      detail: !writable
+        ? 'akaReader cannot write to its data folder.'
+        : disk.freeBytes === null ? 'The data folder is writable.' : `${Math.round(disk.freeBytes / 1024 / 1024)} MB free; the data folder is writable.`,
+      repair: !writable ? 'open-data-folder' : null,
+    },
+    {
+      id: 'cloudflare', label: 'Protected-source helper',
+      status: !appSettings.cloudflareHelperEnabled ? 'pass' : helper.ready ? 'pass' : 'warn',
+      detail: !appSettings.cloudflareHelperEnabled
+        ? 'Optional; it will only be installed when a protected source needs it.'
+        : helper.ready ? `${helper.kind || 'The helper'} is ready.` : 'The helper is enabled but is not ready yet.',
+      repair: appSettings.cloudflareHelperEnabled && !helper.ready ? 'restart-services' : null,
+    },
+  ];
+  const status = checks.some(check => check.status === 'fail')
+    ? 'fail'
+    : checks.some(check => check.status === 'warn') ? 'warn' : 'pass';
+  return {
+    status,
+    checkedAt: new Date().toISOString(),
+    app: { version: app.getVersion(), platform: process.platform, arch: process.arch, packaged: app.isPackaged },
+    checks,
+    serviceIssue: lastServiceIssue,
+  };
+}
+
 // ── IPC ───────────────────────────────────────────────────────────────────────
 ipcMain.handle('get-close-to-tray',      ()    => appSettings.closeToTray);
+ipcMain.on('get-api-token', event => { event.returnValue = backendApiToken; });
 ipcMain.handle('set-close-to-tray',      (_, v) => { appSettings.closeToTray = v; saveSettings(appSettings); });
 ipcMain.handle('get-start-with-windows', ()    => appSettings.startWithWindows);
 ipcMain.on(    'set-start-with-windows', (_, v) => { appSettings.startWithWindows = v; saveSettings(appSettings); setWindowsStartup(v); });
+ipcMain.handle('get-extension-repos', () => ({
+  defaults: [...DEFAULT_EXTENSION_STORES],
+  custom: [...appSettings.extensionRepos],
+  all: configuredExtensionStores(appSettings.extensionRepos),
+}));
+ipcMain.handle('set-extension-repos', (_, repos) => {
+  if (!Array.isArray(repos)) throw new Error('Extension repositories must be a list.');
+  const requested = repos.map(value => typeof value === 'string' ? value.trim() : '').filter(Boolean);
+  const invalid = requested.find(url => !isValidExtensionStoreUrl(url));
+  if (invalid) throw new Error('Use a valid http:// or https:// extension repository URL.');
+  appSettings.extensionRepos = normalizeExtensionStoreUrls(requested);
+  saveSettings(appSettings);
+  ensureSuwayomiConfig(path.join(userData, 'suwayomi-data'));
+  return {
+    defaults: [...DEFAULT_EXTENSION_STORES],
+    custom: [...appSettings.extensionRepos],
+    all: configuredExtensionStores(appSettings.extensionRepos),
+  };
+});
 
 ipcMain.handle('window-minimize', ()     => mainWindow?.minimize());
 ipcMain.handle('window-maximize', ()     => mainWindow?.isMaximized() ? mainWindow.unmaximize() : mainWindow?.maximize());
@@ -895,17 +1666,153 @@ ipcMain.handle('window-close',    ()     => {
 
 ipcMain.handle('ensure-services', () => ensureManagedServices());
 ipcMain.handle('restart-services', () => ensureManagedServices({ restart: true }));
+ipcMain.handle('get-system-diagnostics', () => getSystemDiagnostics());
+ipcMain.handle('repair-system', async () => {
+  const missingBackendFiles = getMissingBackendFiles(backendDir);
+  if (missingBackendFiles.length) {
+    return { ok: false, error: 'The installed app files are incomplete. Reinstall the latest akaReader release.', diagnostics: await getSystemDiagnostics() };
+  }
+  try {
+    if (!getJavaRuntimeState().selected) await installManagedJre();
+    await ensureJar();
+    ensureSuwayomiConfig(path.join(userData, 'suwayomi-data'));
+    if (appSettings.cloudflareHelperEnabled && !findManagedCloudflareHelperExecutable()) {
+      await prepareCloudflareHelper({ allowInstall: true });
+    }
+    const ready = await ensureManagedServices({ restart: true });
+    return { ok: ready, diagnostics: await getSystemDiagnostics(), error: ready ? null : 'The services did not become ready.' };
+  } catch (error) {
+    return { ok: false, error: error?.message || 'Repair failed.', diagnostics: await getSystemDiagnostics() };
+  }
+});
+ipcMain.on('renderer-ready', event => {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender.id !== mainWindow.webContents.id) return;
+  flushStatusQueue();
+});
+ipcMain.handle('get-service-issue', () => lastServiceIssue);
+ipcMain.handle('get-java-info', () => publicJavaInfo());
+ipcMain.handle('install-managed-java', async () => {
+  try {
+    const info = await installManagedJre();
+    clearServiceIssue();
+    return { ok: true, java: info };
+  } catch (error) {
+    const state = getJavaRuntimeState();
+    const issue = setServiceIssue({
+      code: 'java-install-failed',
+      title: 'Java installation failed',
+      message: `akaReader could not install its managed Java ${REQUIRED_JAVA_VERSION} runtime.`,
+      detail: error.message,
+      canRepairJava: true,
+      detectedJavaMajor: state.detected?.major ?? null,
+      detectedJavaVersion: state.detected?.version || '',
+      javaPath: state.detected?.path || '',
+    });
+    return { ok: false, error: issue.message, detail: issue.detail };
+  }
+});
 
 ipcMain.handle('check-service',     ()    => isServiceRunning());
 ipcMain.handle('install-service',   async () => installWindowsService());
 ipcMain.handle('uninstall-service', async () => uninstallWindowsService());
 ipcMain.handle('open-data-dir',     ()    => shell.openPath(userData));
+ipcMain.handle('export-app-backup', async (_, payload) => {
+  try {
+    const text = validateBackupPayload(payload);
+    const defaultName = `akareader-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export akaReader backup',
+      defaultPath: path.join(app.getPath('documents'), defaultName),
+      filters: [{ name: 'akaReader backup', extensions: ['json'] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
+    writeJsonAtomically(result.filePath, text);
+    return { ok: true, filePath: result.filePath };
+  } catch (error) {
+    return { ok: false, error: error?.message || 'The backup could not be saved.' };
+  }
+});
+ipcMain.handle('import-app-backup', async () => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: 'Restore akaReader backup',
+      properties: ['openFile'],
+      filters: [{ name: 'akaReader backup', extensions: ['json'] }],
+    });
+    if (result.canceled || !result.filePaths[0]) return { ok: false, cancelled: true };
+    const filePath = result.filePaths[0];
+    const stat = fs.statSync(filePath);
+    if (stat.size > BACKUP_MAX_BYTES) throw new Error('This backup is too large to import safely.');
+    const payload = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    validateBackupPayload(payload);
+    return { ok: true, payload };
+  } catch (error) {
+    return { ok: false, error: error?.message || 'The backup could not be opened.' };
+  }
+});
+ipcMain.handle('save-automatic-backup', (_, payload) => {
+  try {
+    const text = validateBackupPayload(payload);
+    const filePath = automaticBackupPath();
+    writeJsonAtomically(filePath, text);
+    pruneAutomaticBackups();
+    return { ok: true, filePath };
+  } catch (error) {
+    return { ok: false, error: error?.message || 'The safety backup could not be created.' };
+  }
+});
 ipcMain.handle('get-version',       ()    => app.getVersion());
 ipcMain.handle('get-java-path',     ()    => findJava());
 ipcMain.handle('get-jar-path',      ()    => jarPath);
 ipcMain.handle('get-suwayomi-config-path', () => suwayomiConfigPath);
 ipcMain.handle('open-external',      (_, url) => shell.openExternal(url));
-ipcMain.handle('verify-source-url', async (_, url) => {
+ipcMain.handle('get-cloudflare-helper-info', async () => {
+  const running = await probeCloudflareHelper();
+  return {
+    supported: running.ready || !!managedCloudflareRelease,
+    installed: !!findManagedCloudflareHelperExecutable(),
+    running: running.ready,
+    kind: running.kind || '',
+    version: FLARESOLVERR_VERSION,
+  };
+});
+ipcMain.handle('ensure-cloudflare-helper', async () => {
+  try {
+    const helper = await prepareCloudflareHelper({ allowInstall: false });
+    return helper.ready
+      ? { ok: true, helper }
+      : { ok: false, needsInstall: !!helper.needsInstall };
+  } catch (error) {
+    return {
+      ok: false,
+      installed: !!findManagedCloudflareHelperExecutable(),
+      error: error.message || 'The Cloudflare helper could not start.',
+    };
+  }
+});
+ipcMain.handle('setup-cloudflare-helper', async () => {
+  try {
+    const helper = await prepareCloudflareHelper({ allowInstall: true });
+    return { ok: true, helper };
+  } catch (error) {
+    console.error('[cloudflare-helper] setup failed:', error.message);
+    return { ok: false, error: error.message || 'The Cloudflare helper could not be set up.' };
+  }
+});
+ipcMain.handle('get-source-verification-state', () => sourceVerificationState);
+ipcMain.handle('cancel-source-verification', () => {
+  if (!cancelSourceVerification) return { ok: false, active: false };
+  cancelSourceVerification();
+  return { ok: true, cancelled: true };
+});
+ipcMain.handle('complete-source-verification', () => {
+  if (!completeSourceVerification) return { ok: false, active: false };
+  completeSourceVerification();
+  return { ok: true, completed: true };
+});
+ipcMain.handle('verify-source-url', async (_, request) => {
+  const url = request && typeof request === 'object' ? request.url : request;
+  const automatic = !!(request && typeof request === 'object' && request.automatic);
   let target;
   try {
     target = new URL(String(url || ''));
@@ -916,41 +1823,181 @@ ipcMain.handle('verify-source-url', async (_, url) => {
     return { ok: false, error: 'Unsupported verification URL.' };
   }
 
-  if (verificationWindow && !verificationWindow.isDestroyed()) {
-    verificationWindow.focus();
-    return { ok: true, alreadyOpen: true };
+  if (verificationPromise) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+      verificationView?.webContents.focus();
+    }
+    return verificationPromise;
   }
 
-  return new Promise(resolve => {
-    verificationWindow = new BrowserWindow({
-      width: 1100,
-      height: 820,
-      minWidth: 720,
-      minHeight: 560,
-      parent: mainWindow || undefined,
-      modal: false,
-      title: 'Source verification',
-      backgroundColor: '#0a0a0f',
-      webPreferences: {
-        nodeIntegration: false,
-        contextIsolation: true,
-        webSecurity: true,
-      },
-    });
+  verificationPromise = (async () => {
+    const owner = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+    if (!owner) return { ok: false, error: 'The akaReader window is not available.' };
 
-    verificationWindow.webContents.setWindowOpenHandler(({ url: nextUrl }) => {
-      verificationWindow.loadURL(nextUrl);
-      return { action: 'deny' };
+    return new Promise(resolve => {
+      let settled = false;
+      let verificationCheckTimer = null;
+      let verificationCheckInFlight = false;
+      let challengeObserved = false;
+      let consecutiveNonChallengeChecks = 0;
+      let view = null;
+      let verificationSession = null;
+      let verificationCookieListener = null;
+
+      const stopVerificationChecks = () => {
+        if (verificationCheckTimer) clearInterval(verificationCheckTimer);
+        verificationCheckTimer = null;
+      };
+      const finish = result => {
+        if (settled) return;
+        settled = true;
+        stopVerificationChecks();
+        cancelSourceVerification = null;
+        completeSourceVerification = null;
+        if (verificationSession && verificationCookieListener) {
+          verificationSession.cookies.removeListener('changed', verificationCookieListener);
+        }
+        removeSourceVerificationView();
+        sendSourceVerificationState({ active: false });
+        if (!owner.isDestroyed()) {
+          owner.show();
+          owner.focus();
+        }
+        resolve(result);
+      };
+      const isWebUrl = nextUrl => {
+        try {
+          return ['http:', 'https:'].includes(new URL(nextUrl).protocol);
+        } catch {
+          return false;
+        }
+      };
+      const isAbortedLoad = error => (
+        error?.code === 'ERR_ABORTED'
+        || error?.errno === -3
+        || /ERR_ABORTED|\(-3\)/i.test(error?.message || '')
+      );
+
+      cancelSourceVerification = () => finish({ ok: false, cancelled: true });
+      completeSourceVerification = () => finish({ ok: true, completed: true, userConfirmed: true });
+
+      try {
+        view = new WebContentsView({
+          webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+            sandbox: true,
+            webSecurity: true,
+            partition: 'persist:akareader-source-verification',
+          },
+        });
+        verificationView = view;
+        verificationSession = view.webContents.session;
+        view.setBackgroundColor('#0a0a0f');
+        owner.contentView.addChildView(view);
+        layoutSourceVerificationView();
+      } catch (error) {
+        finish({ ok: false, error: error?.message || 'Could not show source verification inside akaReader.' });
+        return;
+      }
+
+      sendSourceVerificationState({
+        active: true,
+        hostname: target.hostname.replace(/^www\./i, ''),
+        automatic,
+      });
+
+      // Cloudflare writes this cookie after the user passes its human check.
+      // Listening for it lets akaReader return to native results immediately,
+      // even when the source website itself stays on a loading or ad shell.
+      verificationCookieListener = (_event, cookie, _cause, removed) => {
+        if (removed || !isCloudflareClearanceCookie(cookie, target.toString())) return;
+        finish({ ok: true, completed: true, clearanceCookie: true });
+      };
+      verificationSession.cookies.on('changed', verificationCookieListener);
+
+      view.webContents.setWindowOpenHandler(({ url: nextUrl }) => {
+        if (isWebUrl(nextUrl)) {
+          view.webContents.loadURL(nextUrl).catch(error => {
+            console.error('[verification] embedded navigation failed:', error?.message || error);
+          });
+        }
+        return { action: 'deny' };
+      });
+      view.webContents.on('will-navigate', (event, nextUrl) => {
+        if (!isWebUrl(nextUrl)) event.preventDefault();
+      });
+      view.webContents.on('before-input-event', (_, input) => {
+        if (input.key === 'Escape') cancelSourceVerification?.();
+      });
+      view.webContents.on('render-process-gone', (_, details) => {
+        finish({ ok: false, error: `The verification page stopped unexpectedly (${details.reason}).` });
+      });
+      view.webContents.on('did-fail-load', (_, errorCode, errorDescription, _validatedUrl, isMainFrame) => {
+        if (!isMainFrame || errorCode === -3) return;
+        finish({ ok: false, error: errorDescription || 'The source verification page could not load.' });
+      });
+
+      const checkVerificationPage = async () => {
+        if (settled || verificationCheckInFlight || view.webContents.isDestroyed()) return;
+        verificationCheckInFlight = true;
+        try {
+          const snapshot = await view.webContents.executeJavaScript(`(() => {
+            const bodyText = document.body?.innerText || '';
+            return {
+              url: location.href,
+              title: document.title,
+              text: bodyText.slice(0, 12000),
+              bodyTextLength: bodyText.length,
+              readyState: document.readyState,
+              hasChallengeWidget: !!document.querySelector('iframe[src*="challenges.cloudflare.com"], .cf-turnstile, [data-sitekey], input[name="cf-turnstile-response"]'),
+              hasPasswordField: !!document.querySelector('input[type="password"]'),
+              hasMainContent: !!document.querySelector('main, article, [role="main"]'),
+            };
+          })()`, true);
+          if (hasSourceChallengeSignals(snapshot)) {
+            challengeObserved = true;
+            consecutiveNonChallengeChecks = 0;
+          } else if (
+            normalizedHostname(snapshot.url) === normalizedHostname(target.toString())
+            && snapshot.readyState === 'complete'
+            && !snapshot.hasPasswordField
+            && Number(snapshot.bodyTextLength || 0) >= 20
+          ) {
+            consecutiveNonChallengeChecks += 1;
+          } else {
+            consecutiveNonChallengeChecks = 0;
+          }
+
+          if (isSourcePageReadyForReturn(snapshot, target.toString(), {
+            challengeObserved,
+            consecutiveNonChallengeChecks,
+          })) {
+            finish({ ok: true, completed: true, pageReady: true });
+          }
+        } catch (error) {
+          console.warn('[verification] page readiness check failed:', error?.message || error);
+        } finally {
+          verificationCheckInFlight = false;
+        }
+      };
+
+      view.webContents.on('did-finish-load', () => setTimeout(checkVerificationPage, 1000));
+      verificationCheckTimer = setInterval(checkVerificationPage, 1500);
+      view.webContents.loadURL(target.toString()).catch(error => {
+        if (isAbortedLoad(error)) return;
+        finish({ ok: false, error: error?.message || 'The source verification page could not load.' });
+      });
     });
-    verificationWindow.on('closed', () => {
-      verificationWindow = null;
-      resolve({ ok: true });
-    });
-    verificationWindow.loadURL(target.toString()).catch(e => {
-      if (verificationWindow && !verificationWindow.isDestroyed()) verificationWindow.close();
-      resolve({ ok: false, error: e?.message || 'Failed to open verification window.' });
-    });
-  });
+  })();
+
+  try {
+    return await verificationPromise;
+  } finally {
+    verificationPromise = null;
+  }
 });
 
 ipcMain.handle('check-for-app-update', async () => {
@@ -1040,13 +2087,21 @@ function createMainWindow() {
     icon: windowIconPath,
   });
 
-  mainWindow.webContents.on('did-finish-load', flushStatusQueue);
+  mainWindow.webContents.on('did-start-loading', () => { rendererStatusReady = false; });
 
-  ['resize', 'move'].forEach(ev => mainWindow.on(ev, () => saveWindowState(mainWindow)));
+  mainWindow.on('resize', () => {
+    saveWindowState(mainWindow);
+    layoutSourceVerificationView();
+  });
+  mainWindow.on('move', () => saveWindowState(mainWindow));
   mainWindow.on('close', e => {
     if (!isQuitting && appSettings.closeToTray) { e.preventDefault(); mainWindow.hide(); }
   });
-  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.on('closed', () => {
+    cancelSourceVerification?.();
+    removeSourceVerificationView();
+    mainWindow = null;
+  });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: 'deny' };
@@ -1098,6 +2153,7 @@ app.whenReady().then(async () => {
 
   // Kill any zombie Suwayomi from a previous forced-exit
   killOrphanedSuwayomi();
+  killOrphanedCloudflareHelper();
 
   seedExtensions();
   createTray();
@@ -1197,6 +2253,7 @@ app.on('before-quit', () => {
   globalShortcut.unregisterAll();
   killServer();
   killSuwayomi();
+  killCloudflareHelper();
   try { tray?.destroy(); } catch {}
 });
 
@@ -1216,7 +2273,20 @@ process.on('exit', () => {
       fs.unlinkSync(suwayomiPidFile);
     }
   } catch {}
+  const helperPid = cloudflareHelperProc?.pid;
+  if (helperPid && process.platform === 'win32') {
+    try { cp.spawnSync('taskkill', ['/F', '/T', '/PID', String(helperPid)], { windowsHide: true }); } catch {}
+  }
+  try {
+    if (fs.existsSync(cloudflareHelperPidFile)) {
+      const savedHelperPid = fs.readFileSync(cloudflareHelperPidFile, 'utf8').trim();
+      if (savedHelperPid && process.platform === 'win32') {
+        cp.spawnSync('taskkill', ['/F', '/T', '/PID', savedHelperPid], { windowsHide: true });
+      }
+      fs.unlinkSync(cloudflareHelperPidFile);
+    }
+  } catch {}
 });
 
-process.on('SIGINT',  () => { isQuitting = true; killServer(); killSuwayomi(); process.exit(0); });
-process.on('SIGTERM', () => { isQuitting = true; killServer(); killSuwayomi(); process.exit(0); });
+process.on('SIGINT',  () => { isQuitting = true; killServer(); killSuwayomi(); killCloudflareHelper(); process.exit(0); });
+process.on('SIGTERM', () => { isQuitting = true; killServer(); killSuwayomi(); killCloudflareHelper(); process.exit(0); });

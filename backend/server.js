@@ -8,6 +8,8 @@ const cors = require('cors');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const { isSourceVerificationError, sendSourceError } = require('./source-errors');
 
 // Optional middleware - gracefully skip if not installed
 let rateLimit, helmet, compression;
@@ -60,19 +62,51 @@ class LRUCache {
 
 // ── App Setup ──────────────────────────────────────────────────────────────
 const app = express();
+const API_TOKEN = String(process.env.AKAREADER_API_TOKEN || '');
+const ALLOWED_ORIGINS = new Set([
+  'null',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+]);
+
+const isAllowedOrigin = origin => !origin || ALLOWED_ORIGINS.has(origin);
+const hasValidApiToken = value => {
+  if (!API_TOKEN) return true;
+  const supplied = Buffer.from(String(value || ''));
+  const expected = Buffer.from(API_TOKEN);
+  return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+};
 
 if (helmet) app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' }, contentSecurityPolicy: false }));
 if (compression) app.use(compression());
 
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PATCH'], allowedHeaders: ['Content-Type'] }));
+app.use((req, res, next) => {
+  if (!isAllowedOrigin(req.get('Origin'))) {
+    return res.status(403).json({ error: 'Origin is not allowed.' });
+  }
+  next();
+});
+app.use(cors({
+  origin: (origin, callback) => callback(null, isAllowedOrigin(origin)),
+  methods: ['GET', 'POST', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'X-AkaReader-Token'],
+}));
 app.use(express.json({ limit: '10mb' }));
+app.use('/api', (req, res, next) => {
+  if (req.method === 'OPTIONS' || !API_TOKEN) return next();
+  const token = req.get('X-AkaReader-Token') || (req.path === '/img' ? req.query.api_token : '');
+  if (!hasValidApiToken(token)) {
+    return res.status(401).json({ error: 'Unauthorized local API request.' });
+  }
+  next();
+});
 
 // Rate limiting removed - not needed for local proxy
 
 // ── Config ─────────────────────────────────────────────────────────────────
 const SUWAYOMI = process.env.SUWAYOMI_URL || 'http://localhost:4567';
 const GQL = `${SUWAYOMI}/api/graphql`;
-const http = axios.create({ timeout: 120000 });
+const http = axios.create({ timeout: 120000, proxy: false });
 
 // ── Caches ─────────────────────────────────────────────────────────────────
 const caches = {
@@ -110,14 +144,60 @@ const fixUrl = url => (!url ? null : url.startsWith('http') ? url : `${SUWAYOMI}
 const getMangaCacheKey = (sourceId, mangaId) => `manga-${sourceId}-${mangaId}`;
 const getChapterPagesCacheKey = (sourceId, chapterId) => `pages-${sourceId}-${chapterId}`;
 
+const isLoopbackHostname = hostname => ['localhost', '127.0.0.1', '[::1]'].includes(hostname.toLowerCase());
+const effectivePort = target => target.port || (target.protocol === 'https:' ? '443' : '80');
+
 const isAllowedImageUrl = value => {
   try {
     const candidate = new URL(value);
     if (!['http:', 'https:'].includes(candidate.protocol)) return false;
-    return true;
+    if (candidate.username || candidate.password) return false;
+    const suwayomi = new URL(SUWAYOMI);
+    const sameHost = candidate.hostname.toLowerCase() === suwayomi.hostname.toLowerCase();
+    const loopbackAlias = isLoopbackHostname(candidate.hostname) && isLoopbackHostname(suwayomi.hostname);
+    return candidate.protocol === suwayomi.protocol &&
+      effectivePort(candidate) === effectivePort(suwayomi) &&
+      (sameHost || loopbackAlias);
   } catch {
     return false;
   }
+};
+
+const imageProxyError = (statusCode, message) => Object.assign(new Error(message), { statusCode });
+const activeImageRequests = new Map();
+let nextImageRequestId = 0;
+
+const cancelActiveCoverRequests = () => {
+  for (const request of activeImageRequests.values()) {
+    if (request.kind === 'cover') request.controller.abort();
+  }
+};
+
+const fetchAllowedImage = async (value, redirectCount = 0, signal) => {
+  if (!isAllowedImageUrl(value)) throw imageProxyError(403, 'Image URL is not allowed.');
+  const response = await http.get(value, {
+    responseType: 'arraybuffer',
+    signal,
+    timeout: 30000,
+    maxRedirects: 0,
+    maxContentLength: 50 * 1024 * 1024,
+    validateStatus: status => (status >= 200 && status < 300) || (status >= 300 && status < 400),
+  });
+  if (response.status >= 300) {
+    if (redirectCount >= 3 || !response.headers.location) {
+      throw imageProxyError(502, 'Image redirect limit exceeded.');
+    }
+    const nextUrl = new URL(response.headers.location, value).toString();
+    if (!isAllowedImageUrl(nextUrl)) {
+      throw imageProxyError(403, 'Image redirect target is not allowed.');
+    }
+    return fetchAllowedImage(nextUrl, redirectCount + 1, signal);
+  }
+  const contentType = String(response.headers['content-type'] || '').toLowerCase();
+  if (!contentType.startsWith('image/') && contentType !== 'application/octet-stream') {
+    throw imageProxyError(415, 'Upstream response is not an image.');
+  }
+  return response;
 };
 
 const fmtDate = value => {
@@ -131,6 +211,24 @@ function fmtNum(n) {
 }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+const isSuwayomiStartingError = error => [
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EPIPE',
+  'ENETUNREACH',
+].includes(error?.code);
+const waitWithSignal = (ms, signal) => new Promise(resolve => {
+  if (signal?.aborted) return resolve(false);
+  const timer = setTimeout(() => {
+    signal?.removeEventListener('abort', onAbort);
+    resolve(true);
+  }, ms);
+  const onAbort = () => {
+    clearTimeout(timer);
+    resolve(false);
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
+});
 
 const clearMangaCaches = () => {
   caches.sources.clear();
@@ -244,22 +342,56 @@ app.get('/api/img', async (req, res) => {
     return res.status(403).end();
   }
 
-  // Try fetching image with retries
-  for (let i = 0; i < 2; i++) {
-    try {
-      const r = await http.get(url, { responseType: 'arraybuffer', timeout: 30000 });
-      res.set('Cache-Control', 'public, max-age=86400');
-      // Preserve the upstream image type instead of forcing a jpeg default.
-      const contentType = r.headers['content-type'] || 'application/octet-stream';
-      res.set('Content-Type', contentType);
-      return res.send(Buffer.from(r.data));
-    } catch (e) {
-      if (i === 1) {
-        console.error('[img-proxy] Final failure:', url, e.message);
-        return res.status(502).end();
+  const kind = req.query.kind === 'page' ? 'page' : 'cover';
+  if (kind === 'page') cancelActiveCoverRequests();
+  const controller = new AbortController();
+  const requestId = ++nextImageRequestId;
+  activeImageRequests.set(requestId, { controller, kind });
+  const abortAbandonedRequest = () => {
+    if (!res.writableEnded) controller.abort();
+  };
+  res.once('close', abortAbandonedRequest);
+
+  // A restored renderer can request persisted covers while Suwayomi is still
+  // starting. Keep those requests alive briefly so covers appear when the
+  // service becomes ready instead of flashing broken images during launch.
+  try {
+    const startupDeadline = Date.now() + 30000;
+    let normalRetryUsed = false;
+    while (!controller.signal.aborted) {
+      try {
+        const r = await fetchAllowedImage(url, 0, controller.signal);
+        if (controller.signal.aborted) return;
+        res.set('Cache-Control', 'public, max-age=86400');
+        // Preserve the upstream image type instead of forcing a jpeg default.
+        const contentType = r.headers['content-type'] || 'application/octet-stream';
+        res.set('Content-Type', contentType);
+        return res.send(Buffer.from(r.data));
+      } catch (e) {
+        if (controller.signal.aborted) {
+          if (!res.headersSent && !res.writableEnded) return res.status(499).end();
+          return;
+        }
+        if (e.statusCode) return res.status(e.statusCode).end();
+        if (isSuwayomiStartingError(e) && Date.now() < startupDeadline) {
+          if (!await waitWithSignal(500, controller.signal)) return;
+          continue;
+        }
+        if (normalRetryUsed) {
+          console.error('[img-proxy] Final failure:', url, e.message);
+          if (isSuwayomiStartingError(e)) {
+            res.set('Retry-After', '2');
+            return res.status(503).end();
+          }
+          return res.status(502).end();
+        }
+        normalRetryUsed = true;
+        if (!await waitWithSignal(1000, controller.signal)) return;
       }
-      await sleep(1000); // Wait before retry
     }
+  } finally {
+    activeImageRequests.delete(requestId);
+    res.removeListener('close', abortAbandonedRequest);
   }
 });
 
@@ -350,7 +482,7 @@ app.get('/api/sources', async (req, res) => {
     const force = ['1', 'true'].includes(String(req.query.force || '').toLowerCase());
     const cached = !force && caches.sources.get('all');
     if (cached) return res.json(cached);
-    const data = await gql(`query { sources { nodes { id name lang iconUrl displayName isNsfw } } }`);
+    const data = await gql(`query { sources { nodes { id name lang iconUrl displayName homeUrl isNsfw } } }`);
     const result = data.sources?.nodes || [];
     caches.sources.set('all', result);
     res.json(result);
@@ -381,7 +513,7 @@ app.get('/api/source/:sourceId/search', async (req, res) => {
     try {
       data = await gql(queryDoc, { src: sourceId, type: requestedType, q, page });
     } catch (error) {
-      if (q || requestedType === 'POPULAR') throw error;
+      if (isSourceVerificationError(error) || q || requestedType === 'POPULAR') throw error;
       data = await gql(queryDoc, { src: sourceId, type: 'POPULAR', q, page });
     }
     if (!data?.fetchSourceManga) throw new Error('Source failed to return results');
@@ -393,7 +525,7 @@ app.get('/api/source/:sourceId/search', async (req, res) => {
     };
     caches.search.set(cacheKey, result);
     res.json(result);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { sendSourceError(res, e); }
 });
 
 // ── Manga Detail ───────────────────────────────────────────────────────────
@@ -443,7 +575,7 @@ app.get('/api/source/:sourceId/manga/:mangaId', async (req, res) => {
     };
     caches.manga.set(cacheKey, result);
     res.json(result);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { sendSourceError(res, e); }
 });
 
 // ── Chapter Pages ──────────────────────────────────────────────────────────
@@ -459,7 +591,7 @@ app.get('/api/source/:sourceId/chapter/:chapterId', async (req, res) => {
     const result = (data.fetchChapterPages?.pages || []).map(p => fixUrl(p));
     caches.pages.set(cacheKey, result);
     res.json(result);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { sendSourceError(res, e); }
 });
 
 // ── Download ───────────────────────────────────────────────────────────────
@@ -519,7 +651,7 @@ app.get('/api/source/:sourceId/chapter/:chapterId/download', async (req, res) =>
       if (r?.ok) archive.append(r.buf, { name: `${String(i + 1).padStart(4, '0')}.${guessExt(pages[i], r.ct)}` });
     });
     await archive.finalize();
-  } catch (e) { if (!res.headersSent) res.status(500).json({ error: e.message }); }
+  } catch (e) { if (!res.headersSent) sendSourceError(res, e); }
 });
 
 app.patch('/api/chapter/:chapterId/read', async (req, res) => {
@@ -533,9 +665,10 @@ app.patch('/api/chapter/:chapterId/read', async (req, res) => {
 
 app.use((req, res) => res.status(404).json({ error: `Route not found: ${req.method} ${req.path}` }));
 
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`✓ akaReader proxy → http://localhost:${PORT}`);
+const PORT = Number.parseInt(process.env.PORT, 10) || 3001;
+const HOST = process.env.HOST || '127.0.0.1';
+app.listen(PORT, HOST, () => {
+  console.log(`✓ akaReader proxy → http://${HOST}:${PORT}`);
   console.log(`  Suwayomi        → ${SUWAYOMI}`);
   prewarmExtensions();
 });

@@ -20,6 +20,23 @@ import { Reader as NewReader } from './components/reader/Reader';
 import { HomeView as HomeTab } from './views/HomeView';
 import { DataContext, useData } from './contexts/DataContext';
 import { ExtensionsTab } from './components/extensions/ExtensionsTab';
+import { countReadChapterIds, getUnreadChapterIds } from './utils/chapterTracking.mjs';
+import {
+  AUTO_BROWSE_MAX_RETRIES,
+  autoBrowseRetryDelay,
+  isRetryableBrowseError,
+  mergeBrowseResults,
+} from './utils/browsePagination.mjs';
+import { describeSourceError, isSourceVerificationError } from './utils/sourceErrors.mjs';
+import {
+  DOWNLOAD_MAX_ATTEMPTS,
+  DOWNLOAD_QUEUE_STORAGE_KEY,
+  formatByteSize,
+  normalizeDownloadQueue,
+  queueForPersistence,
+  storageCapacityResult,
+} from './utils/downloadQueue.mjs';
+import { applyAppBackup, createAppBackup } from './utils/appBackup.mjs';
 
 // ==================== CONFIG & CONSTANTS ====================
 
@@ -51,16 +68,19 @@ const DEFAULT_API_BASE =
 const CONFIG = {
   API: import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE,
   SUWAYOMI: import.meta.env.VITE_SUWAYOMI_BASE_URL || 'http://localhost:4567',
+  API_TOKEN: typeof window !== 'undefined' ? (window.electronAPI?.apiToken || '') : '',
   DEBOUNCE_DELAY: 300,
   UPDATE_INTERVAL: 3600000,
 };
+const BROWSE_DEFAULT_FILTERS = Object.freeze({ sort: 'latest' });
 
 const proxyImg = (url) => {
   if (!url) return null;
   const isLoopback = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\//i.test(url);
   if (url.startsWith(CONFIG.SUWAYOMI) || url.startsWith('/') || isLoopback) {
     const absolute = url.startsWith('/') ? `${CONFIG.SUWAYOMI}${url}` : url;
-    return `${CONFIG.API}/img?url=${encodeURIComponent(absolute)}`;
+    const token = CONFIG.API_TOKEN ? `&api_token=${encodeURIComponent(CONFIG.API_TOKEN)}` : '';
+    return `${CONFIG.API}/img?url=${encodeURIComponent(absolute)}${token}`;
   }
   return url;
 };
@@ -95,7 +115,11 @@ async function fetchPageBlobs(urls, signal, onProgress) {
   const results = await mapWithConcurrency(urls, DOWNLOAD_PAGE_CONCURRENCY, async (url, index) => {
     if (signal.aborted) throw new Error('Download cancelled');
     const response = await fetch(url, { signal });
-    if (!response.ok) throw new Error(`Page failed: ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(`Page failed: ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
     const blob = await response.blob();
     completed++;
     onProgress(completed, urls.length);
@@ -175,6 +199,10 @@ const debounce = (fn, delay) => {
   return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), delay); };
 };
 
+const BUILT_IN_EXTENSION_STORES = [
+  'https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.min.json',
+];
+
 const calculateStreak = (history) => {
   if (!history?.length) return 0;
   const dates = [...new Set(history.map(h => new Date(h.lastRead).toDateString()))]
@@ -190,11 +218,6 @@ const calculateStreak = (history) => {
     else break;
   }
   return streak;
-};
-
-const isSourceVerificationError = (message = '') => {
-  const text = String(message).toLowerCase();
-  return text.includes('cloudflare') || text.includes('captcha') || text.includes('challenge') || text.includes('verification');
 };
 
 // ==================== GLOBAL STYLES ====================
@@ -519,7 +542,7 @@ const DataProvider = memo(({ children }) => {
   const [readingTime, setReadingTime] = useState(() => storage.get('readingTime', {}));
   const [settings, setSettingsState] = useState(() => storage.get('appSettings', {
     readerMode: 'scroll', brightness: 100, fitMode: 'height', theme: 'dark',
-    sidebarCollapsed: false, libraryView: 'grid', tagSearchMode: 'source', appTheme: 'dark'
+    sidebarCollapsed: false, libraryView: 'grid', tagSearchMode: 'source', appTheme: 'dark', repos: []
   }));
   const [updates, setUpdates] = useState([]);
   const [checkingUpdates, setCheckingUpdates] = useState(false);
@@ -538,10 +561,20 @@ const DataProvider = memo(({ children }) => {
     refreshDownloads();
   }, [refreshDownloads]);
 
-  const [downloadQueue, setDownloadQueue] = useState([]);
+  const [downloadQueue, setDownloadQueue] = useState(() => (
+    normalizeDownloadQueue(storage.get(DOWNLOAD_QUEUE_STORAGE_KEY, []))
+  ));
   const [overlayHidden, setOverlayHidden] = useState(false);
   const dlProcessingRef = useRef(false);
   const dlAbortRef = useRef(null);
+  const dlWakeTimerRef = useRef(null);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      storage.set(DOWNLOAD_QUEUE_STORAGE_KEY, queueForPersistence(downloadQueue));
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [downloadQueue]);
 
   // Migration Effect: Convert old numeric ID keys to composite sourceId__id keys
   useEffect(() => {
@@ -600,12 +633,23 @@ const DataProvider = memo(({ children }) => {
     let lastErr;
     for (let i = 0; i <= retries; i++) {
       try {
-        const r = await fetch(`${CONFIG.API}${url}`, { ...opts, headers: { 'Content-Type': 'application/json', ...opts.headers } });
-        if (!r.ok) throw new Error(await r.text());
+        const tokenHeader = CONFIG.API_TOKEN ? { 'X-AkaReader-Token': CONFIG.API_TOKEN } : {};
+        const r = await fetch(`${CONFIG.API}${url}`, { ...opts, headers: { 'Content-Type': 'application/json', ...tokenHeader, ...opts.headers } });
+        if (!r.ok) {
+          const rawBody = await r.text();
+          let body = null;
+          try { body = JSON.parse(rawBody); } catch {}
+          const error = new Error(body?.error || rawBody || `Request failed (${r.status})`);
+          error.code = body?.code || '';
+          error.detail = body?.detail || '';
+          error.status = r.status;
+          throw error;
+        }
         return await r.json();
       } catch (e) {
         lastErr = e;
         if (opts.signal?.aborted) throw e;
+        if (e?.code === 'source-verification-required' || (e?.status >= 400 && e?.status < 500)) throw e;
         if (i < retries) await new Promise(r => setTimeout(r, 500 * (i + 1)));
       }
     }
@@ -638,6 +682,7 @@ const DataProvider = memo(({ children }) => {
             displayName: s.displayName || s.name,
             baseName: s.name || s.displayName || 'Source',
             lang: s.lang,
+            homeUrl: s.homeUrl || '',
             // Source icons render faster when loaded directly instead of being proxied through the backend.
             icon: directSuwayomiAsset(s.icon || s.iconUrl),
           };
@@ -894,37 +939,67 @@ const DataProvider = memo(({ children }) => {
   }, []);
 
   const queueChaptersForDownload = useCallback((chapters, mangaId, mangaTitle, sourceId) => {
+    navigator.storage?.persist?.().catch(() => {});
     const sorted = [...chapters].sort((a, b) => parseFloat(a.number) - parseFloat(b.number));
     const mangaKey = getMangaKey(mangaId, sourceId);
+    const createdAt = Date.now();
     const newItems = sorted.map(ch => ({
-      id: `${mangaId}__${ch.id}__${Date.now()}_${Math.random()}`,
+      id: `${mangaId}__${ch.id}__${createdAt}_${Math.random()}`,
       mangaId, mangaTitle, chapterId: ch.id, chapterNum: ch.number, sourceId,
       downloadKey: getDownloadKey(mangaKey, ch.id),
-      status: 'pending', progress: 0, pagesLoaded: 0, pagesTotal: 0, error: null
+      status: 'pending', progress: 0, pagesLoaded: 0, pagesTotal: 0, attempts: 0,
+      error: null, retryAt: 0, recovered: false, createdAt, updatedAt: createdAt
     }));
     setDownloadQueue(prev => {
       const existing = new Set(prev
         .filter(d => d.status !== 'error' && d.status !== 'cancelled')
         .map(d => d.downloadKey || getDownloadKey(getMangaKey(d.mangaId, d.sourceId), d.chapterId)));
+      downloadedKeys.forEach(key => existing.add(String(key)));
       const toAdd = newItems.filter(item => !existing.has(item.downloadKey));
       if (!toAdd.length) { toastRef.current?.('All selected chapters already queued or downloaded', 'warning'); return prev; }
       toastRef.current?.(`Queued ${toAdd.length} chapters for download`, 'info');
       return [...prev, ...toAdd];
     });
-  }, [getMangaKey]);
+  }, [downloadedKeys, getMangaKey]);
   useEffect(() => {
-    if (dlProcessingRef.current) return;
-    const pending = downloadQueue.find(d => d.status === 'pending');
-    if (!pending) return;
+    clearTimeout(dlWakeTimerRef.current);
+    dlWakeTimerRef.current = null;
+    if (dlProcessingRef.current || backendOnline !== true) return;
+    const now = Date.now();
+    const pending = downloadQueue.find(d => d.status === 'pending' && (!d.retryAt || d.retryAt <= now));
+    if (!pending) {
+      const nextRetryAt = downloadQueue
+        .filter(d => d.status === 'pending' && d.retryAt > now)
+        .reduce((earliest, item) => Math.min(earliest, item.retryAt), Infinity);
+      if (Number.isFinite(nextRetryAt)) {
+        dlWakeTimerRef.current = setTimeout(() => {
+          setDownloadQueue(prev => [...prev]);
+        }, Math.max(50, nextRetryAt - now));
+      }
+      return;
+    }
     dlProcessingRef.current = true;
     dlAbortRef.current?.abort();
     const ac = new AbortController();
     dlAbortRef.current = ac;
+    const currentAttempt = (pending.attempts || 0) + 1;
 
-    setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, status: 'downloading', progress: 0, pagesLoaded: 0, pagesTotal: 0 } : d));
+    setDownloadQueue(prev => prev.map(d => d.id === pending.id ? {
+      ...d,
+      status: 'downloading', progress: 0, pagesLoaded: 0, pagesTotal: 0,
+      attempts: currentAttempt, retryAt: 0, error: null, updatedAt: Date.now()
+    } : d));
 
     (async () => {
       try {
+        if (navigator.storage?.estimate) {
+          const capacity = storageCapacityResult(await navigator.storage.estimate());
+          if (!capacity.ok) {
+            const error = new Error(`Storage is nearly full (${formatByteSize(capacity.freeBytes)} free). Free some space, then retry.`);
+            error.code = 'storage-full';
+            throw error;
+          }
+        }
         const imgs = await fetchJSON(`/source/${pending.sourceId}/chapter/${pending.chapterId}`, { signal: ac.signal });
         const urls = Array.isArray(imgs) ? imgs : [];
         if (!urls.length) throw new Error('No pages found');
@@ -935,23 +1010,39 @@ const DataProvider = memo(({ children }) => {
         });
         await saveChapterBlobs(getMangaKey(pending.mangaId, pending.sourceId), pending.chapterId, blobs);
         await refreshDownloads();
-        setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, status: 'done', progress: 100 } : d));
+        setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, status: 'done', progress: 100, error: null, updatedAt: Date.now() } : d));
         toastRef.current?.(`Ch. ${pending.chapterNum} of "${pending.mangaTitle}" saved`, 'success');
       } catch (e) {
         if (ac.signal.aborted) {
-          setDownloadQueue(prev => prev.map(d => d.id === pending.id && d.status !== 'done' ? { ...d, status: 'cancelled' } : d));
+          setDownloadQueue(prev => prev.map(d => d.id === pending.id && d.status !== 'done' ? { ...d, status: 'cancelled', updatedAt: Date.now() } : d));
         } else {
-          setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, status: 'error', error: e.message } : d));
+          const retryable = e?.code !== 'storage-full'
+            && e?.code !== 'source-verification-required'
+            && !(e?.status >= 400 && e?.status < 500)
+            && currentAttempt < DOWNLOAD_MAX_ATTEMPTS;
+          const retryAt = retryable ? Date.now() + (currentAttempt * 2500) : 0;
+          setDownloadQueue(prev => prev.map(d => d.id === pending.id ? {
+            ...d,
+            status: retryable ? 'pending' : 'error',
+            error: e?.message || 'Download failed',
+            retryAt,
+            updatedAt: Date.now(),
+          } : d));
+          if (!retryable) toastRef.current?.(`Could not save Ch. ${pending.chapterNum}: ${e?.message || 'download failed'}`, 'error');
         }
       } finally {
         if (dlAbortRef.current === ac) {
           dlAbortRef.current = null;
         }
         dlProcessingRef.current = false;
+        setDownloadQueue(prev => [...prev]);
       }
     })();
-  }, [downloadQueue, fetchJSON, getMangaKey, refreshDownloads]);
-  useEffect(() => () => dlAbortRef.current?.abort(), []);
+  }, [backendOnline, downloadQueue, fetchJSON, getMangaKey, refreshDownloads]);
+  useEffect(() => () => {
+    clearTimeout(dlWakeTimerRef.current);
+    dlAbortRef.current?.abort();
+  }, []);
 
   const checkForUpdates = useCallback(async () => {
     if (library.length === 0) return;
@@ -963,12 +1054,10 @@ const DataProvider = memo(({ children }) => {
           if (!source) return null;
           const data = await fetchJSON(`/source/${source.id}/manga/${manga.id}`);
           if (data.error) return null;
-          const currentTotal = data.totalChapters;
           const mKey = getMangaKey(manga.id, manga.sourceId);
-          const savedProgress = progress[mKey];
-          const lastReadChapter = savedProgress ? parseInt(savedProgress.chapterNum) : 0;
-          if (currentTotal > lastReadChapter) {
-            return { ...manga, newChapters: currentTotal - lastReadChapter };
+          const unreadChapterIds = getUnreadChapterIds(data.chapters, readChapters[mKey]);
+          if (unreadChapterIds.length > 0) {
+            return { ...manga, newChapters: unreadChapterIds.length };
           }
         } catch (e) {
           // Ignore individual source failures so one broken extension does not block the update scan.
@@ -979,7 +1068,7 @@ const DataProvider = memo(({ children }) => {
     } finally {
       setCheckingUpdates(false);
     }
-  }, [library, sources, fetchJSON, progress, getMangaKey]);
+  }, [library, sources, fetchJSON, readChapters, getMangaKey]);
 
   useEffect(() => {
     if (library.length > 0 && backendOnline) {
@@ -990,9 +1079,10 @@ const DataProvider = memo(({ children }) => {
   }, [library, backendOnline, checkForUpdates]);
 
   useEffect(() => {
-    checkHealth();
+    const managedStartup = !!window.electronAPI?.ensureServices;
+    if (!managedStartup) checkHealth();
     const fastPoll = setInterval(() => {
-      if (backendOnlineRef.current === null) checkHealth();
+      if (!managedStartup && backendOnlineRef.current === null) checkHealth();
       else clearInterval(fastPoll);
     }, 1000);
     const slowPoll = setInterval(checkHealth, 30000);
@@ -1271,8 +1361,14 @@ const ExtCard = memo(({ ext, onInstall, onUninstall, installing, onUpdate }) => 
   );
 });
 
-const RepoAddRow = memo(({ onAdd }) => {
+const RepoAddRow = memo(({ onAdd, disabled = false }) => {
   const [val, setVal] = useState('');
+  const submit = useCallback(async () => {
+    const url = val.trim();
+    if (!url || disabled) return;
+    const added = await onAdd(url);
+    if (added !== false) setVal('');
+  }, [disabled, onAdd, val]);
   return (
     <div style={{ display: 'flex', gap: 10 }}>
       <div style={{ position: 'relative', flex: 1 }}>
@@ -1280,14 +1376,15 @@ const RepoAddRow = memo(({ onAdd }) => {
         <input
           placeholder="https://raw.githubusercontent.com/.../index.min.json"
           value={val}
+          disabled={disabled}
           onChange={e => setVal(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && val.trim()) { onAdd(val.trim()); setVal(''); } }}
+          onKeyDown={e => { if (e.key === 'Enter') submit(); }}
           style={{ width: '100%', background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 12, padding: '11px 14px 11px 36px', color: 'var(--text)', fontSize: 12, outline: 'none', fontFamily: 'monospace', transition: 'border-color 0.2s' }}
           onFocus={e => e.target.style.borderColor = 'var(--accent)'}
           onBlur={e => e.target.style.borderColor = 'var(--border)'}
         />
       </div>
-      <Btn variant="default" size="sm" onClick={() => { if (val.trim()) { onAdd(val.trim()); setVal(''); } }}>Add</Btn>
+      <Btn variant="default" size="sm" disabled={disabled || !val.trim()} onClick={submit}>{disabled ? 'Applying…' : 'Add'}</Btn>
     </div>
   );
 });
@@ -1297,15 +1394,46 @@ const RepoAddRow = memo(({ onAdd }) => {
 const SettingsPage = memo(() => {
   const {
     settings, updateSetting, backendOnline, checkHealth, library, history,
-    progress, readingTime, sources, extensions, fetchSources, fetchExtensions,
+    progress, readChapters, readingTime, sources, extensions, fetchSources, fetchExtensions,
     suwayomiReady, categories, addCategory, removeCategory, getMangaKey
   } = useData();
   const toast = useToast();
   const [confirmClear, setConfirmClear] = useState(null);
   const [serviceStatus, setServiceStatus] = useState(null);
   const [serviceWorking, setServiceWorking] = useState(false);
-  const [runtimeInfo, setRuntimeInfo] = useState({ javaPath: '', jarPath: '', configPath: '' });
+  const [runtimeInfo, setRuntimeInfo] = useState({ javaPath: '', javaVersion: '', javaMajor: null, javaCompatible: null, requiredJavaMajor: 21, requiredJavaVersion: '21.0.11', javaSource: '', jarPath: '', configPath: '' });
+  const [javaRepairing, setJavaRepairing] = useState(false);
+  const [repoConfig, setRepoConfig] = useState({ defaults: BUILT_IN_EXTENSION_STORES, custom: settings?.repos || [] });
+  const [repoWorking, setRepoWorking] = useState(false);
   const [appUpdateState, setAppUpdateState] = useState({ checking: false, message: '', version: null, downloaded: false, downloading: false, pct: null });
+  const [diagnostics, setDiagnostics] = useState(null);
+  const [diagnosticsWorking, setDiagnosticsWorking] = useState(false);
+  const [repairWorking, setRepairWorking] = useState(false);
+  const [backupWorking, setBackupWorking] = useState(false);
+
+  const saveExtensionRepos = useCallback(async (nextRepos, successMessage) => {
+    if (!window.electronAPI?.setExtensionRepos) {
+      toast('Repository management is available in the desktop app', 'warning');
+      return false;
+    }
+    setRepoWorking(true);
+    try {
+      const result = await window.electronAPI.setExtensionRepos(nextRepos);
+      const custom = result?.custom || [];
+      setRepoConfig({ defaults: result?.defaults || BUILT_IN_EXTENSION_STORES, custom });
+      updateSetting('repos', custom);
+      toast(`${successMessage}. Restarting local services…`, 'success');
+      const restarted = await window.electronAPI.restartServices?.();
+      if (restarted === false) throw new Error('The repository was saved, but local services did not restart.');
+      toast('Extension repositories are ready', 'success');
+      return true;
+    } catch (error) {
+      toast(error?.message || 'Could not update extension repositories', 'error');
+      return false;
+    } finally {
+      setRepoWorking(false);
+    }
+  }, [toast, updateSetting]);
 
   useEffect(() => {
     let unsub = null;
@@ -1382,24 +1510,61 @@ const SettingsPage = memo(() => {
     if (window.electronAPI?.checkService) {
       window.electronAPI.checkService().then(running => setServiceStatus(running ? 'running' : 'stopped')).catch(() => setServiceStatus('stopped'));
     }
-  }, []);
+    window.electronAPI?.getExtensionRepos?.().then(result => {
+      const custom = result?.custom || [];
+      setRepoConfig({ defaults: result?.defaults || BUILT_IN_EXTENSION_STORES, custom });
+      updateSetting('repos', custom);
+    }).catch(() => { });
+  }, [updateSetting]);
 
   useEffect(() => {
     Promise.all([
       Promise.resolve(window.electronAPI?.getJavaPath?.()).catch(() => ''),
+      Promise.resolve(window.electronAPI?.getJavaInfo?.()).catch(() => null),
       Promise.resolve(window.electronAPI?.getJarPath?.()).catch(() => ''),
       Promise.resolve(window.electronAPI?.getSuwayomiConfigPath?.()).catch(() => ''),
-    ]).then(([javaPath, jarPath, configPath]) => {
+    ]).then(([javaPath, javaInfo, jarPath, configPath]) => {
       setRuntimeInfo({
-        javaPath: javaPath || '',
+        javaPath: javaInfo?.path || javaPath || '',
+        javaVersion: javaInfo?.version || '',
+        javaMajor: javaInfo?.major ?? null,
+        javaCompatible: javaInfo?.compatible ?? null,
+        requiredJavaMajor: javaInfo?.requiredMajor || 21,
+        requiredJavaVersion: javaInfo?.requiredVersion || '21.0.11',
+        javaSource: javaInfo?.source || '',
         jarPath: jarPath || '',
         configPath: configPath || '',
       });
     }).catch(() => { });
   }, []);
 
+  const repairJava = async () => {
+    setJavaRepairing(true);
+    try {
+      const result = await window.electronAPI?.installManagedJava?.();
+      if (!result?.ok) throw new Error(result?.detail || result?.error || 'Java installation failed.');
+      const javaInfo = result.java || await window.electronAPI?.getJavaInfo?.();
+      setRuntimeInfo(prev => ({
+        ...prev,
+        javaPath: javaInfo?.path || prev.javaPath,
+        javaVersion: javaInfo?.version || '',
+        javaMajor: javaInfo?.major ?? null,
+        javaCompatible: javaInfo?.compatible ?? true,
+        requiredJavaMajor: javaInfo?.requiredMajor || 21,
+        requiredJavaVersion: javaInfo?.requiredVersion || '21.0.11',
+        javaSource: javaInfo?.source || 'managed',
+      }));
+      toast(`Java ${javaInfo?.version || javaInfo?.major || '21.0.11'} is ready. Restarting Suwayomi...`, 'success');
+      window.electronAPI?.restartServices?.();
+    } catch (error) {
+      toast(error?.message || 'Java installation failed.', 'error');
+    } finally {
+      setJavaRepairing(false);
+    }
+  };
+
   const totalReadingMins = Object.values(readingTime).reduce((a, b) => a + b, 0);
-  const totalChapters = Object.values(progress).reduce((a, p) => a + (parseInt(p.chapterNum) || 0), 0);
+  const totalChapters = countReadChapterIds(readChapters);
 
   const Section = ({ title, children }) => (
     <div style={{ marginBottom: 32 }}>
@@ -1462,6 +1627,125 @@ const SettingsPage = memo(() => {
       toast(msg, 'warning');
     }
   };
+
+  const collectBackupPayload = useCallback(async () => {
+    const noteKeys = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (key?.startsWith('aka:note:')) noteKeys.push(key);
+    }
+    const appVersion = await Promise.resolve(window.electronAPI?.getVersion?.()).catch(() => '');
+    return createAppBackup((key) => (
+      key.startsWith('aka:note:') ? localStorage.getItem(key) : storage.get(key, undefined)
+    ), {
+      appVersion,
+      platform: window.electronAPI?.platform || navigator.platform || '',
+      noteKeys,
+    });
+  }, []);
+
+  const runDiagnostics = useCallback(async () => {
+    if (!window.electronAPI?.getSystemDiagnostics) {
+      toast('System checks are available in the desktop app', 'warning');
+      return null;
+    }
+    setDiagnosticsWorking(true);
+    try {
+      const result = await window.electronAPI.getSystemDiagnostics();
+      setDiagnostics(result);
+      toast(result.status === 'pass' ? 'Everything is healthy' : 'The check found something to review', result.status === 'pass' ? 'success' : 'warning');
+      return result;
+    } catch (error) {
+      toast(error?.message || 'System check failed', 'error');
+      return null;
+    } finally {
+      setDiagnosticsWorking(false);
+    }
+  }, [toast]);
+
+  const repairSystem = useCallback(async () => {
+    if (!window.electronAPI?.repairSystem) return;
+    setRepairWorking(true);
+    try {
+      const result = await window.electronAPI.repairSystem();
+      if (result?.diagnostics) setDiagnostics(result.diagnostics);
+      await checkHealth();
+      if (!result?.ok) throw new Error(result?.error || 'Repair did not finish successfully.');
+      toast('Repair complete — local services are healthy', 'success');
+    } catch (error) {
+      toast(error?.message || 'Repair failed', 'error');
+    } finally {
+      setRepairWorking(false);
+    }
+  }, [checkHealth, toast]);
+
+  const exportBackup = useCallback(async () => {
+    if (!window.electronAPI?.exportAppBackup) {
+      toast('Backup export is available in the desktop app', 'warning');
+      return;
+    }
+    setBackupWorking(true);
+    try {
+      const result = await window.electronAPI.exportAppBackup(await collectBackupPayload());
+      if (result?.cancelled) return;
+      if (!result?.ok) throw new Error(result?.error || 'Backup failed.');
+      toast('Backup saved', 'success');
+    } catch (error) {
+      toast(error?.message || 'Backup failed', 'error');
+    } finally {
+      setBackupWorking(false);
+    }
+  }, [collectBackupPayload, toast]);
+
+  const importBackup = useCallback(async () => {
+    if (!window.electronAPI?.importAppBackup) {
+      toast('Backup restore is available in the desktop app', 'warning');
+      return;
+    }
+    setBackupWorking(true);
+    try {
+      const result = await window.electronAPI.importAppBackup();
+      if (result?.cancelled) return;
+      if (!result?.ok) throw new Error(result?.error || 'Restore failed.');
+      const restoredKeys = applyAppBackup(result.payload, (key, value) => {
+        if (key.startsWith('aka:note:')) localStorage.setItem(key, String(value ?? ''));
+        else storage.set(key, value);
+      });
+      toast(`Restored ${restoredKeys.length} data groups. Reloading…`, 'success');
+      setTimeout(() => window.location.reload(), 800);
+    } catch (error) {
+      toast(error?.message || 'Restore failed', 'error');
+    } finally {
+      setBackupWorking(false);
+    }
+  }, [toast]);
+
+  const downloadAppUpdateSafely = useCallback(async () => {
+    try {
+      if (window.electronAPI?.saveAutomaticBackup) {
+        const backup = await window.electronAPI.saveAutomaticBackup(await collectBackupPayload());
+        if (!backup?.ok) throw new Error(backup?.error || 'The safety backup could not be created.');
+      }
+      const result = await window.electronAPI?.downloadAppUpdate?.();
+      if (result?.ok === false) throw new Error(result.error || 'The update could not start.');
+      setAppUpdateState(prev => ({ ...prev, downloading: true, message: 'Starting download…' }));
+    } catch (error) {
+      toast(`${error?.message || 'Update failed'} The update was not started.`, 'error');
+    }
+  }, [collectBackupPayload, toast]);
+
+  const installAppUpdateSafely = useCallback(async () => {
+    try {
+      if (window.electronAPI?.saveAutomaticBackup) {
+        const backup = await window.electronAPI.saveAutomaticBackup(await collectBackupPayload());
+        if (!backup?.ok) throw new Error(backup?.error || 'The safety backup could not be created.');
+      }
+      const result = await window.electronAPI?.installAppUpdate?.();
+      if (result?.ok === false) throw new Error(result.error || 'The update could not be installed.');
+    } catch (error) {
+      toast(`${error?.message || 'Update failed'} akaReader was not restarted.`, 'error');
+    }
+  }, [collectBackupPayload, toast]);
 
   return (
     <div className="page-transition" style={{ maxWidth: 720, margin: '0 auto', padding: '0 0 60px' }}>
@@ -1562,7 +1846,7 @@ const SettingsPage = memo(() => {
                 <RefreshCw size={14} /> {appUpdateState.checking ? 'Checking' : 'Check'}
               </Btn>
               {appUpdateState.downloaded ? (
-                <Btn variant="success" size="sm" onClick={() => window.electronAPI?.installAppUpdate?.()}>
+                <Btn variant="success" size="sm" onClick={installAppUpdateSafely}>
                   Restart now
                 </Btn>
               ) : appUpdateState.downloading ? (
@@ -1570,10 +1854,7 @@ const SettingsPage = memo(() => {
                   Downloading {appUpdateState.pct ? `${appUpdateState.pct}%` : '…'}
                 </Btn>
               ) : appUpdateState.version ? (
-                <Btn variant="default" size="sm" onClick={() => {
-                  window.electronAPI?.downloadAppUpdate?.();
-                  setAppUpdateState(prev => ({ ...prev, downloading: true, message: 'Starting download…' }));
-                }}>
+                <Btn variant="default" size="sm" onClick={downloadAppUpdateSafely}>
                   <Download size={14} /> Download
                 </Btn>
               ) : null}
@@ -1589,9 +1870,18 @@ const SettingsPage = memo(() => {
           </div>
         </Row>
         <Row label="Java Runtime" sub={runtimeInfo.javaPath || 'Resolving Java runtime...'}>
-          <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'monospace', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {runtimeInfo.javaPath ? (runtimeInfo.javaPath.toLowerCase().includes('\\appdata\\roaming\\akareader\\jre\\') ? 'Managed JRE' : 'System Java') : 'Pending'}
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 11, color: runtimeInfo.javaCompatible === false ? '#f87171' : 'var(--muted)', fontFamily: 'monospace', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {runtimeInfo.javaMajor
+                ? `Java ${runtimeInfo.javaVersion || runtimeInfo.javaMajor} · ${runtimeInfo.javaSource === 'managed' ? 'Managed' : 'System'}${runtimeInfo.javaCompatible === false ? ` · Needs ${runtimeInfo.requiredJavaVersion}+` : ''}`
+                : runtimeInfo.javaPath ? 'Version unknown' : 'Not found'}
+            </span>
+            {window.electronAPI?.installManagedJava && runtimeInfo.javaCompatible === false && (
+              <Btn size="sm" onClick={repairJava} disabled={javaRepairing}>
+                {javaRepairing ? <><Spin size={13} /> Installing...</> : <><Download size={13} /> Install Java 21.0.11</>}
+              </Btn>
+            )}
+          </div>
         </Row>
         <Row label="Embedded Server" sub={runtimeInfo.jarPath || 'Resolving embedded server path...'}>
           <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'monospace', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -1603,6 +1893,39 @@ const SettingsPage = memo(() => {
             Browser auto-open disabled
           </span>
         </Row>
+        {window.electronAPI?.getSystemDiagnostics && (
+          <div style={{ padding: '16px 18px', background: 'var(--card)', borderRadius: 14, border: `1px solid ${diagnostics?.status === 'fail' ? 'rgba(239,68,68,0.35)' : diagnostics?.status === 'warn' ? 'rgba(245,158,11,0.35)' : diagnostics?.status === 'pass' ? 'rgba(34,197,94,0.3)' : 'var(--border)'}` }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: diagnostics ? 14 : 0, flexWrap: 'wrap' }}>
+              <div style={{ flex: 1, minWidth: 220 }}>
+                <p style={{ fontSize: 14, fontWeight: 700 }}>System health</p>
+                <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 3 }}>
+                  {diagnostics?.status === 'pass' ? 'All required local parts are working.' : diagnostics ? 'A specific check needs attention.' : 'Checks the local API, Java, Suwayomi, storage, and protected-source helper.'}
+                </p>
+              </div>
+              <Btn variant="outline" size="sm" disabled={diagnosticsWorking || repairWorking} onClick={runDiagnostics}>
+                {diagnosticsWorking ? <><Spin size={13} /> Checking…</> : <><Activity size={13} /> Run full check</>}
+              </Btn>
+              {diagnostics && diagnostics.status !== 'pass' && (
+                <Btn size="sm" disabled={repairWorking || diagnosticsWorking} onClick={repairSystem}>
+                  {repairWorking ? <><Spin size={13} /> Repairing…</> : <><RotateCcw size={13} /> Repair automatically</>}
+                </Btn>
+              )}
+            </div>
+            {diagnostics && (
+              <div style={{ display: 'grid', gap: 7 }}>
+                {diagnostics.checks.map(check => (
+                  <div key={check.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 9, paddingTop: 7, borderTop: '1px solid var(--border)' }}>
+                    {check.status === 'pass' ? <Check size={14} style={{ color: '#4ade80', marginTop: 2, flexShrink: 0 }} /> : <AlertTriangle size={14} style={{ color: check.status === 'fail' ? '#f87171' : '#facc15', marginTop: 2, flexShrink: 0 }} />}
+                    <div>
+                      <p style={{ fontSize: 12, fontWeight: 700 }}>{check.label}</p>
+                      <p style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2, lineHeight: 1.5 }}>{check.detail}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </Section>
 
       <Section title="📂 Library Categories">
@@ -1721,39 +2044,44 @@ const SettingsPage = memo(() => {
 
       <Section title="📦 Extension Repositories">
         <div style={{ padding: '12px 16px', background: 'rgba(249,115,22,0.06)', borderRadius: 12, border: '1px solid rgba(249,115,22,0.15)', fontSize: 13, color: 'var(--muted)', lineHeight: 1.7, marginBottom: 4 }}>
-          Add custom extension repo URLs. Paste the raw <code style={{ background: 'var(--card2)', padding: '1px 6px', borderRadius: 4, fontSize: 11 }}>index.min.json</code> URL from GitHub or any compatible source.
+          The Keiyoushi repository is built in and applied automatically. Add another compatible <code style={{ background: 'var(--card2)', padding: '1px 6px', borderRadius: 4, fontSize: 11 }}>index.min.json</code> URL below if needed. Changes safely restart the local services.
         </div>
-        {(settings?.repos || []).map((repo, i) => (
-          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', background: 'var(--card)', borderRadius: 12, border: '1px solid var(--border)' }}>
+        {repoConfig.defaults.map(repo => (
+          <div key={repo} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', background: 'var(--card)', borderRadius: 12, border: '1px solid rgba(249,115,22,0.28)' }}>
             <Globe size={14} style={{ color: 'var(--accent)', flexShrink: 0 }} />
             <span style={{ flex: 1, fontSize: 12, color: 'var(--text-dim)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{repo}</span>
-            <Btn variant="danger" size="sm" onClick={() => {
-              const updated = (settings?.repos || []).filter((_, ri) => ri !== i);
-              updateSetting('repos', updated);
-              toast('Repository removed', 'warning');
-            }}><X size={12} /></Btn>
+            <Badge variant="update" size="sm">Built in</Badge>
           </div>
         ))}
-        {(settings?.repos || []).length === 0 && (
+        {repoConfig.custom.map(repo => (
+          <div key={repo} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', background: 'var(--card)', borderRadius: 12, border: '1px solid var(--border)' }}>
+            <Globe size={14} style={{ color: 'var(--accent)', flexShrink: 0 }} />
+            <span style={{ flex: 1, fontSize: 12, color: 'var(--text-dim)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{repo}</span>
+            <Btn variant="danger" size="sm" disabled={repoWorking} onClick={() => saveExtensionRepos(repoConfig.custom.filter(value => value !== repo), 'Repository removed')}><X size={12} /></Btn>
+          </div>
+        ))}
+        {repoConfig.custom.length === 0 && (
           <div style={{ padding: '20px', textAlign: 'center', color: 'var(--muted)', fontSize: 13, background: 'var(--card)', borderRadius: 12, border: '1px solid var(--border)' }}>
-            No custom repositories added
+            No additional custom repositories
           </div>
         )}
-        <RepoAddRow onAdd={(url) => {
-          const existing = settings?.repos || [];
-          if (existing.includes(url)) { toast('Already added', 'warning'); return; }
-          updateSetting('repos', [...existing, url]);
-          toast('Repository added — restart extensions to apply', 'success');
+        <RepoAddRow disabled={repoWorking} onAdd={(url) => {
+          if (repoConfig.defaults.includes(url) || repoConfig.custom.includes(url)) { toast('Already added', 'warning'); return false; }
+          return saveExtensionRepos([...repoConfig.custom, url], 'Repository added');
         }} />
       </Section>
 
       <Section title="💾 Backup & Restore">
-        <Row label="Export data" sub="Download your data as JSON">
-          <Btn variant="outline" size="sm" icon={Download} onClick={() => { const d = { version: 2, library: storage.get('library', []), history: storage.get('history', []), progress: storage.get('progress', {}), mangaCategories: storage.get('mangaCategories', {}), readChapters: storage.get('readChapters', {}) }; const b = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' }); const u = URL.createObjectURL(b); const a = document.createElement('a'); a.href = u; a.download = `akareader-${new Date().toISOString().slice(0, 10)}.json`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(u); toast('Exported!', 'success'); }}>Export</Btn>
+        <div style={{ padding: '12px 16px', background: 'rgba(59,130,246,0.06)', borderRadius: 12, border: '1px solid rgba(59,130,246,0.15)', fontSize: 12, color: 'var(--muted)', lineHeight: 1.65 }}>
+          Backups include your library, history, reading progress, categories, notes, settings, and reading time. Downloaded chapter images stay on this device because they can be very large.
+        </div>
+        <Row label="Export data" sub="Save a validated akaReader backup to a location you choose">
+          <Btn variant="outline" size="sm" icon={Download} disabled={backupWorking} onClick={exportBackup}>{backupWorking ? 'Working…' : 'Export'}</Btn>
         </Row>
-        <Row label="Import data" sub="Restore from exported file">
-          <Btn variant="outline" size="sm" icon={Archive} onClick={() => { const i = document.createElement('input'); i.type = 'file'; i.accept = '.json'; i.onchange = async (e) => { const f = e.target.files[0]; if (!f) return; try { const t = await f.text(); const d = JSON.parse(t); if (d.library) storage.set('library', d.library); if (d.history) storage.set('history', d.history); if (d.progress) storage.set('progress', d.progress); toast('Restored! Reloading…', 'success'); setTimeout(() => window.location.reload(), 1200); } catch (err) { toast('Import failed: ' + err.message, 'error'); } }; document.body.appendChild(i); i.click(); document.body.removeChild(i); }}>Import</Btn>
+        <Row label="Import data" sub="Restore a current or older v2 akaReader backup">
+          <Btn variant="outline" size="sm" icon={Archive} disabled={backupWorking} onClick={importBackup}>{backupWorking ? 'Working…' : 'Import'}</Btn>
         </Row>
+        <p style={{ fontSize: 11, color: 'var(--muted)', padding: '0 4px', lineHeight: 1.6 }}>Before an app update downloads, akaReader also keeps a private safety backup in the data folder and retains the latest five.</p>
       </Section>
       <Section title="☕ Support Development">
         <div style={{ padding: '20px', background: 'var(--card)', borderRadius: 14, border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
@@ -1930,7 +2258,7 @@ const UpdatesTab = memo(({ onOpenManga }) => {
   return (
     <div className="page-transition">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <h2 style={{ fontSize: 18, fontWeight: 600 }}>Manga with New Chapters</h2>
+        <h2 style={{ fontSize: 18, fontWeight: 600 }}>Manga with Unread Chapters</h2>
         <Btn variant="outline" size="sm" onClick={checkForUpdates} disabled={checkingUpdates}>
           <RefreshCw size={14} className={checkingUpdates ? 'anim-spin' : ''} style={{ marginRight: 6 }} />
           {checkingUpdates ? 'Checking...' : 'Check Now'}
@@ -1938,7 +2266,7 @@ const UpdatesTab = memo(({ onOpenManga }) => {
       </div>
 
       {updates.length === 0 ? (
-        <EmptyState icon={BellRing} title="No updates" sub="All your manga are up to date" compact />
+        <EmptyState icon={BellRing} title="No updates" sub="You are caught up with your library" compact />
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 18 }}>
           {updates.map((manga, i) => (
@@ -2016,7 +2344,13 @@ const DownloadsTab = memo(({ queue, onClear, onRemove, onRetry, onCancel, onCanc
                     </div>
                   ) : (
                     <span style={{ fontSize: 11, color: statusColor[item.status] || '#94a3b8', fontWeight: 600 }}>
-                      {item.status === 'error' ? `Error: ${item.error}` : statusLabel[item.status] || item.status}
+                      {item.status === 'error'
+                        ? `Error: ${item.error}`
+                        : item.status === 'pending' && item.retryAt > Date.now()
+                          ? `Retrying automatically (${item.attempts || 1}/${DOWNLOAD_MAX_ATTEMPTS})…`
+                          : item.status === 'pending' && item.recovered
+                            ? 'Recovered — resumes automatically'
+                            : statusLabel[item.status] || item.status}
                     </span>
                   )}
                 </div>
@@ -2505,31 +2839,64 @@ const Onboarding = memo(({ onFinish }) => {
 
 // ==================== ERROR RECOVERY MODAL ====================
 
-const ServiceErrorModal = memo(({ onRestart }) => {
+const ServiceErrorModal = memo(({ issue, onRestart }) => {
   const [restarting, setRestarting] = useState(false);
+  const [actionError, setActionError] = useState('');
   const handleRestart = async () => {
     setRestarting(true);
+    setActionError('');
     try {
       if (window.electronAPI?.restartServices) {
-        await window.electronAPI.restartServices();
+        window.electronAPI.restartServices();
       }
-    } catch { }
-    setTimeout(() => setRestarting(false), 8000);
-    onRestart();
+      onRestart();
+    } catch (error) {
+      setActionError(error?.message || 'Could not restart the services.');
+      setRestarting(false);
+    }
   };
+  const handleJavaRepair = async () => {
+    setRestarting(true);
+    setActionError('');
+    try {
+      const result = await window.electronAPI?.installManagedJava?.();
+      if (!result?.ok) throw new Error(result?.detail || result?.error || 'Java installation failed.');
+      window.electronAPI?.restartServices?.();
+      onRestart();
+    } catch (error) {
+      setActionError(error?.message || 'Could not install Java.');
+      setRestarting(false);
+    }
+  };
+  const isJavaIssue = !!issue?.canRepairJava;
   return (
     <div className="anim-fadeIn" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(12px)', zIndex: 1500, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <div style={{ background: 'var(--card)', border: '1.5px solid rgba(239,68,68,0.3)', borderRadius: 24, padding: '40px 36px', maxWidth: 400, width: '100%', textAlign: 'center', boxShadow: '0 32px 80px rgba(0,0,0,0.5)' }}>
         <AlertCircle size={48} style={{ color: '#f87171', marginBottom: 16 }} />
-        <h2 style={{ fontFamily: "'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight: 800, fontSize: 20, marginBottom: 10 }}>Backend Offline</h2>
+        <h2 style={{ fontFamily: "'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight: 800, fontSize: 20, marginBottom: 10 }}>{issue?.title || 'Local Service Offline'}</h2>
         <p style={{ color: 'var(--muted)', fontSize: 14, lineHeight: 1.8, marginBottom: 28 }}>
-          The akaReader backend has stopped responding. This can happen if the server process exited unexpectedly.
+          {issue?.message || 'The akaReader services stopped responding. This can happen if a local process exited unexpectedly.'}
         </p>
+        {issue?.detail && (
+          <div style={{ padding: '12px 14px', borderRadius: 12, background: isJavaIssue ? 'rgba(249,115,22,0.08)' : 'rgba(239,68,68,0.07)', border: `1px solid ${isJavaIssue ? 'rgba(249,115,22,0.22)' : 'rgba(239,68,68,0.18)'}`, color: 'var(--text-dim)', fontSize: 12, lineHeight: 1.65, textAlign: 'left', marginBottom: 20 }}>
+            {issue.detail}
+            {(issue.detectedJavaVersion || issue.detectedJavaMajor) && (
+              <div style={{ marginTop: 8, color: 'var(--muted)', fontFamily: 'monospace' }}>
+                Found Java {issue.detectedJavaVersion || issue.detectedJavaMajor} · Required Java {issue.requiredJavaVersion || issue.requiredJavaMajor || '21.0.11'}+
+              </div>
+            )}
+          </div>
+        )}
+        {actionError && <p style={{ color: '#f87171', fontSize: 12, lineHeight: 1.5, marginBottom: 16 }}>{actionError}</p>}
         <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
           <Btn variant="outline" onClick={onRestart}>Dismiss</Btn>
-          {window.electronAPI?.restartServices && (
-            <Btn onClick={handleRestart} disabled={restarting}>
-              {restarting ? <><Spin size={14} /> Restarting...</> : <><RotateCcw size={15} /> Restart Services</>}
+          {(isJavaIssue ? window.electronAPI?.installManagedJava : window.electronAPI?.restartServices) && (
+            <Btn onClick={isJavaIssue ? handleJavaRepair : handleRestart} disabled={restarting}>
+              {restarting
+                ? <><Spin size={14} /> {isJavaIssue ? 'Installing Java 21.0.11...' : 'Restarting...'}</>
+                : isJavaIssue
+                  ? <><Download size={15} /> Install Java 21.0.11 & Retry</>
+                  : <><RotateCcw size={15} /> Restart Services</>}
             </Btn>
           )}
         </div>
@@ -2585,6 +2952,9 @@ const StartupScreen = memo(({ onProceed, onRetry, managedStartup = false, backen
     'starting-backend': { msg: 'Starting akaReader proxy...', bar: 12 },
     'backend-ready': { msg: 'Proxy ready. Preparing Suwayomi...', bar: 24 },
     'using-system-java': { msg: 'Using installed Java runtime...', bar: 32 },
+    'using-managed-java': { msg: 'Using akaReader Java 21 runtime...', bar: 32 },
+    'java-missing': { msg: 'Java is missing. Installing Java 21.0.11 for akaReader...', bar: 28 },
+    'java-repaired': { msg: 'Java 21.0.11 is ready. Continuing startup...', bar: 38 },
     'downloading-jre': { msg: 'Downloading Java runtime (first launch only)...', bar: null },
     'extracting-jre': { msg: 'Extracting Java runtime...', bar: 34 },
     'installing-bundled-jre': { msg: 'Preparing bundled Java runtime...', bar: 32 },
@@ -2593,7 +2963,7 @@ const StartupScreen = memo(({ onProceed, onRetry, managedStartup = false, backen
     'installing-bundled-suwayomi': { msg: 'Preparing bundled Suwayomi server...', bar: 42 },
     'suwayomi-starting': { msg: 'Starting Suwayomi server...', bar: 50 },
     'configuring-suwayomi': { msg: 'Applying background-server settings...', bar: 56 },
-    'starting-suwayomi': { msg: 'Opening Suwayomi — this can take 20–30 seconds...', bar: 68 },
+    'starting-suwayomi': { msg: 'Opening Suwayomi — first-time setup may take a few minutes...', bar: 68 },
     'suwayomi-ready': { msg: 'Suwayomi ready!', bar: 95 },
     'online': { msg: 'Ready!', bar: 100 },
     'offline': { msg: 'Waiting for services...', bar: 40 },
@@ -2627,12 +2997,19 @@ const StartupScreen = memo(({ onProceed, onRetry, managedStartup = false, backen
         ? 'Startup is taking longer than expected. You can retry Suwayomi or continue offline.'
         : 'Suwayomi is not running in this browser preview. Open akaReader desktop or start Suwayomi on port 4567.'
       );
-    }, managedStartup ? 45000 : 8000);
+    }, managedStartup ? 180000 : 8000);
 
     if (!window.electronAPI?.onServicesStatus) return () => clearTimeout(failSafe);
 
     const unsub = window.electronAPI.onServicesStatus((status) => {
-      if (status.includes(':') && !status.startsWith('update-available')) {
+      if (status.startsWith('java-incompatible:')) {
+        const installedVersion = status.slice('java-incompatible:'.length);
+        setDownloadPct(null);
+        setStatusMsg(`Java ${installedVersion} is too old. Installing Java 21.0.11 for akaReader...`);
+        setBarW(28);
+        return;
+      }
+      if (status.startsWith('downloading-jre:') || status.startsWith('downloading-suwayomi:')) {
         const [code, val] = status.split(':');
         const pct = parseInt(val);
         if (!isNaN(pct)) {
@@ -2640,6 +3017,15 @@ const StartupScreen = memo(({ onProceed, onRetry, managedStartup = false, backen
           setBarW(pct * 0.45);
           const label = code === 'downloading-jre' ? 'Downloading Java runtime' : 'Downloading Suwayomi';
           setStatusMsg(`${label}... ${pct}%`);
+          return;
+        }
+      }
+      if (status.startsWith('preparing-suwayomi:')) {
+        const pct = parseInt(status.slice('preparing-suwayomi:'.length));
+        if (!isNaN(pct)) {
+          setDownloadPct(null);
+          setBarW(68 + (Math.min(100, pct) * 0.24));
+          setStatusMsg(`Finishing Suwayomi's first-time setup... ${pct}%`);
           return;
         }
       }
@@ -3790,8 +4176,7 @@ const ShareCardModal = memo(({ library, history, progress, readChapters, setting
   const [rendered, setRendered] = useState(false);
   const [style, setStyle] = useState('reading');
 
-  const totalRead = useMemo(() =>
-    Object.values(readChapters).reduce((a, v) => a + (v?.length || 0), 0), [readChapters]);
+  const totalRead = useMemo(() => countReadChapterIds(readChapters), [readChapters]);
   const streak = useMemo(() => calculateStreak(history), [history]);
   const accent = settings?.accentColor || '#f97316';
 
@@ -3965,7 +4350,7 @@ const ShareCardModal = memo(({ library, history, progress, readChapters, setting
 
 const StatsStrip = memo(({ library, history, progress, readChapters }) => {
   const { getMangaKey } = useData();
-  const totalRead = useMemo(() => Object.values(readChapters).reduce((a, v) => a + (v?.length || 0), 0), [readChapters]);
+  const totalRead = useMemo(() => countReadChapterIds(readChapters), [readChapters]);
   const streak = useMemo(() => calculateStreak(history), [history]);
   const completing = useMemo(() => {
     const keys = Object.keys(progress);
@@ -4041,10 +4426,21 @@ const App = memo(() => {
   const [showOnboarding, setShowOnboarding] = useState(() => !storage.get('onboardingDone', false));
 
   const [showErrorModal, setShowErrorModal] = useState(false);
+  const [serviceIssue, setServiceIssue] = useState(null);
   const [forceProceed, setForceProceed] = useState(false);
   const errorTimerRef = useRef(null);
   const sidebarIsCollapsed = sidebarCollapsed || isNarrowViewport;
   const sidebarWidth = sidebarIsCollapsed ? 76 : 248;
+
+  const loadServiceIssue = useCallback(async () => {
+    try {
+      const issue = await window.electronAPI?.getServiceIssue?.();
+      if (issue) setServiceIssue(issue);
+      return issue || null;
+    } catch {
+      return null;
+    }
+  }, []);
 
   useEffect(() => {
     const onResize = () => setIsNarrowViewport(window.innerWidth < 760);
@@ -4052,10 +4448,17 @@ const App = memo(() => {
     let unsub = null;
     if (window.electronAPI?.onServicesStatus) {
       unsub = window.electronAPI.onServicesStatus((status) => {
-        if (status === 'crashed' || status === 'offline') {
+        if (status.startsWith('service-issue:')) {
+          setSuwayomiReady(false);
+          loadServiceIssue().finally(() => setShowErrorModal(true));
+        } else if (status === 'crashed' || status === 'offline') {
+          loadServiceIssue();
           setShowErrorModal(true);
+        } else if (status === 'backend-ready') {
+          checkHealth();
         } else if (status === 'online') {
           setShowErrorModal(false);
+          setServiceIssue(null);
           setForceProceed(true);
           setSuwayomiReady(true);
           checkHealth().then(() => { fetchSources(); fetchExtensions(); });
@@ -4068,6 +4471,7 @@ const App = memo(() => {
           fetchExtensions();
         } else if (status.startsWith('suwayomi-failed:')) {
           setSuwayomiReady(false);
+          loadServiceIssue();
         } else if (status.startsWith('update-available:')) {
           const ver = status.split(':')[1];
           setUpdateAvailable(ver);
@@ -4101,19 +4505,20 @@ const App = memo(() => {
           setUpdateDownloading(false);
         }
       });
+      window.electronAPI.rendererReady?.();
     }
     return () => {
       window.removeEventListener('resize', onResize);
       if (typeof unsub === 'function') unsub();
     };
-  }, [checkHealth, fetchSources, fetchExtensions]);
+  }, [checkHealth, fetchSources, fetchExtensions, loadServiceIssue]);
 
   const serviceStartRequestedRef = useRef(false);
   useEffect(() => {
     if (serviceStartRequestedRef.current || !window.electronAPI?.ensureServices) return;
     serviceStartRequestedRef.current = true;
     window.electronAPI.ensureServices()
-      .then(ok => { if (!ok) checkHealth(); })
+      .then(() => checkHealth())
       .catch(() => checkHealth());
   }, [checkHealth]);
 
@@ -4169,17 +4574,29 @@ const App = memo(() => {
   const [browsePage, setBrowsePage] = useState(1);
   const [browseLoading, setBrowseLoading] = useState(false);
   const [browseError, setBrowseError] = useState('');
+  const [paginationError, setPaginationError] = useState('');
+  const [paginationRetryCount, setPaginationRetryCount] = useState(0);
+  const [browseAutoLoadPaused, setBrowseAutoLoadPaused] = useState(() => (
+    typeof document !== 'undefined' ? document.hidden : false
+  ));
   const [showFilterBar, setShowFilterBar] = useState(false);
+  const browseFailure = useMemo(() => browseError ? describeSourceError(browseError) : null, [browseError]);
+  const automaticVerificationKeyRef = useRef('');
+  const automaticHelperOfferKeyRef = useRef('');
+  const sourceHelperWarmupPromiseRef = useRef(null);
+  const [sourceHelperStatus, setSourceHelperStatus] = useState('');
+  const browseRequestIdRef = useRef(0);
+  const browseRequestRef = useRef(null);
+  const resultsRef = useRef([]);
+  const [browserVerificationTried, setBrowserVerificationTried] = useState(false);
 
-  const DEFAULT_FILTERS = { sort: 'latest' };
-  const [browseFilters, setBrowseFilters] = useState(DEFAULT_FILTERS);
+  const [browseFilters, setBrowseFilters] = useState(BROWSE_DEFAULT_FILTERS);
 
   const activeFilterCount = useMemo(() => {
     return browseFilters.sort !== 'latest' ? 1 : 0;
   }, [browseFilters]);
 
   const [loadingMore, setLoadingMore] = useState(false);
-  const sentinelRef = useRef(null);
 
   const [selectedManga, setSelectedManga] = useState(null);
   const [mangaDetail, setMangaDetail] = useState(null);
@@ -4195,7 +4612,12 @@ const App = memo(() => {
   const [readerPage, setReaderPage] = useState(0);
   const chapterAbortRef = useRef(null);
   const pagesRef = useRef([]);
+  const automaticChapterVerificationKeyRef = useRef('');
+  const automaticMangaVerificationKeyRef = useRef('');
+  const manualSourceVerificationActiveRef = useRef(false);
   const [sourceVerifying, setSourceVerifying] = useState(false);
+  const [sourceRepairing, setSourceRepairing] = useState(false);
+  const [sourceVerificationPanel, setSourceVerificationPanel] = useState({ active: false });
 
   const [activeCategory, setActiveCategory] = useState('all');
   const [libraryView, setLibraryView] = useState(() => settings?.libraryView || 'grid');
@@ -4212,7 +4634,22 @@ const App = memo(() => {
   const prevQ = useRef(null);
   const chapRef = useRef([]);
 
+  useEffect(() => {
+    let active = true;
+    window.electronAPI?.getSourceVerificationState?.()
+      .then(state => { if (active && state) setSourceVerificationPanel(state); })
+      .catch(() => {});
+    const unsubscribe = window.electronAPI?.onSourceVerificationState?.(state => {
+      if (active) setSourceVerificationPanel(state || { active: false });
+    });
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, []);
+
   useEffect(() => { if (mangaDetail) chapRef.current = mangaDetail.chapters; }, [mangaDetail]);
+  useEffect(() => { resultsRef.current = results; }, [results]);
   useEffect(() => {
     const prevPages = pagesRef.current;
     pagesRef.current = pages;
@@ -4220,13 +4657,34 @@ const App = memo(() => {
   }, [pages]);
   useEffect(() => () => {
     chapterAbortRef.current?.abort();
+    browseRequestRef.current?.controller.abort();
     revokeBlobUrls(pagesRef.current);
   }, []);
 
+  useEffect(() => {
+    const syncVisibility = () => {
+      const hidden = document.hidden;
+      setBrowseAutoLoadPaused(hidden);
+      if (hidden && browseRequestRef.current?.background) {
+        browseRequestRef.current.controller.abort();
+      }
+    };
+
+    document.addEventListener('visibilitychange', syncVisibility);
+    syncVisibility();
+    return () => document.removeEventListener('visibilitychange', syncVisibility);
+  }, []);
+
+  useEffect(() => {
+    if (tab === 'browse' && view === 'source') return;
+    browseRequestRef.current?.controller.abort();
+    setLoadingMore(false);
+  }, [tab, view]);
+
   const debouncedSearch = useMemo(() => debounce(q => setQuery(q), CONFIG.DEBOUNCE_DELAY), []);
 
-  const verificationUrl = mangaDetail?.url || selectedManga?.url || '';
-  const verifySourceThenRetry = useCallback(async (retry) => {
+  const verificationUrl = mangaDetail?.url || selectedManga?.url || activeSource?.homeUrl || '';
+  const verifySourceThenRetry = useCallback(async (retry, options = {}) => {
     if (!verificationUrl) {
       toast('No source page is available for verification.', 'warning');
       return;
@@ -4236,14 +4694,23 @@ const App = memo(() => {
       toast('Solve the source challenge, then retry.', 'info');
       return;
     }
+    manualSourceVerificationActiveRef.current = true;
     setSourceVerifying(true);
-    const result = await window.electronAPI.verifySourceUrl(verificationUrl);
-    setSourceVerifying(false);
-    if (result?.ok) {
-      toast('Verification window closed. Retrying...', 'info');
-      retry?.();
-    } else {
-      toast(result?.error || 'Could not open verification window.', 'error');
+    try {
+      const result = await window.electronAPI.verifySourceUrl(verificationUrl, options);
+      if (result?.ok) {
+        toast('Verification confirmed. Loading results automatically...', 'info');
+        await retry?.();
+      } else if (result?.cancelled) {
+        toast('Verification was not confirmed. Retry when you are ready.', 'info');
+      } else {
+        toast(result?.error || 'Could not show source verification.', 'error');
+      }
+    } catch (error) {
+      toast(error?.message || 'Could not show source verification.', 'error');
+    } finally {
+      manualSourceVerificationActiveRef.current = false;
+      setSourceVerifying(false);
     }
   }, [verificationUrl, toast]);
 
@@ -4253,34 +4720,185 @@ const App = memo(() => {
     return params.toString();
   }, []);
 
-  const doSearch = useCallback(async (q, src, page, append = false, filters = browseFilters) => {
-    if (!src) return;
-    setBrowseLoading(true);
-    setBrowseError('');
+  const doSearch = useCallback(async (
+    q,
+    src,
+    page,
+    append = false,
+    filters = browseFilters,
+    { background = append } = {},
+  ) => {
+    if (!src) return { ok: false, stale: true };
+
+    browseRequestRef.current?.controller.abort();
+    const controller = new AbortController();
+    const requestId = ++browseRequestIdRef.current;
+    browseRequestRef.current = { id: requestId, controller, background };
+
+    if (!append) {
+      setBrowseLoading(true);
+      setBrowseError('');
+      setHasNextPage(false);
+      setPaginationError('');
+      setPaginationRetryCount(0);
+    }
+
     try {
       const qs = buildFilterParams(q, page, filters);
-      const d = await fetchJSON(`/source/${src.id}/search?${qs}`);
-      if (d.error) throw new Error(d.error);
-      if (append) {
-        setResults(prev => [...prev, ...(d.results || [])]);
-      } else {
-        setResults(d.results || []);
+      const d = await fetchJSON(`/source/${src.id}/search?${qs}`, { signal: controller.signal });
+      if (controller.signal.aborted || browseRequestRef.current?.id !== requestId) {
+        return { ok: false, stale: true };
       }
-      setHasNextPage(d.hasNextPage || false);
+      if (d.error) throw new Error(d.error);
+
+      const merged = mergeBrowseResults(append ? resultsRef.current : [], d.results, src.id);
+      resultsRef.current = merged.results;
+      setResults(merged.results);
+      automaticVerificationKeyRef.current = '';
+      automaticHelperOfferKeyRef.current = '';
+      setBrowserVerificationTried(false);
+      const hasMore = Boolean(d.hasNextPage) && (!append || merged.addedCount > 0);
+      setHasNextPage(hasMore);
+      if (!append) setBrowsePage(page);
+      return { ok: true, addedCount: merged.addedCount, hasNextPage: hasMore };
     } catch (e) {
-      setBrowseError(e.message);
-      setHasNextPage(false); // Stop infinite loop if request fails
+      if (controller.signal.aborted || browseRequestRef.current?.id !== requestId) {
+        return { ok: false, stale: true, aborted: true };
+      }
+
+      const failure = describeSourceError(e);
+      const verification = failure.kind === 'verification';
+      if (!append || verification) {
+        setBrowseError(e);
+        setHasNextPage(false);
+      }
+      return {
+        ok: false,
+        error: e,
+        verification,
+        retryable: isRetryableBrowseError(e),
+      };
     } finally {
-      setBrowseLoading(false);
+      if (browseRequestRef.current?.id === requestId) {
+        browseRequestRef.current = null;
+        if (!append) setBrowseLoading(false);
+      }
     }
   }, [fetchJSON, browseFilters, buildFilterParams]);
 
+  const warmInstalledSourceHelper = useCallback(async () => {
+    if (!window.electronAPI?.getCloudflareHelperInfo || !window.electronAPI?.ensureCloudflareHelper) {
+      return { ok: false, unavailable: true };
+    }
+    if (sourceHelperWarmupPromiseRef.current) return sourceHelperWarmupPromiseRef.current;
+
+    const warmup = (async () => {
+      const info = await window.electronAPI.getCloudflareHelperInfo();
+      if (info.running) return window.electronAPI.ensureCloudflareHelper();
+      if (!info?.supported || !info?.installed) return { ok: false, needsInstall: true };
+      setSourceHelperStatus('Preparing protected-source browser...');
+      return window.electronAPI.ensureCloudflareHelper();
+    })();
+    sourceHelperWarmupPromiseRef.current = warmup;
+    try {
+      return await warmup;
+    } finally {
+      if (sourceHelperWarmupPromiseRef.current === warmup) sourceHelperWarmupPromiseRef.current = null;
+      setSourceHelperStatus('');
+    }
+  }, []);
+
+  const recoverSourceAutomatically = useCallback(async (retry) => {
+    if (window.electronAPI?.ensureCloudflareHelper) {
+      setSourceRepairing(true);
+      try {
+        const result = await warmInstalledSourceHelper();
+        if (result?.ok) {
+          const manualActive = manualSourceVerificationActiveRef.current;
+          if (manualActive && window.electronAPI?.completeSourceVerification) {
+            toast(`${result.helper?.kind || 'Cloudflare helper'} is ready. Loading results automatically...`, 'info');
+            await window.electronAPI.completeSourceVerification();
+          } else {
+            toast(`${result.helper?.kind || 'Cloudflare helper'} started. Retrying automatically...`, 'info');
+            await retry?.();
+          }
+          return;
+        }
+        if (result?.installed && result?.error) {
+          toast(`Protected-source helper could not start: ${result.error}`, 'error');
+          return;
+        }
+      } catch (error) {
+        console.warn('[source recovery] Managed helper was unavailable:', error?.message);
+      } finally {
+        setSourceRepairing(false);
+      }
+    }
+    verifySourceThenRetry(retry, { automatic: true });
+  }, [toast, verifySourceThenRetry, warmInstalledSourceHelper]);
+
+  const setupSourceHelperThenRetry = useCallback(async () => {
+    if (!window.electronAPI?.setupCloudflareHelper) {
+      toast('Automatic helper setup is not available on this platform.', 'warning');
+      return;
+    }
+    setSourceRepairing(true);
+    try {
+      const result = await window.electronAPI.setupCloudflareHelper();
+      if (result?.ok) {
+        toast(`${result.helper?.kind || 'Cloudflare helper'} is ready. Retrying the source...`, 'success');
+        await doSearch(query, activeSource, 1, false, browseFilters);
+      } else if (!result?.cancelled) {
+        toast(result?.error || 'The Cloudflare helper could not be set up.', 'error');
+      }
+    } catch (error) {
+      toast(error?.message || 'The Cloudflare helper could not be set up.', 'error');
+    } finally {
+      setSourceRepairing(false);
+    }
+  }, [activeSource, browseFilters, doSearch, query, toast]);
+
   const enterSource = useCallback((src) => {
+    automaticVerificationKeyRef.current = '';
+    automaticHelperOfferKeyRef.current = '';
+    setBrowserVerificationTried(false);
+    resultsRef.current = [];
+    prevQ.current = '';
     setActiveSource(src); setResults([]); setQuery(''); setInputVal('');
     setBrowsePage(1); setBrowseError(''); setView('source');
-    setBrowseFilters(DEFAULT_FILTERS);
-    doSearch('', src, 1, false, DEFAULT_FILTERS);
-  }, [doSearch]);
+    setPaginationError(''); setPaginationRetryCount(0);
+    setBrowseFilters(BROWSE_DEFAULT_FILTERS);
+    // If the user has already installed the optional helper, overlap its cold
+    // start with the first source request instead of waiting for that request
+    // to fail before launching Chromium. Nothing is installed here.
+    warmInstalledSourceHelper().catch(error => {
+      console.warn('[source recovery] Helper warm-up was unavailable:', error?.message);
+    });
+    doSearch('', src, 1, false, BROWSE_DEFAULT_FILTERS);
+  }, [doSearch, warmInstalledSourceHelper]);
+
+  useEffect(() => {
+    if (browseFailure?.kind !== 'verification' || !verificationUrl || !activeSource?.id) return;
+    if (!window.electronAPI?.verifySourceUrl || sourceVerifying) return;
+
+    const verificationKey = `${activeSource.id}:${verificationUrl}`;
+    if (automaticVerificationKeyRef.current === verificationKey) return;
+    automaticVerificationKeyRef.current = verificationKey;
+    recoverSourceAutomatically(() => {
+      setBrowserVerificationTried(true);
+      return doSearch(query, activeSource, 1, false, browseFilters);
+    });
+  }, [activeSource, browseFailure?.kind, browseFilters, doSearch, query, recoverSourceAutomatically, sourceVerifying, verificationUrl]);
+
+  useEffect(() => {
+    if (browseFailure?.kind !== 'verification' || !browserVerificationTried || !activeSource?.id) return;
+    if (sourceRepairing || sourceVerifying) return;
+
+    const offerKey = `${activeSource.id}:${verificationUrl}`;
+    if (automaticHelperOfferKeyRef.current === offerKey) return;
+    automaticHelperOfferKeyRef.current = offerKey;
+    setupSourceHelperThenRetry();
+  }, [activeSource?.id, browseFailure?.kind, browserVerificationTried, setupSourceHelperThenRetry, sourceRepairing, sourceVerifying, verificationUrl]);
 
   useEffect(() => {
     if (view === 'source' && activeSource && prevQ.current !== query) {
@@ -4296,30 +4914,43 @@ const App = memo(() => {
   }, [browseFilters, query, activeSource, doSearch]);
 
   const handleFilterClear = useCallback(() => {
-    setBrowseFilters(DEFAULT_FILTERS);
+    setBrowseFilters(BROWSE_DEFAULT_FILTERS);
     setBrowsePage(1);
-    doSearch(query, activeSource, 1, false, DEFAULT_FILTERS);
+    doSearch(query, activeSource, 1, false, BROWSE_DEFAULT_FILTERS);
   }, [query, activeSource, doSearch]);
 
   useEffect(() => {
-    if (view !== 'source' || !activeSource || loadingMore || !hasNextPage) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0].isIntersecting && !loadingMore && hasNextPage) {
-          setLoadingMore(true);
-          const nextPage = browsePage + 1;
-          doSearch(query, activeSource, nextPage, true, browseFilters).then(() => {
-            setBrowsePage(nextPage);
-          }).finally(() => {
-            setLoadingMore(false);
-          });
-        }
-      },
-      { threshold: 0.1, rootMargin: '200px' }
-    );
-    if (sentinelRef.current) observer.observe(sentinelRef.current);
-    return () => observer.disconnect();
-  }, [view, activeSource, hasNextPage, loadingMore, browsePage, query, doSearch, browseFilters]);
+    if (
+      tab !== 'browse' || view !== 'source' || !activeSource || browseLoading || loadingMore ||
+      !hasNextPage || browseAutoLoadPaused || paginationError
+    ) return;
+
+    const retryCount = paginationRetryCount;
+    const timer = setTimeout(() => {
+      setLoadingMore(true);
+      const nextPage = browsePage + 1;
+      doSearch(query, activeSource, nextPage, true, browseFilters, { background: true })
+        .then(result => {
+          if (result.ok) {
+            setPaginationRetryCount(0);
+            setPaginationError('');
+            if (result.addedCount > 0) setBrowsePage(nextPage);
+            return;
+          }
+          if (result.stale || result.verification) return;
+          if (result.retryable && retryCount < AUTO_BROWSE_MAX_RETRIES) {
+            setPaginationRetryCount(retryCount + 1);
+            return;
+          }
+          setPaginationError('Could not load more manga automatically.');
+        })
+        .finally(() => setLoadingMore(false));
+    }, autoBrowseRetryDelay(retryCount));
+    return () => clearTimeout(timer);
+  }, [
+    tab, view, activeSource, browseLoading, hasNextPage, loadingMore, browsePage, query, doSearch,
+    browseFilters, browseAutoLoadPaused, paginationError, paginationRetryCount,
+  ]);
 
   const openManga = useCallback(async (manga, overrideSourceId) => {
     if (!manga) return;
@@ -4336,21 +4967,26 @@ const App = memo(() => {
     try {
       const d = await fetchJSON(`/source/${source.id}/manga/${manga.id}`);
       if (d.error) throw new Error(d.error);
+      automaticMangaVerificationKeyRef.current = '';
       setMangaDetail(d); addToHistory(manga, source.id, d);
     } catch (e) {
-      let msg = e.message;
-      try {
-        const parsed = JSON.parse(msg);
-        if (parsed.error) msg = parsed.error;
-      } catch { }
-      if (isSourceVerificationError(msg)) {
-        msg = 'This source needs browser verification before akaReader can load it.';
-      }
-      setMangaError(msg);
+      setMangaError(describeSourceError(e, 'source').message);
       toast('Failed to load manga', 'error');
     }
     finally { setMangaLoading(false); }
   }, [activeSource, sources, fetchJSON, addToHistory, removeMangaCompletely, refreshDownloads, toast]);
+
+  useEffect(() => {
+    if (view !== 'manga' || !mangaError || !selectedManga || sourceVerifying || sourceRepairing) return;
+    if (!isSourceVerificationError(mangaError)) return;
+
+    const sourceId = activeSource?.id || selectedManga.sourceId;
+    if (!sourceId) return;
+    const recoveryKey = `${sourceId}:${selectedManga.id}`;
+    if (automaticMangaVerificationKeyRef.current === recoveryKey) return;
+    automaticMangaVerificationKeyRef.current = recoveryKey;
+    recoverSourceAutomatically(() => openManga(selectedManga, sourceId));
+  }, [activeSource?.id, mangaError, openManga, recoverSourceAutomatically, selectedManga, sourceRepairing, sourceVerifying, view]);
 
   const openChapter = useCallback(async (chapter, overrideSourceId, explicitMangaId, explicitPage) => {
     if (chapterAbortRef.current) chapterAbortRef.current.abort();
@@ -4374,6 +5010,7 @@ const App = memo(() => {
       const cachedPages = Array.isArray(localPages) ? localPages.filter(Boolean) : [];
       if (cachedPages.length > 0) {
         setPages(cachedPages);
+        automaticChapterVerificationKeyRef.current = '';
         toast(`Chapter ${chapter.number} (offline)`, 'success');
       } else {
         if (!srcId) throw new Error('Source not available');
@@ -4382,21 +5019,37 @@ const App = memo(() => {
         const nextPages = Array.isArray(imgs) ? imgs.filter(Boolean) : [];
         if (!nextPages.length) throw new Error('No readable pages were returned for this chapter.');
         setPages(nextPages);
+        automaticChapterVerificationKeyRef.current = '';
         toast(`Chapter ${chapter.number} loaded`, 'success');
       }
       updateProgress(mId, chapter.id, chapter.number, startPage, srcId);
     } catch (e) {
       if (ac.signal.aborted) return;
-      let message = e?.message || 'Failed to load chapter.';
-      if (isSourceVerificationError(message)) {
-        message = 'This source needs browser verification before akaReader can load the chapter.';
-      }
+      const message = describeSourceError(e, 'source').message;
       setChapterError(message);
       toast(`Failed to load chapter: ${message}`, 'error');
     } finally {
       if (!ac.signal.aborted) setPagesLoading(false);
     }
   }, [activeSource, progress, selectedManga, mangaDetail, fetchJSON, updateProgress, toast, getMangaKey]);
+
+  useEffect(() => {
+    if (view !== 'reader' || !chapterError || !currentChapter || sourceVerifying || sourceRepairing) return;
+    const failure = describeSourceError(chapterError, 'source');
+    if (failure.kind !== 'verification') return;
+
+    const sourceId = activeSource?.id || selectedManga?.sourceId || mangaDetail?.sourceId;
+    const mangaId = mangaDetail?.id || selectedManga?.id;
+    if (!sourceId || !mangaId) return;
+    const recoveryKey = `${sourceId}:${mangaId}:${currentChapter.id}`;
+    if (automaticChapterVerificationKeyRef.current === recoveryKey) return;
+    automaticChapterVerificationKeyRef.current = recoveryKey;
+    recoverSourceAutomatically(() => openChapter(currentChapter, sourceId, mangaId, readerPage));
+  }, [
+    activeSource?.id, chapterError, currentChapter, mangaDetail?.id, mangaDetail?.sourceId,
+    openChapter, readerPage, recoverSourceAutomatically, selectedManga?.id,
+    selectedManga?.sourceId, sourceRepairing, sourceVerifying, view,
+  ]);
 
   const fetchNextChapter = useCallback(async (afterChapterId, signal) => {
     if (!chapRef.current?.length) return null;
@@ -4478,7 +5131,7 @@ const App = memo(() => {
         chapter = res.chapters.find(c => c.id === chId) || chapter;
       }
     } catch (e) {
-      setMangaError(e.message || 'Failed to fetch manga details');
+      setMangaError(describeSourceError(e, 'source').message);
     }
 
     openChapter(chapter, m.sourceId, m.id, page);
@@ -4544,7 +5197,8 @@ const App = memo(() => {
     const targetSourceId = sourceId || activeSource?.id;
     const source = sources[targetSourceId] || Object.values(sources).find(s => s.id === String(targetSourceId));
     if (source) {
-      const newFilters = { ...DEFAULT_FILTERS };
+      const newFilters = { ...BROWSE_DEFAULT_FILTERS };
+      prevQ.current = tag;
       setInputVal(tag);
       setQuery(tag);
       setBrowseFilters(newFilters);
@@ -4643,7 +5297,7 @@ const App = memo(() => {
   const goBack = useCallback(() => {
     if (view === 'reader') setView('manga');
     else if (view === 'manga') setView(activeSource ? 'source' : 'tabs');
-    else if (view === 'source') { setView('tabs'); setResults([]); }
+    else if (view === 'source') { resultsRef.current = []; setView('tabs'); setResults([]); }
   }, [view, activeSource]);
 
   useEffect(() => { goBackRef.current = goBack; }, [goBack]);
@@ -4661,7 +5315,7 @@ const App = memo(() => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [view, goBack, showGlobalSearch]);
 
-  const switchTab = useCallback((id) => { setTab(id); if (id === 'browse') { setView('tabs'); setResults([]); } else { setView(v => v === 'reader' ? 'reader' : 'tabs'); } }, []);
+  const switchTab = useCallback((id) => { setTab(id); if (id === 'browse') { resultsRef.current = []; setView('tabs'); setResults([]); } else { setView(v => v === 'reader' ? 'reader' : 'tabs'); } }, []);
 
   useEffect(() => {
     const onKeyDown = (e) => {
@@ -4697,7 +5351,7 @@ const App = memo(() => {
 
   const stats = useMemo(() => {
     const streak = calculateStreak(history);
-    const totalChapters = Object.values(progress).reduce((a, p) => a + (parseInt(p.chapterNum) || 0), 0);
+    const totalChapters = countReadChapterIds(readChapters);
     const totalMinutes = Object.values(readingTime || {}).reduce((a, v) => a + (v || 0), 0) / 60;
     const inLib = library.length;
     const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -4711,7 +5365,7 @@ const App = memo(() => {
     }));
     const activityDays = days14.map(d => ({ ...d, read: readDaySet.has(d.date) }));
     return { streak, totalChapters, totalMinutes: Math.round(totalMinutes), inLib, activityDays };
-  }, [progress, history, library, readingTime]);
+  }, [readChapters, history, library, readingTime]);
 
   const NAV = useMemo(() => [
     { id: 'home', label: 'Home', Icon: Flame },
@@ -4767,7 +5421,7 @@ const App = memo(() => {
               onClick={() => verifySourceThenRetry(() => currentChapter && openChapter(currentChapter, activeSource?.id || selectedManga?.sourceId, mangaDetail?.id || selectedManga?.id, readerPage))}
               icon={ExternalLink}
             >
-              {sourceVerifying ? 'Waiting...' : 'Verify Source'}
+              {sourceVerifying ? 'Manual verification open...' : 'Verify manually'}
             </Btn>
           )}
         </div>
@@ -4815,7 +5469,7 @@ const App = memo(() => {
       {showOnboarding && <Onboarding onFinish={() => { setShowOnboarding(false); storage.set('onboardingDone', true); }} />}
       {catchUpManga && <CatchUpModal manga={catchUpManga} onClose={() => setCatchUpManga(null)} onJumpTo={ch => { setCatchUpManga(null); openChapter(ch, activeSource?.id || mangaDetail?.sourceId, mangaDetail?.id || selectedManga?.id); }} />}
       {showShareCard && <ShareCardModal library={library} history={history} progress={progress} readChapters={readChapters} settings={settings} onClose={() => setShowShareCard(false)} />}
-      {showErrorModal && <ServiceErrorModal onRestart={() => { setShowErrorModal(false); checkHealth(); }} />}
+      {showErrorModal && <ServiceErrorModal issue={serviceIssue} onRestart={() => { setShowErrorModal(false); setServiceIssue(null); setForceProceed(false); checkHealth(); }} />}
       {showReleaseNotes && <ReleaseNotesModal notes={releaseNotes} version={updateAvailable} onClose={() => setShowReleaseNotes(false)} />}
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
       {backendOnline && !suwayomiReady && !showErrorModal && (forceProceed || canUseShellOffline) && (
@@ -4896,6 +5550,53 @@ const App = memo(() => {
           </button>
         </div>
       </div>
+
+      {sourceVerificationPanel.active && (
+        <div
+          className="anim-slideDown"
+          data-slot="source-verification-toolbar"
+          data-testid="source-verification-toolbar"
+          style={{
+            position: 'fixed', top: 38, left: 0, right: 0, height: 58,
+            zIndex: 850, background: 'rgba(10,10,15,0.98)',
+            borderBottom: '1px solid rgba(249,115,22,0.35)',
+            boxShadow: '0 10px 30px rgba(0,0,0,0.3)',
+            display: 'flex', alignItems: 'center', gap: 12, padding: '0 18px',
+            WebkitAppRegion: 'no-drag',
+          }}
+        >
+          <div style={{ width: 32, height: 32, borderRadius: 10, background: 'rgba(249,115,22,0.14)', color: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <Globe size={17} />
+          </div>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--text)' }}>
+              Verify {sourceVerificationPanel.hostname || 'this source'} inside akaReader
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              Complete the check yourself. akaReader detects success, closes this page, and loads clean app results automatically.
+            </div>
+          </div>
+          <button
+            type="button"
+            data-slot="source-verification-complete"
+            aria-label="Verification complete, load source results"
+            onClick={() => window.electronAPI?.completeSourceVerification?.()}
+            style={{ minHeight: 44, border: '1px solid rgba(249,115,22,0.45)', borderRadius: 9, background: 'rgba(249,115,22,0.13)', color: 'var(--accent)', padding: '8px 13px', fontSize: 12, fontWeight: 750, cursor: 'pointer', flexShrink: 0 }}
+          >
+            Load now
+          </button>
+          <button
+            type="button"
+            data-slot="source-verification-cancel"
+            aria-label="Cancel source verification"
+            onClick={() => window.electronAPI?.cancelSourceVerification?.()}
+            title="Cancel verification (Esc)"
+            style={{ width: 44, height: 44, border: 'none', borderRadius: 9, background: 'rgba(255,255,255,0.06)', color: 'var(--text-dim)', padding: 8, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
 
       <aside style={{ position: 'fixed', left: 0, top: 38, bottom: 0, width: sidebarWidth, background: 'var(--bg2)', borderRight: '1px solid var(--border)', zIndex: 50, display: 'flex', flexDirection: 'column', padding: sidebarIsCollapsed ? '10px 10px 8px' : '0', transition: 'width var(--t-base) var(--ease-spring)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: sidebarIsCollapsed ? '0 6px' : '18px 22px 16px', marginBottom: sidebarIsCollapsed ? 10 : 0 }}>
@@ -5168,7 +5869,7 @@ const App = memo(() => {
                             onClick={() => verifySourceThenRetry(() => openManga(selectedManga))}
                             icon={ExternalLink}
                           >
-                            {sourceVerifying ? 'Waiting...' : 'Verify Source'}
+                            {sourceVerifying ? 'Manual verification open...' : 'Verify manually'}
                           </Btn>
                         )}
                       </div>
@@ -5445,10 +6146,51 @@ const App = memo(() => {
 
                   {browseLoading && results.length === 0 ? (
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '100px 24px', gap: 20 }}>
-                      <Spin size={40} /><p style={{ fontSize: 12, color: 'var(--muted)' }}>{query ? 'Searching...' : 'Loading...'}</p>
+                      <Spin size={40} /><p style={{ fontSize: 12, color: 'var(--muted)' }}>{sourceHelperStatus || (query ? 'Searching...' : 'Loading...')}</p>
                     </div>
-                  ) : browseError ? (
-                    <EmptyState icon={AlertTriangle} title={browseError} action={<Btn onClick={() => doSearch(query, activeSource, browsePage, false, browseFilters)}>Retry</Btn>} />
+                  ) : browseFailure ? (
+                    <EmptyState
+                      icon={AlertTriangle}
+                      title={browseFailure.title}
+                      sub={browseFailure.kind === 'verification' && sourceRepairing
+                        ? 'The automatic helper is starting in the background. You can use manual verification now instead.'
+                        : browseFailure.kind === 'verification' && browserVerificationTried
+                          ? 'The browser page loaded, but Suwayomi is still blocked. akaReader will prepare its protected-source helper automatically.'
+                        : browseFailure.message}
+                      action={
+                        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
+                          {browseFailure.kind === 'verification' && browserVerificationTried && (
+                            <Btn
+                              disabled={sourceRepairing || sourceVerifying}
+                              onClick={setupSourceHelperThenRetry}
+                              icon={Download}
+                            >
+                              {sourceRepairing ? 'Setting up helper...' : 'Set up helper & retry'}
+                            </Btn>
+                          )}
+                          <Btn
+                            disabled={sourceRepairing || browseLoading}
+                            onClick={() => doSearch(query, activeSource, 1, false, browseFilters)}
+                            icon={RefreshCw}
+                          >
+                            {sourceRepairing ? 'Starting automatically...' : 'Retry'}
+                          </Btn>
+                          {browseFailure.kind === 'verification' && verificationUrl && (
+                            <Btn
+                              variant="outline"
+                              disabled={sourceVerifying}
+                              onClick={() => verifySourceThenRetry(() => {
+                                setBrowserVerificationTried(true);
+                                return doSearch(query, activeSource, 1, false, browseFilters);
+                              })}
+                              icon={ExternalLink}
+                            >
+                              {sourceVerifying ? 'Manual verification open...' : 'Verify manually'}
+                            </Btn>
+                          )}
+                        </div>
+                      }
+                    />
                   ) : (
                     <>
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 18 }}>
@@ -5459,10 +6201,25 @@ const App = memo(() => {
                           action={activeFilterCount > 0 && <Btn variant="outline" size="sm" onClick={handleFilterClear}><X size={14} /> Clear Filters</Btn>}
                         />
                       )}
-                      {hasNextPage && <div ref={sentinelRef} style={{ height: 20, margin: '20px 0' }} />}
                       {loadingMore && (
                         <div style={{ display: 'flex', justifyContent: 'center', padding: '20px' }}>
                           <Spin size={24} />
+                        </div>
+                      )}
+                      {paginationError && !loadingMore && (
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, padding: '20px', flexWrap: 'wrap' }}>
+                          <span style={{ color: 'var(--muted)', fontSize: 12 }}>{paginationError}</span>
+                          <Btn
+                            variant="outline"
+                            size="sm"
+                            icon={RefreshCw}
+                            onClick={() => {
+                              setPaginationError('');
+                              setPaginationRetryCount(0);
+                            }}
+                          >
+                            Retry loading more
+                          </Btn>
                         </div>
                       )}
                     </>
@@ -5727,9 +6484,9 @@ const App = memo(() => {
           {tab === 'updates' && <UpdatesTab onOpenManga={openManga} />}
           {tab === 'downloads' && <DownloadsTab
             queue={downloadQueue}
-            onClear={() => setDownloadQueue(prev => prev.filter(d => d.status === 'pending' || d.status === 'downloading'))}
+            onClear={() => setDownloadQueue(prev => prev.filter(d => d.status === 'pending' || d.status === 'downloading' || d.status === 'error'))}
             onRemove={id => setDownloadQueue(prev => prev.filter(d => d.id !== id))}
-            onRetry={id => setDownloadQueue(prev => prev.map(d => d.id === id ? { ...d, status: 'pending', progress: 0, pagesLoaded: 0, pagesTotal: 0, error: null } : d))}
+            onRetry={id => setDownloadQueue(prev => prev.map(d => d.id === id ? { ...d, status: 'pending', progress: 0, pagesLoaded: 0, pagesTotal: 0, attempts: 0, retryAt: 0, recovered: false, error: null, updatedAt: Date.now() } : d))}
             onCancel={cancelDownload}
             onCancelAll={cancelActiveDownloads}
           />}

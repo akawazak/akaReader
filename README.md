@@ -1,6 +1,6 @@
 # akaReader
 
-**A polished desktop manga reader for Windows — powered by Suwayomi.**
+**A polished desktop manga reader for Windows and Linux — powered by Suwayomi.**
 
 akaReader gives you a native, offline-capable reading experience with a built-in Suwayomi runtime. Browse sources, manage your library, and read chapters even without internet — all from a single, self-contained Electron app.
 
@@ -23,13 +23,17 @@ akaReader gives you a native, offline-capable reading experience with a built-in
 
 ### Offline
 - **Download chapters** — save pages to IndexedDB
+- **Crash-safe download queue** — interrupted chapters resume after relaunch and transient failures retry automatically
 - **Read anywhere** — chapters load from local storage, no network needed
 - **Cover and metadata** — cached alongside chapter data
 
 ### Desktop
 - **Windows installer** — one-click NSIS setup
 - **Portable build** — run from anywhere, no install required
+- **Linux packages** — AppImage and Debian package builds
 - **Auto-updates** — patches download in the background
+- **Safety backups** — validated export/restore plus automatic backups before updates
+- **One-click health check** — identifies and repairs local API, Java, Suwayomi, storage, and helper issues
 - **System tray** — minimize to tray, keep Suwayomi running
 - **Source verification** — handles browser-challenge sites (Cloudflare, etc.)
 
@@ -39,8 +43,8 @@ akaReader gives you a native, offline-capable reading experience with a built-in
 
 | Layer | Tech |
 |---|---|
-| Desktop shell | Electron 30 |
-| Frontend | React 18 + Vite 5 |
+| Desktop shell | Electron 43 |
+| Frontend | React 18 + Vite 8 |
 | Backend proxy | Node.js + Express |
 | Manga runtime | Suwayomi (bundled) |
 | Icons | Lucide React |
@@ -52,9 +56,9 @@ akaReader gives you a native, offline-capable reading experience with a built-in
 ## Quick Start
 
 ### Prerequisites
-- **Windows 10/11** (64-bit)
-- **Node.js 18+**
-- **Java 17+** (for Suwayomi — auto-installed if missing)
+- **Windows 10/11 or x64 Linux**
+- **Node.js 22.12+**
+- **Java 21.0.11+** (for Suwayomi — privately auto-installed if missing)
 
 ### Install dependencies
 
@@ -87,6 +91,13 @@ npm run validate
 ```powershell
 cd manga-nexus
 npm run dist
+```
+
+### Build Linux AppImage / Debian package
+
+```bash
+cd manga-nexus
+npm run dist:linux
 ```
 
 Output lands in `manga-nexus/dist-electron/`.

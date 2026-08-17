@@ -1,6 +1,6 @@
 {
   "name": "akareader",
-  "version": "2.0.50",
+  "version": "2.0.52",
   "description": "Manga reader powered by Suwayomi",
   "main": "electron-main.js",
   "author": {
@@ -16,8 +16,11 @@
     "build": "vite build",
     "lint": "eslint .",
     "lint:release": "eslint . --quiet",
-    "validate": "npm run lint:release && npm run check:hook-order && npm run build",
+    "test": "node --test test/*.test.mjs",
+    "validate": "npm test && npm run lint:release && npm run check:hook-order && npm run build",
     "check:hook-order": "node scripts/check-hook-order.mjs",
+    "check:packaged-runtime": "node scripts/check-packaged-runtime.mjs",
+    "smoke:packaged-runtime": "node scripts/smoke-packaged-runtime.mjs",
     "clean": "rimraf dist dist-electron",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "electron:build": "rimraf dist dist-electron && vite build && electron-builder --win",
@@ -33,16 +36,16 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@vitejs/plugin-react": "^4.0.0",
+    "@vitejs/plugin-react": "^6.0.5",
     "concurrently": "^8.0.0",
-    "electron": "^30.0.0",
-    "electron-builder": "^24.0.0",
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3",
     "eslint": "^10.4.1",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.6.0",
     "rimraf": "^5.0.0",
-    "vite": "^5.0.0",
+    "vite": "^8.2.1",
     "wait-on": "^7.0.0"
   },
   "build": {
@@ -61,6 +64,7 @@
       "dist/**/*",
       "electron-main.js",
       "preload.js",
+      "runtime/**/*",
       "public/**/*"
     ],
     "extraResources": [
@@ -69,16 +73,23 @@
         "to": "backend",
         "filter": [
           "server.js",
+          "source-errors.js",
           "package.json",
           "**/*.jar",
-          "**/suwayomi-linux-assets.tar.gz",
-          "node_modules/**/*",
-          "!node_modules/.cache/**",
-          "!node_modules/.bin/**",
-          "!node_modules/**/test/**",
-          "!node_modules/**/tests/**",
-          "!node_modules/**/*.md",
-          "!node_modules/**/*.map",
+          "**/suwayomi-linux-assets.tar.gz"
+        ]
+      },
+      {
+        "from": "../backend/node_modules",
+        "to": "backend/node_modules",
+        "filter": [
+          "**/*",
+          "!.cache/**",
+          "!.bin/**",
+          "!**/test/**",
+          "!**/tests/**",
+          "!**/*.md",
+          "!**/*.map",
           "!**/.*"
         ]
       }
