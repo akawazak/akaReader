@@ -81,7 +81,7 @@ akareader/
 ### CI
 
 - `.github/workflows/build.yml`
-  Windows-focused Electron packaging and GitHub release publishing.
+  Cross-platform Electron validation, Windows installer/portable and Linux AppImage/deb packaging, secure Linux Chromium-sandbox preparation for unpacked smoke tests, and tag-driven GitHub release publishing.
 
 ### Backend
 
@@ -152,7 +152,7 @@ akareader/
 - `manga-nexus/scripts/check-packaged-runtime.mjs`
   Verifies the unpacked Electron release contains the backend entry points and required production packages before CI uploads it.
 - `manga-nexus/scripts/smoke-packaged-runtime.mjs`
-  Launches an unpacked release, requires its loopback backend port to open, and terminates the test process tree; CI runs it on Windows and under Xvfb on Linux.
+  Launches the platform's actual unpacked executable, requires its loopback backend port to open, retains a bounded startup-output tail on failure, and terminates the test process tree; CI runs it on Windows and under Xvfb on Linux.
 
 ### Renderer Core
 

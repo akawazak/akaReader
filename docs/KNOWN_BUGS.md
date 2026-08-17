@@ -28,6 +28,13 @@ Verification run:
 
 ## Recently Fixed
 
+### Fixed 2026-08-17: Linux packaged-runtime validation could not reach the app
+
+- **Symptom:** Linux packaging and file verification passed, but the launch smoke test either targeted the wrong-cased binary or waited 60 seconds without reaching port 3001.
+- **Cause:** Electron Builder names the unpacked binary `akareader`, while the test expected `akaReader`; after that was corrected, Chromium rejected GitHub's user-owned unpacked `chrome-sandbox` before application code could run.
+- **Fix:** The launcher now uses the real platform executable name and preserves a bounded diagnostic output tail. Linux CI restores `chrome-sandbox` to root ownership and mode `4755` before the Xvfb launch, preserving Chromium sandboxing while matching installed-package permissions.
+- **Release:** `2.0.52`.
+
 ### Fixed 2026-08-17: Interrupted downloads disappeared or failed permanently
 
 - **Symptom:** Closing akaReader during a chapter download lost the queue, and brief network failures immediately required manual retry.
