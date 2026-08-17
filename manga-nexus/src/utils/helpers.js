@@ -1,11 +1,13 @@
 import { CONFIG } from '../constants';
 
-export const proxyImg = (url) => {
+export const proxyImg = (url, { kind = '' } = {}) => {
   if (!url) return null;
   const isLoopback = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\//i.test(url);
   if (url.startsWith(CONFIG.SUWAYOMI) || url.startsWith('/') || isLoopback) {
     const absolute = url.startsWith('/') ? `${CONFIG.SUWAYOMI}${url}` : url;
-    return `${CONFIG.API}/img?url=${encodeURIComponent(absolute)}`;
+    const token = CONFIG.API_TOKEN ? `&api_token=${encodeURIComponent(CONFIG.API_TOKEN)}` : '';
+    const imageKind = kind === 'page' ? '&kind=page' : '';
+    return `${CONFIG.API}/img?url=${encodeURIComponent(absolute)}${token}${imageKind}`;
   }
   return url; 
 };

@@ -160,18 +160,20 @@ const Toggle = ({ val, onChange, label, sub, kbd }) => (
   </div>
 );
 
-const PageImage = memo(({ url, alt, style, loading = 'eager' }) => {
+const PageImage = memo(({ url, alt, style, loading = 'eager', adaptTall = false }) => {
   const [failed, setFailed] = useState(false);
   const [retry, setRetry] = useState(0);
+  const [isTallStrip, setIsTallStrip] = useState(false);
 
   useEffect(() => {
     setFailed(false);
     setRetry(0);
+    setIsTallStrip(false);
   }, [url]);
 
   const src = useMemo(() => {
     if (!url) return '';
-    const base = proxyImg(url);
+    const base = proxyImg(url, { kind: 'page' });
     if (!retry) return base;
     return `${base}${base.includes('?') ? '&' : '?'}retry=${retry}`;
   }, [url, retry]);
@@ -220,8 +222,20 @@ const PageImage = memo(({ url, alt, style, loading = 'eager' }) => {
       draggable={false}
       loading={loading}
       decoding="async"
+      onLoad={event => {
+        if (!adaptTall) return;
+        const image = event.currentTarget;
+        setIsTallStrip(image.naturalWidth > 0 && image.naturalHeight / image.naturalWidth >= 3);
+      }}
       onError={() => setFailed(true)}
-      style={style}
+      style={isTallStrip ? {
+        ...style,
+        width: 'min(100%, 860px)',
+        maxWidth: '100%',
+        height: 'auto',
+        maxHeight: 'none',
+        zoom: undefined
+      } : style}
     />
   );
 });
@@ -1105,7 +1119,7 @@ export const Reader = memo(({
                 </div>
               )}
               <div data-page={i} style={{ display: 'flex', justifyContent: 'center', width: '100%', marginBottom: pageGap }}>
-                <PageImage url={p.url} alt={`Page ${i + 1}`} style={{ ...getScrollStyle(isWebtoon, fitMode, zoom) }} loading={i < page + 5 ? 'eager' : 'lazy'} />
+                <PageImage url={p.url} alt={`Page ${i + 1}`} style={{ ...getScrollStyle(isWebtoon, fitMode, zoom) }} loading={i < page + 5 ? 'eager' : 'lazy'} adaptTall />
               </div>
             </React.Fragment>
           ))}

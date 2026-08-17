@@ -1,6 +1,7 @@
 export const CONFIG = {
   API: 'http://localhost:3001/api',
   SUWAYOMI: 'http://localhost:4567',
+  API_TOKEN: typeof window !== 'undefined' ? (window.electronAPI?.apiToken || '') : '',
   DEBOUNCE_DELAY: 350,
   UPDATE_INTERVAL: 3600000,
 };

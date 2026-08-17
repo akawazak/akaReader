@@ -34,7 +34,11 @@ jobs:
 
       - name: Install backend dependencies
         working-directory: backend
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
+
+      - name: Test backend
+        working-directory: backend
+        run: npm test
 
       - name: Download Suwayomi JAR (for bundled server)
         shell: bash
@@ -59,6 +63,14 @@ jobs:
         run: npm run dist -- --win --publish=never
         env:
           ELECTRON_BUILDER_ALLOW_UNRESOLVED_DEPENDENCIES: true
+
+      - name: Verify packaged runtime (Windows)
+        working-directory: manga-nexus
+        run: npm run check:packaged-runtime -- dist-electron/win-unpacked
+
+      - name: Smoke-test packaged runtime (Windows)
+        working-directory: manga-nexus
+        run: npm run smoke:packaged-runtime -- dist-electron/win-unpacked
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -93,7 +105,11 @@ jobs:
 
       - name: Install backend dependencies
         working-directory: backend
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
+
+      - name: Test backend
+        working-directory: backend
+        run: npm test
 
       - name: Download Suwayomi JAR (Linux)
         # The standalone server JAR is the only Linux asset akaReader can
@@ -123,7 +139,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libarchive-tools \
             fakeroot \
-            rpm
+            rpm \
+            xvfb
 
       - name: Package (Linux)
         working-directory: manga-nexus
@@ -134,6 +151,14 @@ jobs:
           # the in-process build path so the GitHub-hosted runner doesn't
           # need Docker-in-Docker.
           CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Verify packaged runtime (Linux)
+        working-directory: manga-nexus
+        run: npm run check:packaged-runtime -- dist-electron/linux-unpacked
+
+      - name: Smoke-test packaged runtime (Linux)
+        working-directory: manga-nexus
+        run: xvfb-run -a npm run smoke:packaged-runtime -- dist-electron/linux-unpacked
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
