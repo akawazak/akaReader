@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { spawn, spawnSync } from 'node:child_process';
@@ -13,6 +14,7 @@ const timeoutMs = 60000;
 const maxDiagnosticChars = 12000;
 let diagnosticOutput = '';
 let childError = null;
+const smokeProfileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'akareader-packaged-smoke-'));
 
 function captureDiagnostic(stream, chunk) {
   diagnosticOutput += `[${stream}] ${chunk.toString()}`;
@@ -61,7 +63,7 @@ if (!fs.existsSync(executable)) {
   throw new Error(`Packaged executable ${executableName} was not found in ${packageRoot}. Found: ${packagedFiles}`);
 }
 
-const child = spawn(executable, ['--disable-gpu'], {
+const child = spawn(executable, ['--disable-gpu', '--in-process-gpu', `--user-data-dir=${smokeProfileDir}`], {
   detached: process.platform !== 'win32',
   stdio: ['ignore', 'pipe', 'pipe'],
 });
@@ -78,8 +80,13 @@ try {
   throw error;
 } finally {
   if (process.platform === 'win32') {
-    spawnSync('taskkill', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore' });
+    child.kill();
+    spawnSync('taskkill', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore', timeout: 5000 });
   } else {
     try { process.kill(-child.pid, 'SIGTERM'); } catch {}
   }
+  child.stdout.destroy();
+  child.stderr.destroy();
+  child.unref();
+  try { fs.rmSync(smokeProfileDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch {}
 }

@@ -4,7 +4,7 @@
  */
 const {
   app, BrowserWindow, Menu, shell, WebContentsView,
-  Tray, globalShortcut, ipcMain, screen, utilityProcess, dialog
+  Tray, globalShortcut, ipcMain, screen, utilityProcess, dialog, Notification
 } = require('electron');
 const path  = require('path');
 const http  = require('http');
@@ -12,6 +12,7 @@ const https = require('https');
 const fs    = require('fs');
 const cp    = require('child_process');
 const crypto = require('crypto');
+const { pipeline } = require('stream/promises');
 const {
   REQUIRED_JAVA_MAJOR,
   REQUIRED_JAVA_VERSION,
@@ -42,9 +43,17 @@ const {
   hasCloudflareSession,
 } = require('./runtime/cloudflare-helper.cjs');
 const { getMissingBackendFiles } = require('./runtime/backend-runtime.cjs');
+const { normalizeChapterExport, sanitizeArchiveName } = require('./runtime/chapter-export.cjs');
+const { DISCORD_APPLICATION_ID, DiscordPresenceController } = require('./runtime/discord-presence.cjs');
+const {
+  WINDOW_CLOSE_FLUSH_TIMEOUT_MS,
+  resolveWindowCloseAction,
+} = require('./runtime/window-lifecycle.cjs');
 
 let autoUpdater = null;
 try { autoUpdater = require('electron-updater').autoUpdater; } catch {}
+let DiscordRPC = null;
+try { DiscordRPC = require('@xhayper/discord-rpc'); } catch {}
 
 const isDev = !app.isPackaged;
 const backendApiToken = crypto.randomBytes(32).toString('base64url');
@@ -64,6 +73,11 @@ let cloudflareHelperProc = null;
 let cloudflareHelperInstallPromise = null;
 let cloudflareSessionWarmupPromise = null;
 let isQuitting   = false;
+let closeActionInProgress = false;
+let closeFlushSequence = 0;
+let quitRendererFlushCompleted = false;
+let quitRendererFlushInProgress = false;
+const pendingCloseFlushes = new Map();
 let serviceMode  = false;
 let lastServiceIssue = null;
 let updateState  = {
@@ -162,10 +176,20 @@ let appSettings = {
   closeToTray: true,
   startWithWindows: false,
   cloudflareHelperEnabled: false,
+  discordPresenceEnabled: false,
   extensionRepos: [],
   ...loadSettings(),
 };
 appSettings.extensionRepos = normalizeExtensionStoreUrls(appSettings.extensionRepos);
+
+const discordPresence = new DiscordPresenceController({
+  RPC: DiscordRPC,
+  clientId: DISCORD_APPLICATION_ID,
+  onStatus: state => {
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isLoading()) return;
+    mainWindow.webContents.send('discord-presence-status', state);
+  },
+});
 
 // ── Status helper ─────────────────────────────────────────────────────────────
 // Messages fired before the renderer finishes loading are queued and flushed
@@ -1632,11 +1656,73 @@ async function getSystemDiagnostics() {
 }
 
 // ── IPC ───────────────────────────────────────────────────────────────────────
+function requestRendererCloseFlush() {
+  const win = mainWindow;
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return Promise.resolve(false);
+
+  const requestId = `close-${Date.now()}-${++closeFlushSequence}`;
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = acknowledged => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      pendingCloseFlushes.delete(requestId);
+      resolve(acknowledged);
+    };
+    const timer = setTimeout(() => finish(false), WINDOW_CLOSE_FLUSH_TIMEOUT_MS);
+    pendingCloseFlushes.set(requestId, () => finish(true));
+    try {
+      win.webContents.send('before-window-close', { requestId });
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+async function performWindowClose() {
+  const action = resolveWindowCloseAction({
+    isQuitting,
+    closeToTray: appSettings.closeToTray,
+  });
+  if (action === 'allow' || closeActionInProgress) return action;
+
+  closeActionInProgress = true;
+  try {
+    await requestRendererCloseFlush();
+    if (action === 'hide') {
+      mainWindow?.hide();
+    } else {
+      quitRendererFlushCompleted = true;
+      isQuitting = true;
+      app.quit();
+    }
+    return action;
+  } finally {
+    closeActionInProgress = false;
+  }
+}
+
 ipcMain.handle('get-close-to-tray',      ()    => appSettings.closeToTray);
 ipcMain.on('get-api-token', event => { event.returnValue = backendApiToken; });
+ipcMain.on('window-close-flush-complete', (_, requestId) => {
+  if (typeof requestId !== 'string') return;
+  pendingCloseFlushes.get(requestId)?.();
+});
 ipcMain.handle('set-close-to-tray',      (_, v) => { appSettings.closeToTray = v; saveSettings(appSettings); });
 ipcMain.handle('get-start-with-windows', ()    => appSettings.startWithWindows);
 ipcMain.on(    'set-start-with-windows', (_, v) => { appSettings.startWithWindows = v; saveSettings(appSettings); setWindowsStartup(v); });
+ipcMain.handle('get-discord-presence', () => discordPresence.snapshot());
+ipcMain.handle('set-discord-presence-enabled', (_, enabled) => {
+  appSettings.discordPresenceEnabled = Boolean(enabled);
+  saveSettings(appSettings);
+  return discordPresence.setEnabled(appSettings.discordPresenceEnabled, { retry: appSettings.discordPresenceEnabled });
+});
+ipcMain.handle('retry-discord-presence', () => {
+  if (!appSettings.discordPresenceEnabled) return discordPresence.snapshot();
+  return discordPresence.setEnabled(true, { retry: true });
+});
+ipcMain.handle('set-discord-presence-mode', (_, mode) => discordPresence.setMode(mode));
 ipcMain.handle('get-extension-repos', () => ({
   defaults: [...DEFAULT_EXTENSION_STORES],
   custom: [...appSettings.extensionRepos],
@@ -1659,10 +1745,7 @@ ipcMain.handle('set-extension-repos', (_, repos) => {
 
 ipcMain.handle('window-minimize', ()     => mainWindow?.minimize());
 ipcMain.handle('window-maximize', ()     => mainWindow?.isMaximized() ? mainWindow.unmaximize() : mainWindow?.maximize());
-ipcMain.handle('window-close',    ()     => {
-  if (!isQuitting && appSettings.closeToTray) mainWindow?.hide();
-  else { isQuitting = true; app.quit(); }
-});
+ipcMain.handle('window-close', () => performWindowClose());
 
 ipcMain.handle('ensure-services', () => ensureManagedServices());
 ipcMain.handle('restart-services', () => ensureManagedServices({ restart: true }));
@@ -1716,6 +1799,100 @@ ipcMain.handle('check-service',     ()    => isServiceRunning());
 ipcMain.handle('install-service',   async () => installWindowsService());
 ipcMain.handle('uninstall-service', async () => uninstallWindowsService());
 ipcMain.handle('open-data-dir',     ()    => shell.openPath(userData));
+const downloadChapterArchive = async (chapter, filePath) => {
+  const normalized = normalizeChapterExport({ ...chapter, chapterNum: chapter.chapterNum ?? chapter.chapterLabel });
+  const requestPath = `/api/source/${encodeURIComponent(normalized.sourceId)}/chapter/${normalized.chapterId}/download?title=${encodeURIComponent(normalized.baseName)}`;
+  await new Promise((resolve, reject) => {
+    const request = http.get({
+      hostname: '127.0.0.1',
+      port: 3001,
+      path: requestPath,
+      headers: { 'X-AkaReader-Token': backendApiToken },
+    }, response => {
+      if (response.statusCode !== 200) {
+        const chunks = [];
+        let received = 0;
+        response.on('data', chunk => {
+          received += chunk.length;
+          if (received <= 1024 * 1024) chunks.push(chunk);
+        });
+        response.on('end', () => {
+          let message = `CBZ export failed (${response.statusCode || 'unknown status'}).`;
+          try { message = JSON.parse(Buffer.concat(chunks).toString('utf8'))?.error || message; } catch {}
+          reject(new Error(message));
+        });
+        return;
+      }
+      pipeline(response, fs.createWriteStream(filePath, { mode: 0o600 }))
+        .then(resolve)
+        .catch(reject);
+    });
+    request.setTimeout(10 * 60 * 1000, () => request.destroy(new Error('CBZ export timed out.')));
+    request.on('error', reject);
+  }).catch(error => {
+    try { fs.rmSync(filePath, { force: true }); } catch {}
+    throw error;
+  });
+  return { ...normalized, filePath };
+};
+
+const availableArchivePath = (directory, baseName) => {
+  const safeBase = sanitizeArchiveName(baseName, 'chapter');
+  let candidate = path.join(directory, `${safeBase}.cbz`);
+  for (let suffix = 2; fs.existsSync(candidate); suffix += 1) {
+    candidate = path.join(directory, `${safeBase} (${suffix}).cbz`);
+  }
+  return candidate;
+};
+
+ipcMain.handle('export-chapter-cbz', async (_, request) => {
+  try {
+    const chapter = normalizeChapterExport(request);
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export chapter as CBZ',
+      defaultPath: path.join(app.getPath('documents'), `${chapter.baseName}.cbz`),
+      filters: [{ name: 'Comic Book Archive', extensions: ['cbz'] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false, cancelled: true };
+    const filePath = result.filePath.toLowerCase().endsWith('.cbz') ? result.filePath : `${result.filePath}.cbz`;
+    await downloadChapterArchive(chapter, filePath);
+    return { ok: true, filePath };
+  } catch (error) {
+    return { ok: false, error: error?.message || 'The chapter could not be exported.' };
+  }
+});
+
+ipcMain.handle('export-manga-cbz', async (_, payload = {}) => {
+  try {
+    const chapters = Array.isArray(payload.chapters) ? payload.chapters.slice(0, 2000).map(chapter => normalizeChapterExport({
+      ...chapter,
+      sourceId: payload.sourceId,
+      mangaTitle: payload.mangaTitle,
+    })) : [];
+    if (!chapters.length) throw new Error('There are no chapters to export.');
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: `Export ${sanitizeArchiveName(payload.mangaTitle, 'manga')} as CBZ files`,
+      defaultPath: app.getPath('documents'),
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (result.canceled || !result.filePaths[0]) return { ok: false, cancelled: true };
+    const directory = result.filePaths[0];
+    const errors = [];
+    let saved = 0;
+    for (const chapter of chapters) {
+      try {
+        const filePath = availableArchivePath(directory, chapter.baseName);
+        await downloadChapterArchive(chapter, filePath);
+        saved += 1;
+      } catch (error) {
+        errors.push({ chapterId: chapter.chapterId, error: error?.message || 'Export failed.' });
+      }
+    }
+    return { ok: saved > 0, directory, saved, failed: errors.length, errors, error: saved > 0 ? '' : errors[0]?.error };
+  } catch (error) {
+    return { ok: false, error: error?.message || 'The manga could not be exported.' };
+  }
+});
 ipcMain.handle('export-app-backup', async (_, payload) => {
   try {
     const text = validateBackupPayload(payload);
@@ -1766,6 +1943,21 @@ ipcMain.handle('get-java-path',     ()    => findJava());
 ipcMain.handle('get-jar-path',      ()    => jarPath);
 ipcMain.handle('get-suwayomi-config-path', () => suwayomiConfigPath);
 ipcMain.handle('open-external',      (_, url) => shell.openExternal(url));
+ipcMain.handle('show-notification', (_, payload = {}) => {
+  if (!Notification.isSupported()) return { ok: false, error: 'Desktop notifications are unavailable.' };
+  const title = String(payload.title || 'akaReader').replace(/[\r\n]+/g, ' ').trim().slice(0, 80) || 'akaReader';
+  const body = String(payload.body || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 240);
+  if (!body) return { ok: false, error: 'Notification text is missing.' };
+  const notification = new Notification({ title, body, silent: false });
+  notification.on('click', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+  notification.show();
+  return { ok: true };
+});
 ipcMain.handle('get-cloudflare-helper-info', async () => {
   const running = await probeCloudflareHelper();
   return {
@@ -2032,9 +2224,11 @@ ipcMain.handle('download-app-update', async () => {
     return { ok: false, error: e?.message || 'Failed to download update.' };
   }
 });
-ipcMain.handle('install-app-update', () => {
+ipcMain.handle('install-app-update', async () => {
   if (!autoUpdater || isDev) return { ok: false, error: 'Updater is not available in this build.' };
   if (!updateState.downloaded) return { ok: false, error: 'No downloaded update is ready to install.' };
+  await requestRendererCloseFlush();
+  quitRendererFlushCompleted = true;
   isQuitting = true;
   autoUpdater.quitAndInstall(true, true);
   return { ok: true };
@@ -2095,7 +2289,10 @@ function createMainWindow() {
   });
   mainWindow.on('move', () => saveWindowState(mainWindow));
   mainWindow.on('close', e => {
-    if (!isQuitting && appSettings.closeToTray) { e.preventDefault(); mainWindow.hide(); }
+    const action = resolveWindowCloseAction({ isQuitting, closeToTray: appSettings.closeToTray });
+    if (action === 'allow') return;
+    e.preventDefault();
+    performWindowClose();
   });
   mainWindow.on('closed', () => {
     cancelSourceVerification?.();
@@ -2158,6 +2355,7 @@ app.whenReady().then(async () => {
   seedExtensions();
   createTray();
   createMainWindow(); // window appears instantly
+  discordPresence.setEnabled(appSettings.discordPresenceEnabled);
   ensureManagedServices();
 
   if (appSettings.startWithWindows) setWindowsStartup(true);
@@ -2248,9 +2446,23 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => { /* stay alive in tray */ });
 
 // FIX: kill full Suwayomi process tree before quit
-app.on('before-quit', () => {
+app.on('before-quit', e => {
+  if (!quitRendererFlushCompleted && mainWindow && !mainWindow.isDestroyed()) {
+    e.preventDefault();
+    if (!quitRendererFlushInProgress) {
+      quitRendererFlushInProgress = true;
+      requestRendererCloseFlush().finally(() => {
+        quitRendererFlushCompleted = true;
+        quitRendererFlushInProgress = false;
+        isQuitting = true;
+        app.quit();
+      });
+    }
+    return;
+  }
   isQuitting = true;
   globalShortcut.unregisterAll();
+  void discordPresence.dispose();
   killServer();
   killSuwayomi();
   killCloudflareHelper();
@@ -2288,5 +2500,5 @@ process.on('exit', () => {
   } catch {}
 });
 
-process.on('SIGINT',  () => { isQuitting = true; killServer(); killSuwayomi(); killCloudflareHelper(); process.exit(0); });
-process.on('SIGTERM', () => { isQuitting = true; killServer(); killSuwayomi(); killCloudflareHelper(); process.exit(0); });
+process.on('SIGINT',  () => { isQuitting = true; void discordPresence.dispose(); killServer(); killSuwayomi(); killCloudflareHelper(); process.exit(0); });
+process.on('SIGTERM', () => { isQuitting = true; void discordPresence.dispose(); killServer(); killSuwayomi(); killCloudflareHelper(); process.exit(0); });

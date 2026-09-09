@@ -8,12 +8,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   minimize: () => ipcRenderer.invoke('window-minimize'),
   maximize: () => ipcRenderer.invoke('window-maximize'),
   close:    () => ipcRenderer.invoke('window-close'),
+  onBeforeWindowClose: (cb) => {
+    const listener = (_, payload) => cb(payload);
+    ipcRenderer.on('before-window-close', listener);
+    return () => ipcRenderer.removeListener('before-window-close', listener);
+  },
+  completeWindowCloseFlush: requestId => ipcRenderer.send('window-close-flush-complete', requestId),
 
   // Settings
   getCloseToTray:      () => ipcRenderer.invoke('get-close-to-tray'),
   setCloseToTray:      (v) => ipcRenderer.invoke('set-close-to-tray', v),
   getStartWithWindows: () => ipcRenderer.invoke('get-start-with-windows'),
   setStartWithWindows: (v) => ipcRenderer.send('set-start-with-windows', v),
+  getDiscordPresence: () => ipcRenderer.invoke('get-discord-presence'),
+  setDiscordPresenceEnabled: (v) => ipcRenderer.invoke('set-discord-presence-enabled', Boolean(v)),
+  retryDiscordPresence: () => ipcRenderer.invoke('retry-discord-presence'),
+  setDiscordPresenceMode: (mode) => ipcRenderer.invoke('set-discord-presence-mode', mode),
   getExtensionRepos:   () => ipcRenderer.invoke('get-extension-repos'),
   setExtensionRepos:   (repos) => ipcRenderer.invoke('set-extension-repos', repos),
 
@@ -31,6 +41,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('services-status', listener);
     return () => ipcRenderer.removeListener('services-status', listener);
   },
+  onDiscordPresenceStatus: (cb) => {
+    const listener = (_, state) => cb(state);
+    ipcRenderer.on('discord-presence-status', listener);
+    return () => ipcRenderer.removeListener('discord-presence-status', listener);
+  },
 
   // Windows service management
   checkService:     () => ipcRenderer.invoke('check-service'),
@@ -39,6 +54,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Paths / info
   openDataDir: () => ipcRenderer.invoke('open-data-dir'),
+  exportChapterCbz: (payload) => ipcRenderer.invoke('export-chapter-cbz', payload),
+  exportMangaCbz: (payload) => ipcRenderer.invoke('export-manga-cbz', payload),
   exportAppBackup: (payload) => ipcRenderer.invoke('export-app-backup', payload),
   importAppBackup: () => ipcRenderer.invoke('import-app-backup'),
   saveAutomaticBackup: (payload) => ipcRenderer.invoke('save-automatic-backup', payload),
@@ -49,6 +66,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // App version (reads from package.json via Electron — always accurate)
   getVersion:  () => ipcRenderer.invoke('get-version'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  showNotification: (payload) => ipcRenderer.invoke('show-notification', payload),
   getCloudflareHelperInfo: () => ipcRenderer.invoke('get-cloudflare-helper-info'),
   ensureCloudflareHelper: () => ipcRenderer.invoke('ensure-cloudflare-helper'),
   setupCloudflareHelper: () => ipcRenderer.invoke('setup-cloudflare-helper'),

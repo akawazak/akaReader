@@ -14,6 +14,8 @@ test('backup round-trip preserves supported app data and manga notes', () => {
     ['library', [{ id: '1', title: 'Example' }]],
     ['history', []],
     ['appSettings', { readerMode: 'paged' }],
+    ['chapterUpdateStateV1', { 'source__1': { initialized: true, knownIds: ['3'], newIds: [], checkedAt: 1 } }],
+    ['chapterUpdateSummaryV1', { checkedAt: 1, errors: 0, found: 0 }],
     ['aka:note:source__1', 'remember this'],
     ['private-token', 'must not leave storage'],
   ]);
@@ -32,6 +34,8 @@ test('backup round-trip preserves supported app data and manga notes', () => {
   const keys = applyAppBackup(backup, (key, value) => restored.set(key, value));
   assert.ok(keys.includes('library'));
   assert.deepEqual(restored.get('appSettings'), { readerMode: 'paged' });
+  assert.deepEqual(restored.get('chapterUpdateStateV1')['source__1'].knownIds, ['3']);
+  assert.equal(restored.get('chapterUpdateSummaryV1').checkedAt, 1);
 });
 
 test('legacy v2 exports remain restorable', () => {

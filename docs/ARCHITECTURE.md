@@ -55,7 +55,7 @@ The backend is a translator and stabilizer layer. It adds:
 
 The Express proxy binds to `127.0.0.1`, not every network interface. Electron generates a random API token for each app launch, passes it only to the backend process and trusted preload bridge, and the renderer supplies it in `X-AkaReader-Token`. Image elements use the same token as an `api_token` query parameter because they cannot attach custom headers. Electron allows roughly 30 seconds for the authenticated backend ping during cold startup because Windows security scanning can delay the utility process before it binds its loopback port. Backend entry files and production dependencies use separate Electron resource mappings; CI checks the unpacked package and then launches it on Windows and Linux, requiring the backend port to open before upload. The Linux job restores the unpacked Electron `chrome-sandbox` to root ownership and mode `4755` before its Xvfb smoke launch, matching the secure installed-package invariant instead of bypassing Chromium's sandbox. Electron performs the same file check at runtime, backs off repeated utility-process restarts, and turns a persistent crash loop into a visible repair issue.
 
-The backend rejects unapproved browser origins before route handling. Browser development remains supported from `http://localhost:5173` and `http://127.0.0.1:5173`; a standalone backend without `AKAREADER_API_TOKEN` remains available for local development but is still loopback-only and origin-restricted.
+The backend rejects unapproved browser origins before route handling. Browser development remains supported from `http://localhost:5173` and `http://127.0.0.1:5173`; a standalone backend without `AKAREADER_API_TOKEN` remains available for local development but is still loopback-only and origin-restricted. Packaged-runtime smoke tests launch with a temporary Chromium profile, preventing a developer's already-running app or stale profile lock from masking the package result while leaving the normal app data directory untouched.
 
 ## Electron Main Process
 
@@ -73,6 +73,7 @@ Responsibilities:
 - backend process startup via `utilityProcess.fork`
 - Suwayomi startup/health wait loop
 - updater integration with `electron-updater`
+- opt-in local Discord Rich Presence with generic browsing/reading states only
 - IPC handlers exposed through `preload.js`
 
 The preload contract in `manga-nexus/preload.js` gives the renderer access to:
@@ -86,12 +87,17 @@ The preload contract in `manga-nexus/preload.js` gives the renderer access to:
 - lazy, automatic managed FlareSolverr installation and process lifecycle for sources that still require Suwayomi's helper API after human verification
 - packaged app updater actions
 - system diagnostics/repair and native backup import/export actions
+- Discord Rich Presence enablement, retry, and generic renderer-mode updates
 
 Startup status delivery uses an explicit renderer-ready handshake. Electron queues status events while the window is loading; React first installs its listener and then signals readiness through preload IPC, at which point the queue is flushed. In managed desktop mode, the renderer does not begin health polling before the private backend exists. This prevents development and packaged launches from briefly presenting connection failures merely because the UI loaded faster than the local services. A restored cover request that still reaches the proxy early waits up to 30 seconds for connection-refused startup conditions while remaining cancellable.
 
 Java discovery executes each candidate with `java -version` and accepts Java 21.0.11 or newer. An older system Java is left untouched. akaReader downloads and uses a private current Temurin 21 runtime under its data directory, validates the staged runtime before replacing an older managed copy, and exposes a renderer recovery action if automatic installation fails. Structured service issues keep the detected version, required version, explanation, and available repair action together so startup failures do not collapse into a generic offline message. The cached Suwayomi JAR is migrated into `suwayomi-runtime/`, with a dedicated `work/` child as the process working directory. This keeps the server executable and work path isolated from the managed Java and Suwayomi data paths, avoiding a reproducible Windows package-scan failure during GraphQL initialization. Suwayomi's first launch can also download browser components, so the readiness wait allows up to ten minutes while relaying the component-download percentage to the startup screen.
 
 Extension discovery is initialized by Electron before Suwayomi starts. akaReader always writes the maintained Keiyoushi index to the current `server.extensionStores` setting, merges validated and deduplicated custom HTTP(S) stores from `electron-settings.json`, and removes the obsolete `server.extensionRepos` managed block if present. The writer replaces an entire multiline list, not just its opening line, and removes the orphaned quoted-entry/closing-bracket tail left by the earlier migration bug. Settings reads and writes this same main-process state through preload IPC; adding or removing a custom store restarts the managed services so the catalog is actually refreshed.
+
+## Discord Rich Presence
+
+Discord Rich Presence is deliberately optional and disabled by default. Its controller runs only in the Electron main process and uses the application's local Discord RPC connection; no bot token, OAuth flow, browser request, or backend route is involved. The renderer can request only a whitelisted `browsing` or `reading` mode. Electron converts that to `Browsing manga` or `Reading manga` and intentionally excludes manga titles, chapter names, source names, URLs, and reading history. A missing or closed Discord desktop client is reported in Settings without affecting reader or service behavior; the enabled integration retries locally after a bounded delay and clears the activity when disabled or when akaReader exits.
 
 ## App Update Flow
 
@@ -102,6 +108,8 @@ Packaged builds use `electron-updater` from the Electron main process. Before an
 Settings can request a full health report through the preload bridge. Electron performs bounded checks of the authenticated local API, compatible Java runtime, Suwayomi GraphQL endpoint, managed server JAR, writable/free data storage, and optional protected-source helper. The report contains user-facing statuses and repair hints but never exposes the per-launch API token. `Repair automatically` verifies packaged backend files, installs Java only when incompatible, repairs the JAR/config only when required, starts the helper only when it was previously enabled, and restarts the managed services.
 
 Manual backups use Electron save/open dialogs rather than renderer-created download links. The version 3 schema allowlists library, history, progress, categories, reading state/time, app settings, onboarding state, duplicate dismissals, and manga notes. Restore validates types and file size before writing local state, and still migrates the earlier version 2 export format. IndexedDB chapter image blobs are excluded because they can be hundreds of megabytes and are recoverable by downloading again.
+
+Chapter archive export also stays outside renderer memory. The preload bridge asks Electron to open a native save dialog for one chapter or a native folder picker for a whole manga. Electron validates and sanitizes the requested chapter metadata, streams the authenticated loopback backend's CBZ response directly to disk, removes partial files after failures, and selects a non-colliding filename during batch export.
 
 ## State Management
 
@@ -128,7 +136,7 @@ Persistence layers:
 - `localStorage`
   Stores app/user state such as library, progress, settings, and history.
 - IndexedDB
-  Stores offline chapter page payloads in the `chapters` object store.
+  Stores offline chapter page payloads plus compact source/title/chapter metadata in the `chapters` object store. Older page-only records remain readable; the Downloads storage manager derives byte/page totals at read time and can remove read chapters, one manga, or all offline copies in one transaction.
 - `localStorage` key `downloadQueueV1`
   Stores a bounded serializable queue manifest so interrupted downloads can be recovered after relaunch.
 
@@ -139,9 +147,13 @@ Network/service state:
 - `sources`
 - `extensions`
 - `updates`
+- `chapterUpdateStateV1`
+- `chapterUpdateSummaryV1`
 - `downloadQueue`
 
-Library update scans fetch each manga's current chapter list with bounded concurrency. Availability is calculated from stable chapter IDs: a chapter is considered unread when neither akaReader's `readChapters` state nor Suwayomi's `isRead` flag marks that ID as read. Chapter numbers and labels are presentation data only, so decimals, specials, and non-linear numbering do not affect update counts.
+Library update scans fetch each manga's current chapter list with bounded concurrency and force the backend to ask the source rather than accepting its ten-minute manga cache. `chapterUpdateStateV1` persists the known IDs plus compact metadata for pending new chapters per source/manga key; `chapterUpdateSummaryV1` persists the last scan time so relaunching does not reset the automatic schedule. The first successful scan establishes a baseline, later scans add only previously unseen IDs, read or removed chapters leave the pending set, and a failed title keeps its earlier notification while the UI reports the partial failure. The configurable one-shot timer reschedules from the last completed scan rather than stacking intervals. Automatic scans can raise a bounded main-process desktop notification and optionally enqueue only newly discovered chapters for the existing offline-download pipeline. Chapter numbers and labels remain presentation data, so decimals, specials, provider replacements, and non-linear numbering do not affect discovery.
+
+The Updates Center flattens pending releases into individual chapter rows with date/source/search filters and per-chapter open, download, and mark-read actions.
 
 Reading-stat totals use the unique chapter IDs stored in `readChapters` for each manga. They do not infer a total from the latest chapter label in `progress`.
 
@@ -165,10 +177,13 @@ Flow:
    - navigation callbacks
    - persisted initial page
 7. `Reader.jsx` derives a flattened `allPages` list from loaded chapters.
-8. In scroll/webtoon mode, an `IntersectionObserver` tracks the most visible page and persists progress.
-9. In paged mode, keyboard/tap/wheel handlers drive page changes directly.
+8. In scroll/webtoon mode, an `IntersectionObserver` tracks the most visible page and persists progress immediately to local storage through `DataProvider`.
+9. In paged mode, keyboard/tap/wheel handlers drive page changes directly. Zoom is available from 50% through 500% via toolbar buttons, the settings slider, keyboard shortcuts, and Ctrl+wheel; both pages in a double-page spread share the same zoom rules.
 10. When the reader nears the end, it may call `fetchNextChapter()` and append the next chapter into the same reading session.
 11. Reader-side next-chapter prefetch now uses an `AbortController` so stale prefetches can be canceled during teardown/navigation.
+12. Visibility loss, `pagehide`, explicit reader exit, and teardown synchronously checkpoint the current page and elapsed reading time. Continue resolution uses stable normalized chapter IDs and never advances merely because a chapter is marked read.
+13. Native close requests use a renderer acknowledgement handshake. Electron sends `before-window-close`, the renderer dispatches a synchronous reader flush and acknowledges it through the preload bridge, and Electron then hides or quits. A 400 ms timeout prevents a broken renderer from trapping the window.
+14. The settings drawer is an accessible modal dialog: focus enters on its close control, returns to the settings trigger, and sliders, switches, segmented controls, themes, and toolbar toggles expose their current state.
 
 ## Chapter Fetching / Loading
 
@@ -180,11 +195,12 @@ Route:
 
 Backend behavior:
 
-- tries `fetchManga`
-- falls back to direct `manga(id)` query
-- tries chapter list query
-- falls back to `fetchChapters`
-- normalizes chapter metadata for the renderer
+- serves the source-aware ten-minute cache for ordinary repeated requests
+- on a cache miss, tries `fetchManga` and actively runs `fetchChapters`
+- falls back to direct `manga(id)` and stored chapter queries only when a normal source refresh fails
+- accepts `?force=1` for manual/update checks, bypasses cache, and returns an error instead of pretending stale chapters were refreshed
+- normalizes upload timestamps to ISO `publishedAt` values while retaining the compatibility date label and scanlation group
+- reports `chapterListRefreshedAt` only after the source chapter fetch succeeds
 
 ### Chapter pages
 
@@ -239,6 +255,7 @@ The extension list is rendered by `ExtensionsTab.jsx`, which owns its search/fil
 5. `App.jsx` revokes old blob URLs when pages change or the reader flow unmounts.
 6. Queue state is persisted after transitions. A job that was `downloading` at shutdown is restored as `pending`, waits for backend health, and resumes. Transient failures retry with bounded delay; source-verification, client, and low-storage failures remain visible for manual action.
 7. `navigator.storage.estimate()` reserves headroom before a chapter starts, and the IndexedDB write remains one transaction so a failed save cannot publish a partial chapter.
+8. Downloads reads record metadata and Blob sizes without materializing object URLs, groups usage per manga, and shows both exact akaReader offline bytes and the browser origin's overall quota usage.
 
 Important note: offline cache storage is renderer-managed, not backend-managed.
 
@@ -285,6 +302,8 @@ Important consequences:
 - view transitions depend on coordinated state updates, not route URLs
 
 Source browse results also own their pagination state in `App.jsx`. The first page renders immediately, then a short-delay sequential loop fetches and appends later pages until the source returns `hasNextPage: false`. Each search owns an `AbortController` and monotonically increasing request ID, so a source/search/view change cannot commit a stale response. Background loading pauses while the document is hidden, keeps already-rendered results through transient later-page failures, and retries those failures with bounded backoff. Page merging uses source-and-manga identity to remove duplicates; a page that makes no unique progress terminates pagination even if a faulty source continues reporting another page. Pagination is intentionally not tied to viewport intersection, so users can scroll through already-prefetched results instead of waiting at the bottom.
+
+The Library keeps user categories and smart views as separate filters, so they can be combined. Continue, Updated, Offline, and Completed are set/key membership checks; Unread uses pending updates first and otherwise compares unique read chapter IDs with a known total. Search and sort run after both category and smart-view filtering.
 
 ## Important Dependencies
 

@@ -33,6 +33,7 @@ akareader/
    |  `- check-hook-order.mjs
    |- test/
    |  |- chapterTracking.test.mjs
+   |  |- readerProgress.test.mjs
    |  `- sourceErrors.test.mjs
    |- public/
    |  |- icon.ico
@@ -48,6 +49,7 @@ akareader/
       |  `- DataContext.jsx
       |- utils/
       |  |- helpers.js
+      |  |- readerProgress.mjs
       |  `- sourceErrors.mjs
       |- views/
       |  `- HomeView.jsx
@@ -72,7 +74,7 @@ akareader/
 - `AGENTS.md`
   AI-specific project memory and repo-handling instructions.
 - `README.md`
-  Public project overview, development commands, packaging notes, and monetization guidance.
+  Public project overview, development commands, and packaging notes.
 - `docs/`
   Durable internal documentation for architecture, risks, workflows, and file ownership.
 - `docs/PUBLISHING.md`
@@ -119,6 +121,7 @@ akareader/
   - automatic on-demand, platform-pinned Windows/Linux x64 FlareSolverr download, size/SHA-256 verification, lazy loopback startup, PID cleanup, Suwayomi configuration/restart, and embedded-verification clearance-cookie detection
   - built-in/custom extension-store validation, persistence, and configuration
   - updater
+  - optional generic Discord Rich Presence through local desktop RPC; titles, chapters, sources, and history are never sent
   - native backup dialogs, automatic pre-update backup rotation, system diagnostics, and conditional repair
   - tray/window lifecycle
   - Windows service installation
@@ -130,6 +133,12 @@ akareader/
 
 - `manga-nexus/runtime/source-verification.cjs`
   Pure source-page readiness classification plus embedded-view bounds, used to distinguish Cloudflare/Turnstile and login states from meaningful content or a stable same-host post-challenge loader before the in-app verification surface is removed.
+
+- `manga-nexus/runtime/discord-presence.cjs`
+  Pure optional Discord local-RPC controller that limits activity payloads to generic browsing or reading states and safely reconnects without blocking the app.
+
+- `manga-nexus/test/discordPresence.test.mjs`
+  Regression coverage for generic-only activity data, configured application IDs, disable cleanup, unavailable Discord handling, and mode allowlisting.
 
 - `manga-nexus/test/sourceVerification.test.mjs`
   Regression coverage for automatic return-to-app readiness, post-challenge source loaders, visible challenges, login forms, unrelated redirects, and in-window verification bounds.
@@ -152,7 +161,7 @@ akareader/
 - `manga-nexus/scripts/check-packaged-runtime.mjs`
   Verifies the unpacked Electron release contains the backend entry points and required production packages before CI uploads it.
 - `manga-nexus/scripts/smoke-packaged-runtime.mjs`
-  Launches the platform's actual unpacked executable, requires its loopback backend port to open, retains a bounded startup-output tail on failure, and terminates the test process tree; CI runs it on Windows and under Xvfb on Linux.
+  Launches the platform's actual unpacked executable with an isolated temporary Chromium profile, requires its loopback backend port to open, retains a bounded startup-output tail on failure, removes that profile, and terminates the test process tree; CI runs it on Windows and under Xvfb on Linux.
 
 ### Renderer Core
 
@@ -174,21 +183,31 @@ akareader/
 - `manga-nexus/src/utils/helpers.js`
   Shared helper utilities, still partially duplicated in `App.jsx`.
 - `manga-nexus/src/utils/chapterTracking.mjs`
-  Pure chapter-ID helpers used for accurate reading totals and unread-update detection.
+  Pure chapter-ID helpers used for accurate reading totals and provider read-state comparisons.
+- `manga-nexus/src/utils/chapterUpdates.mjs`
+  Persistent known/new chapter reconciliation, compact pending-release metadata, automatic-check scheduling, and calendar-aware release-age labels.
 - `manga-nexus/src/utils/browsePagination.mjs`
   Pure source-result merge, duplicate detection, retry classification, and bounded-delay helpers.
 - `manga-nexus/runtime/cloudflare-helper.cjs`
   Describes the managed FlareSolverr launch environment and reusable Suwayomi browser session, pins official Windows x64 and Linux x64 assets, gives Linux a private XDG session, disables unnecessary headless-browser media, and provides the exact shared driver path used for narrowly scoped stale-process cleanup on Windows.
 - `manga-nexus/runtime/backend-runtime.cjs`
   Shared required-file manifest used by Electron's local-service preflight and the post-package CI gate.
+- `manga-nexus/runtime/chapter-export.cjs`
+  Pure validation and filesystem-safe naming for native chapter/manga CBZ export.
 - `manga-nexus/src/utils/sourceErrors.mjs`
   Renderer-side normalization for structured or legacy source failures, producing compact verification/error states.
 - `manga-nexus/src/utils/downloadQueue.mjs`
   Pure persisted-queue normalization, interrupted-job recovery, storage headroom checks, and byte formatting.
+- `manga-nexus/src/utils/downloadStorage.mjs`
+  Download-key parsing plus per-manga byte/page/read-state summaries used by the offline storage manager.
+- `manga-nexus/src/utils/libraryFilters.mjs`
+  Stable smart-library predicates and counts for Continue, Unread, Updated, Offline, and Completed views.
 - `manga-nexus/src/utils/appBackup.mjs`
   Versioned allowlist, validation, legacy-v2 migration, and restore helpers for app-state backups.
 - `manga-nexus/test/downloadQueue.test.mjs`
   Regression coverage for interrupted-job recovery, cancelled-job pruning, and storage reserve decisions.
+- `manga-nexus/test/downloadStorage.test.mjs`, `libraryFilters.test.mjs`, `chapterExport.test.mjs`
+  Regression coverage for storage summaries and cleanup keys, smart-library membership/counts, and safe CBZ export requests/filenames.
 - `manga-nexus/test/appBackup.test.mjs`
   Regression coverage for safe backup round trips, manga notes, legacy exports, and malformed input.
 - `manga-nexus/test/browsePagination.test.mjs`
@@ -199,6 +218,16 @@ akareader/
   Regression coverage for complete and incomplete packaged backend detection.
 - `manga-nexus/test/chapterTracking.test.mjs`
   Regression tests for duplicate IDs, malformed state, decimal/special labels, provider read flags, and replaced chapter IDs.
+- `manga-nexus/test/chapterUpdates.test.mjs`
+  Regression coverage for first-scan baselines, newly discovered IDs, persisted release metadata, pending-release cleanup, scheduling delays, and calendar-day date labels.
+- `manga-nexus/test/readerProgress.test.mjs`
+  Regression coverage for exact Continue resume, mixed numeric/string chapter IDs, removed-provider chapters, and stored offline metadata.
+- `manga-nexus/test/readerZoom.test.mjs`
+  Regression coverage for clamped 50%-500% zoom, step precision, and invalid persisted zoom values.
+- `manga-nexus/test/readerAccessibility.test.mjs`
+  Static contract coverage for the settings dialog, labelled controls, switch state, and focus entry/return behavior.
+- `manga-nexus/test/windowLifecycle.test.mjs`
+  Regression coverage for close-to-tray decisions, bounded renderer-flush timeout, and the Electron/preload acknowledgement wiring.
 - `manga-nexus/test/sourceErrors.test.mjs`
   Regression coverage proving raw Suwayomi stack traces never become user-facing source error copy.
 
@@ -207,14 +236,25 @@ akareader/
 - `manga-nexus/src/components/reader/Reader.jsx`
   Reader session runtime:
   - paged/scroll/webtoon modes
-  - progress persistence
+  - synchronous page and reading-time checkpoints on navigation, hide, and teardown
+  - 50%-500% zoom controls, keyboard shortcuts, Ctrl+wheel, and double-spread zoom
   - next-chapter loading
   - keyboard/touch interaction
+- `manga-nexus/src/utils/readerProgress.mjs`
+  Pure Continue-target and known-total progress helpers shared by home/history and manga-detail entry paths.
+- Manga detail and Updates surfaces in `manga-nexus/src/App.jsx`
+  Force-refresh controls, source-check timestamps/errors, exact and relative release dates, scanlation groups, a chapter-level Updates Center, configurable automatic checks, notifications, auto-download, and persisted new-release badges.
+- `manga-nexus/src/utils/readerZoom.mjs`
+  Shared reader zoom limits, step size, and defensive clamping.
+- `manga-nexus/runtime/window-lifecycle.cjs`
+  Pure Electron close-action policy and the bounded renderer-flush timeout constant.
 - `manga-nexus/src/components/extensions/ExtensionsTab.jsx`
   Extension management UI:
   - search/filter/sort controls
   - incremental extension list rendering
   - install/update/remove row actions
+- `manga-nexus/src/components/downloads/StorageManager.jsx`
+  Exact offline byte/page totals, quota visibility, per-title cleanup, delete-read, and delete-all controls.
 - `manga-nexus/src/components/manga/MangaCard.jsx`
   Shared card/list-card presentation used by library, browse, and history surfaces.
 - `manga-nexus/src/views/HomeView.jsx`

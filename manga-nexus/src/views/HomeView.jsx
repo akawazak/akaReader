@@ -1,6 +1,7 @@
 import React, { memo, useState, useMemo, useRef } from 'react';
 import { BookOpen, Clock, Play, Sparkles, BellRing, ChevronRight, ChevronLeft, Globe, Download, Library, Pen, Puzzle } from 'lucide-react';
 import { timeAgo, proxyImg } from '../utils/helpers';
+import { calculateMangaProgressPercent } from '../utils/readerProgress.mjs';
 import { Btn } from '../components/ui/Btn';
 import { MangaCard } from '../components/manga/MangaCard';
 
@@ -35,7 +36,7 @@ const HeroRow = memo(({ title, icon: Icon, items, progress, getMangaKey, onSelec
         <div ref={scrollRef} style={{ display: 'flex', gap: 20, overflowX: 'auto', paddingBottom: 16, scrollbarWidth: 'none', msOverflowStyle: 'none', scrollSnapType: 'x mandatory' }}>
           {items.map((m, i) => (
             <div key={getMangaKey(m.id, m.sourceId)} style={{ width: 180, minWidth: 180, flexShrink: 0, scrollSnapAlign: 'start' }}>
-              <MangaCard manga={m} onClick={onSelect} index={i} eager badge={showTime && m.lastRead ? timeAgo(m.lastRead) : null} category={m.categoryId} progress={(progress[getMangaKey(m.id, m.sourceId)]?.chapterNum / (m.totalChapters || 100)) * 100 || 0} />
+              <MangaCard manga={m} onClick={onSelect} index={i} eager badge={showTime && m.lastRead ? timeAgo(m.lastRead) : null} category={m.categoryId} progress={calculateMangaProgressPercent(m, progress[getMangaKey(m.id, m.sourceId)]) || 0} />
             </div>
           ))}
         </div>
@@ -50,6 +51,7 @@ export const HomeView = memo(({ history, library, progress, sources, updates, ge
   const continueReading = useMemo(() => history.filter(m => progress[getMangaKey(m.id, m.sourceId)]).slice(0, 15), [history, progress, getMangaKey]);
   const recentLib = useMemo(() => [...library].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0)).slice(0, 20), [library]);
   const heroProgress = hero && progress[getMangaKey(hero.id, hero.sourceId)] ? progress[getMangaKey(hero.id, hero.sourceId)] : null;
+  const heroProgressPercent = calculateMangaProgressPercent(hero, heroProgress);
   const sourceCount = Object.keys(sources).length;
 
   if (!hero && library.length === 0) return (
@@ -139,15 +141,15 @@ export const HomeView = memo(({ history, library, progress, sources, updates, ge
                       </div>
                     </div>
                     {/* Floating Progress Bar */}
-                    <div style={{ position: 'absolute', bottom: 30, right: -20, background: 'rgba(10,12,20,0.65)', backdropFilter: 'blur(30px) saturate(2)', border: '1px solid rgba(255,255,255,0.15)', padding: '16px 20px', borderRadius: 20, boxShadow: '0 24px 48px rgba(0,0,0,0.6)', transform: 'translateZ(50px)', zIndex: 19, width: 220 }}>
+                    {heroProgressPercent !== null && <div style={{ position: 'absolute', bottom: 30, right: -20, background: 'rgba(10,12,20,0.65)', backdropFilter: 'blur(30px) saturate(2)', border: '1px solid rgba(255,255,255,0.15)', padding: '16px 20px', borderRadius: 20, boxShadow: '0 24px 48px rgba(0,0,0,0.6)', transform: 'translateZ(50px)', zIndex: 19, width: 220 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8, fontSize: 13, fontWeight: 700, color: '#fff' }}>
                         <span>Progress</span>
-                        <span style={{ color: 'var(--accent)' }}>{Math.round((heroProgress.chapterNum / (hero.totalChapters || 100)) * 100)}%</span>
+                        <span style={{ color: 'var(--accent)' }}>{Math.round(heroProgressPercent)}%</span>
                       </div>
                       <div style={{ height: 6, background: 'rgba(255,255,255,0.1)', borderRadius: 3, overflow: 'hidden' }}>
-                        <div style={{ width: `${Math.min((heroProgress.chapterNum / (hero.totalChapters || 100)) * 100, 100)}%`, height: '100%', background: 'linear-gradient(90deg, var(--accent), #fbd38d)', borderRadius: 3, boxShadow: '0 0 12px var(--accent-glow)' }} />
+                        <div style={{ width: `${heroProgressPercent}%`, height: '100%', background: 'linear-gradient(90deg, var(--accent), #fbd38d)', borderRadius: 3, boxShadow: '0 0 12px var(--accent-glow)' }} />
                       </div>
-                    </div>
+                    </div>}
                   </>
                 )}
               </div>

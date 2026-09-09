@@ -19,11 +19,14 @@ akaReader gives you a native, offline-capable reading experience with a built-in
 ### Library
 - **Personal library** — add manga to your own collection
 - **Categories** — organize with custom tags
+- **Smart views** — instantly filter Continue, Unread, Updated, Offline, and Completed titles
 - **Search & browse** — explore any Suwayomi source and extension
 
 ### Offline
 - **Download chapters** — save pages to IndexedDB
 - **Crash-safe download queue** — interrupted chapters resume after relaunch and transient failures retry automatically
+- **Storage manager** — see exact offline size/page totals and clean up read, per-title, or all cached chapters
+- **CBZ export** — save one chapter or export a manga's chapters to a chosen desktop folder
 - **Read anywhere** — chapters load from local storage, no network needed
 - **Cover and metadata** — cached alongside chapter data
 
@@ -36,6 +39,7 @@ akaReader gives you a native, offline-capable reading experience with a built-in
 - **One-click health check** — identifies and repairs local API, Java, Suwayomi, storage, and helper issues
 - **System tray** — minimize to tray, keep Suwayomi running
 - **Source verification** — handles browser-challenge sites (Cloudflare, etc.)
+- **Optional Discord Rich Presence** — shows only generic browsing/reading activity; titles, chapters, sources, and history stay private
 
 ---
 
@@ -145,18 +149,9 @@ Settings are stored in `localStorage` and cover:
 - Image quality and preload behavior
 - Library view preferences
 - App-level preferences (tray, minimize behavior)
+- Optional generic Discord Rich Presence (off by default)
 
 Suwayomi source extensions are managed through the app's Extensions tab.
-
----
-
-## Monetization
-
-akaReader is free and open source. If you want to support development:
-
-- GitHub Sponsors
-- Ko-fi
-- Convenience features (themes, encrypted settings sync) — never content access
 
 The app does not provide manga content. It depends on user-installed Suwayomi extensions and their upstream sites.
 

@@ -121,6 +121,11 @@ body, #root {
   -webkit-backdrop-filter: blur(40px) saturate(200%);
 }
 
+[data-theme="light"] .glass-strong {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
 .text-gradient {
   background: linear-gradient(135deg, var(--accent) 0%, #ff8a00 50%, #ffd000 100%);
   -webkit-background-clip: text; 

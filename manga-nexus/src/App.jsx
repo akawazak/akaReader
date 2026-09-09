@@ -11,7 +11,7 @@ import {
   Columns, Filter, Tag, TrendingUp, Calendar, Eye, EyeOff, Zap,
   MoreVertical, Share2, ExternalLink, Archive, Star, Flame, Activity,
   ChevronUp, ChevronDown, ZoomIn, ZoomOut, Settings, Sliders, BellRing,
-  SlidersHorizontal, Coffee, AlertCircle, RotateCcw, ChevronRightCircle,
+  SlidersHorizontal, AlertCircle, RotateCcw, ChevronRightCircle,
   Pen, Sparkles, Bookmark, Award, StickyNote, Pencil, Pause, Settings2, Plus,
   AlignJustify
 } from 'lucide-react';
@@ -20,7 +20,8 @@ import { Reader as NewReader } from './components/reader/Reader';
 import { HomeView as HomeTab } from './views/HomeView';
 import { DataContext, useData } from './contexts/DataContext';
 import { ExtensionsTab } from './components/extensions/ExtensionsTab';
-import { countReadChapterIds, getUnreadChapterIds } from './utils/chapterTracking.mjs';
+import { StorageManager } from './components/downloads/StorageManager';
+import { countReadChapterIds } from './utils/chapterTracking.mjs';
 import {
   AUTO_BROWSE_MAX_RETRIES,
   autoBrowseRetryDelay,
@@ -37,6 +38,19 @@ import {
   storageCapacityResult,
 } from './utils/downloadQueue.mjs';
 import { applyAppBackup, createAppBackup } from './utils/appBackup.mjs';
+import { resolveContinueTarget } from './utils/readerProgress.mjs';
+import { downloadedMangaKeys } from './utils/downloadStorage.mjs';
+import {
+  SMART_LIBRARY_FILTERS,
+  matchesSmartLibraryFilter,
+  smartLibraryCounts,
+} from './utils/libraryFilters.mjs';
+import {
+  chapterUpdateBaseline,
+  formatRelativeChapterDate,
+  nextChapterUpdateDelay,
+  reconcileChapterUpdateState,
+} from './utils/chapterUpdates.mjs';
 
 // ==================== CONFIG & CONSTANTS ====================
 
@@ -72,6 +86,14 @@ const CONFIG = {
   DEBOUNCE_DELAY: 300,
   UPDATE_INTERVAL: 3600000,
 };
+const UPDATE_INTERVAL_OPTIONS = Object.freeze([
+  { value: 0, label: 'Manual only' },
+  { value: 15 * 60 * 1000, label: 'Every 15 minutes' },
+  { value: 30 * 60 * 1000, label: 'Every 30 minutes' },
+  { value: 60 * 60 * 1000, label: 'Every hour' },
+  { value: 3 * 60 * 60 * 1000, label: 'Every 3 hours' },
+  { value: 6 * 60 * 60 * 1000, label: 'Every 6 hours' },
+]);
 const BROWSE_DEFAULT_FILTERS = Object.freeze({ sort: 'latest' });
 
 const proxyImg = (url) => {
@@ -180,8 +202,6 @@ const SORT_OPTIONS = [
 
 // ==================== UTILITY FUNCTIONS ====================
 
-const timeAgo = (ts) => { if (!ts) return ''; const d = Date.now() - ts, m = Math.floor(d / 60000), h = Math.floor(d / 3600000), dy = Math.floor(d / 86400000); if (m < 1) return 'just now'; if (m < 60) return `${m}m ago`; if (h < 24) return `${h}h ago`; if (dy < 7) return `${dy}d ago`; return `${Math.floor(dy / 7)}w ago`; };
-
 const storage = {
   get: (key, defaultValue) => {
     try {
@@ -238,192 +258,6 @@ const GlobalStyles = memo(({ appTheme, accentColor }) => {
     document.documentElement.style.setProperty('--accent2', `rgb(${d(r)},${d(g)},${d(b)})`);
     document.documentElement.style.setProperty('--accent-glow', `rgba(${r},${g},${b},0.3)`);
   }, [accentColor]);
-
-  useEffect(() => {
-    return;
-    const style = document.createElement('style');
-    style.textContent = `
-      @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&display=swap');
-
-      :root {
-        --font-display: 'Outfit', 'Segoe UI Variable Display', system-ui, sans-serif;
-        --font-body:    'Outfit', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
-        --bg:           #07080d;
-        --bg2:          #0c0e15;
-        --bg3:          #111420;
-        --card:         #111520;
-        --card2:        #181c2a;
-        --card-hover:   #1e2235;
-        --elevated:     #1a1e2e;
-        --border:       rgba(255,255,255,0.06);
-        --border-mid:   rgba(255,255,255,0.1);
-        --border-hover: rgba(249,115,22,0.55);
-        --text:         #eceef5;
-        --text-dim:     #9199b1;
-        --muted:        #555e7a;
-        --muted-fg:     #7880a0;
-        --accent:       #f97316;
-        --accent2:      #ea580c;
-        --accent-pale:  rgba(249,115,22,0.1);
-        --accent-mid:   rgba(249,115,22,0.4);
-        --accent-glow:  rgba(249,115,22,0.28);
-        --green:  #34d399; --green-bg:  rgba(52,211,153,0.12);
-        --red:    #f87171; --red-bg:    rgba(248,113,113,0.12);
-        --blue:   #60a5fa; --blue-bg:   rgba(96,165,250,0.12);
-        --yellow: #fbbf24; --yellow-bg: rgba(251,191,36,0.12);
-        --r-xs: 6px; --r-sm: 9px; --r-md: 13px; --r-lg: 18px; --r-xl: 24px; --r-2xl: 32px;
-        --shadow-sm:   0 2px 8px rgba(0,0,0,0.4);
-        --shadow-md:   0 6px 24px rgba(0,0,0,0.5);
-        --shadow-lg:   0 16px 48px rgba(0,0,0,0.65);
-        --shadow-glow: 0 8px 32px rgba(249,115,22,0.22);
-        --ease-spring: cubic-bezier(0.16,1,0.3,1);
-        --ease-out:    cubic-bezier(0,0,0.2,1);
-        --t-fast:  140ms; --t-base: 260ms; --t-slow: 440ms;
-      }
-
-      [data-theme="light"] {
-        --bg:#f0f2f8; --bg2:#e6e9f2; --bg3:#dde1ef;
-        --card:#ffffff; --card2:#f4f5fb; --card-hover:#eceef8; --elevated:#f8f9fd;
-        --border:rgba(0,0,0,0.07); --border-mid:rgba(0,0,0,0.12); --border-hover:rgba(249,115,22,0.5);
-        --text:#0f1628; --text-dim:#3a4060; --muted:#9098b5; --muted-fg:#7880a0;
-        --accent:#f97316; --accent2:#ea580c; --accent-pale:rgba(249,115,22,0.09);
-        --shadow-sm:0 2px 8px rgba(0,0,0,0.07); --shadow-md:0 6px 24px rgba(0,0,0,0.1);
-      }
-
-      *, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
-      html { scroll-behavior:smooth; }
-      body, #root {
-        min-height:100vh; background:var(--bg); color:var(--text);
-        font-family:var(--font-body); font-size:14px; line-height:1.5;
-        -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;
-      }
-
-      ::-webkit-scrollbar          { width:5px; height:5px; }
-      ::-webkit-scrollbar-track    { background:transparent; }
-      ::-webkit-scrollbar-thumb    { background:rgba(249,115,22,0.35); border-radius:99px; }
-      ::-webkit-scrollbar-thumb:hover { background:rgba(249,115,22,0.6); }
-
-      @keyframes fadeIn      { from{opacity:0}              to{opacity:1} }
-      @keyframes fadeInUp    { from{opacity:0;transform:translateY(18px)} to{opacity:1;transform:none} }
-      @keyframes fadeInDown  { from{opacity:0;transform:translateY(-10px)} to{opacity:1;transform:none} }
-      @keyframes slideInLeft { from{opacity:0;transform:translateX(-16px)} to{opacity:1;transform:none} }
-      @keyframes scaleIn     { from{opacity:0;transform:scale(.94)} to{opacity:1;transform:none} }
-      @keyframes spin        { to{transform:rotate(360deg)} }
-      @keyframes pulse       { 0%,100%{opacity:1} 50%{opacity:.45} }
-      @keyframes glow        { 0%,100%{box-shadow:0 0 8px rgba(249,115,22,0.3)} 50%{box-shadow:0 0 18px rgba(249,115,22,0.65)} }
-      @keyframes shimmer     { 0%{background-position:-400% 0} 100%{background-position:400% 0} }
-      @keyframes toastIn     { from{transform:translateX(110%);opacity:0} to{transform:none;opacity:1} }
-      @keyframes dlIn        { from{opacity:0;transform:translateX(-12px) scale(.98)} to{opacity:1;transform:none} }
-      @keyframes dlOut       { from{opacity:1;max-height:80px} to{opacity:0;max-height:0;margin:0;padding:0} }
-      @keyframes bounceIn    { 0%{opacity:0;transform:scale(.5) translateY(20px)} 70%{transform:scale(1.05)} 100%{opacity:1;transform:none} }
-      @keyframes progressPulse { 0%,100%{box-shadow:0 0 6px rgba(249,115,22,.4)} 50%{box-shadow:0 0 14px rgba(249,115,22,.8)} }
-      ${Array.from({ length: 18 }, (_, i) => `.delay-${i}{animation-delay:${i * 45}ms}`).join(';')}
-
-      .anim-fadeIn      { animation:fadeIn      var(--t-fast)  var(--ease-out) both }
-      .anim-fadeInUp    { animation:fadeInUp    var(--t-base)  var(--ease-spring) both }
-      .anim-slideLeft   { animation:slideInLeft var(--t-base)  var(--ease-spring) both }
-      .anim-slideDown   { animation:fadeInDown  var(--t-fast)  var(--ease-spring) both }
-      .anim-scaleIn     { animation:scaleIn     var(--t-base)  var(--ease-spring) both }
-      .anim-spin        { animation:spin  .8s   linear         infinite }
-      .anim-pulse       { animation:pulse 2s    ease           infinite }
-      .anim-shimmer     {
-        background:linear-gradient(90deg,rgba(255,255,255,0.02) 0%,rgba(255,255,255,0.07) 50%,rgba(255,255,255,0.02) 100%);
-        background-size:400% 100%;
-        animation:shimmer 2s linear infinite;
-      }
-      [data-theme="light"] .anim-shimmer {
-        background:linear-gradient(90deg,rgba(0,0,0,0.04) 0%,rgba(0,0,0,0.08) 50%,rgba(0,0,0,0.04) 100%);
-        background-size:400% 100%;
-      }
-      .dl-item  { animation:dlIn  .26s var(--ease-spring) both }
-      .dl-out   { animation:dlOut .22s var(--ease-out)    both }
-      .dl-bar-active { animation:progressPulse 1.6s ease-in-out infinite }
-      .fab-back { animation:bounceIn .3s var(--ease-spring) both }
-      .page-transition { animation:fadeInUp .28s var(--ease-spring) both }
-
-      .glass       { background:rgba(17,18,28,0.82); backdrop-filter:blur(18px) saturate(1.6); border:1px solid var(--border); }
-      .glass-strong{ background:rgba(9,10,17,0.97);  backdrop-filter:blur(28px) saturate(1.8); border-bottom:1px solid var(--border); }
-      [data-theme="light"] .glass       { background:rgba(255,255,255,0.82); }
-      [data-theme="light"] .glass-strong{ background:rgba(255,255,255,0.98); border-color:rgba(0,0,0,0.07); }
-
-      .text-gradient {
-        background:linear-gradient(135deg, var(--accent) 0%, #fb923c 45%, #fbbf24 100%);
-        -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text;
-      }
-      .gradient-primary { background:linear-gradient(135deg, var(--accent) 0%, var(--accent2) 100%); }
-
-      ::selection { background:rgba(249,115,22,0.22); color:inherit; }
-      *:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:4px; }
-      .hover-lift { transition:transform var(--t-base) var(--ease-spring), box-shadow var(--t-base); }
-      .hover-lift:hover { transform:translateY(-3px); box-shadow:var(--shadow-glow); }
-
-      .nav-bar {
-        position:absolute; left:0; top:50%; transform:translateY(-50%);
-        width:3px; height:20px; background:var(--accent); border-radius:0 3px 3px 0;
-        box-shadow:0 0 12px var(--accent), 0 0 24px rgba(249,115,22,0.2);
-      }
-
-      .toast-enter { animation:toastIn .38s var(--ease-spring) both }
-
-      /* Improved Range Slider Styling for Settings & Reader */
-      input[type="range"] {
-        -webkit-appearance: none;
-        appearance: none;
-        background: transparent;
-        cursor: pointer;
-        width: 100%;
-        margin: 10px 0;
-      }
-      input[type="range"]:focus {
-        outline: none;
-      }
-      input[type="range"]::-webkit-slider-runnable-track {
-        background: rgba(255,255,255,0.1);
-        height: 10px;
-        border-radius: 99px;
-        border: 1px solid rgba(0,0,0,0.2);
-      }
-      input[type="range"]::-webkit-slider-thumb {
-        -webkit-appearance: none;
-        margin-top: -7px;
-        width: 24px;
-        height: 24px;
-        border-radius: 50%;
-        background: var(--accent);
-        border: 2px solid var(--bg);
-        box-shadow: 0 0 12px var(--accent-glow), 0 2px 4px rgba(0,0,0,0.5);
-        transition: transform 0.1s ease, box-shadow 0.1s ease;
-      }
-      input[type="range"]::-webkit-slider-thumb:hover {
-        transform: scale(1.15);
-        box-shadow: 0 0 16px var(--accent-glow), 0 4px 8px rgba(0,0,0,0.5);
-      }
-      input[type="range"]:active::-webkit-slider-thumb {
-        transform: scale(1.05);
-      }
-      
-      select option { background:#111520; color:var(--text); }
-      [data-theme="light"] select option { background:#ffffff; color:#0f1628; }
-
-      .ch-row { transition:background .14s; }
-      .ch-row:hover { background:var(--card2) !important; }
-      .ch-row:active { background:var(--elevated) !important; }
-
-      .manga-card { transition:transform .22s var(--ease-spring), box-shadow .22s; }
-      .manga-card:hover { transform:translateY(-5px) scale(1.03); box-shadow:0 18px 44px rgba(0,0,0,0.5), 0 0 0 1px rgba(249,115,22,0.15); }
-      .manga-card:active { transform:translateY(-2px) scale(1.01); }
-
-      @media (prefers-reduced-motion:reduce) { *, *::before, *::after { animation-duration:.01ms !important; transition-duration:.01ms !important; } }
-    `;
-    document.head.appendChild(style);
-
-    document.title = 'akaReader';
-    const fav = document.createElement('link');
-    fav.rel = 'icon';
-    fav.href = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%23f97316'/><path d='M8 8h10l6 6v10H8z' fill='white' opacity='.9'/><path d='M18 8v6h6' fill='none' stroke='white' stroke-width='1.5'/></svg>";
-    document.head.appendChild(fav);
-    return () => { document.head.removeChild(style); document.head.removeChild(fav); };
-  }, []);
   return null;
 });
 
@@ -532,27 +366,50 @@ const DataProvider = memo(({ children }) => {
   const [sources, setSources] = useState({});
   const [extensions, setExtensions] = useState([]);
   const [library, setLibrary] = useState(() => storage.get('library', []));
+  const libraryRef = useRef(library);
+  libraryRef.current = library;
   const [history, setHistory] = useState(() => storage.get('history', []));
   const [progress, setProgress] = useState(() => storage.get('progress', {}));
+  const progressRef = useRef(progress);
+  progressRef.current = progress;
   const [mangaCategories, setMangaCategories] = useState(() => storage.get('mangaCategories', {}));
   const [categories, setCategories] = useState(() => storage.get('categories', DEFAULT_CATEGORIES));
   useEffect(() => storage.set('categories', categories), [categories]);
   const [readChapters, setReadChapters] = useState(() => storage.get('readChapters', {}));
+  const readChaptersRef = useRef(readChapters);
+  readChaptersRef.current = readChapters;
   const [installing, setInstalling] = useState(new Set());
   const [readingTime, setReadingTime] = useState(() => storage.get('readingTime', {}));
+  const readingTimeRef = useRef(readingTime);
+  readingTimeRef.current = readingTime;
   const [settings, setSettingsState] = useState(() => storage.get('appSettings', {
     readerMode: 'scroll', brightness: 100, fitMode: 'height', theme: 'dark',
-    sidebarCollapsed: false, libraryView: 'grid', tagSearchMode: 'source', appTheme: 'dark', repos: []
+    sidebarCollapsed: false, libraryView: 'grid', tagSearchMode: 'source', appTheme: 'dark', repos: [],
+    chapterUpdateInterval: CONFIG.UPDATE_INTERVAL, notifyNewChapters: true, autoDownloadNewChapters: false,
   }));
-  const [updates, setUpdates] = useState([]);
+  const [updates, setUpdates] = useState(() => {
+    const savedState = storage.get('chapterUpdateStateV1', {});
+    return storage.get('library', []).flatMap(manga => {
+      const newChapterIds = savedState[getMangaKey(manga.id, manga.sourceId)]?.newIds || [];
+      const newChapterDetails = savedState[getMangaKey(manga.id, manga.sourceId)]?.newChapters || newChapterIds.map(id => ({ id }));
+      return newChapterIds.length > 0 ? [{ ...manga, newChapters: newChapterIds.length, newChapterIds, newChapterDetails }] : [];
+    });
+  });
   const [checkingUpdates, setCheckingUpdates] = useState(false);
+  const [chapterUpdateState, setChapterUpdateState] = useState(() => storage.get('chapterUpdateStateV1', {}));
+  const chapterUpdateStateRef = useRef(chapterUpdateState);
+  chapterUpdateStateRef.current = chapterUpdateState;
+  const updateScanPromiseRef = useRef(null);
+  const [updateCheckSummary, setUpdateCheckSummary] = useState(() => storage.get('chapterUpdateSummaryV1', { checkedAt: 0, errors: 0, found: 0 }));
   const [suwayomiReady, setSuwayomiReady] = useState(false);
   const [downloadedKeys, setDownloadedKeys] = useState(new Set());
+  const [downloadedChapters, setDownloadedChapters] = useState([]);
 
   const refreshDownloads = useCallback(async () => {
     try {
-      const keys = await listDownloadedKeys();
-      setDownloadedKeys(new Set(keys));
+      const records = await listDownloadedChapterRecords();
+      setDownloadedChapters(records);
+      setDownloadedKeys(new Set(records.map(record => record.key)));
       window.dispatchEvent(new CustomEvent('downloads-updated'));
     } catch (e) { console.error('Failed to refresh downloads:', e); }
   }, []);
@@ -560,6 +417,10 @@ const DataProvider = memo(({ children }) => {
   useEffect(() => {
     refreshDownloads();
   }, [refreshDownloads]);
+
+  useEffect(() => {
+    storage.set('chapterUpdateSummaryV1', updateCheckSummary);
+  }, [updateCheckSummary]);
 
   const [downloadQueue, setDownloadQueue] = useState(() => (
     normalizeDownloadQueue(storage.get(DOWNLOAD_QUEUE_STORAGE_KEY, []))
@@ -627,6 +488,7 @@ const DataProvider = memo(({ children }) => {
   useEffect(() => storage.set('mangaCategories', mangaCategories), [mangaCategories]);
   useEffect(() => storage.set('readChapters', readChapters), [readChapters]);
   useEffect(() => storage.set('readingTime', readingTime), [readingTime]);
+  useEffect(() => storage.set('chapterUpdateStateV1', chapterUpdateState), [chapterUpdateState]);
   useEffect(() => storage.set('appSettings', settings), [settings]);
 
   const fetchJSON = useCallback(async (url, opts = {}, retries = 2) => {
@@ -765,15 +627,24 @@ const DataProvider = memo(({ children }) => {
   }, [fetchJSON, fetchExtensions, fetchSources]);
 
   const toggleLibrary = useCallback((manga, sourceId) => {
-    setLibrary(prev => {
-      const exists = prev.find(m => String(m.id) === String(manga.id) && String(m.sourceId) === String(sourceId));
-      if (exists) {
-        toastRef.current?.('Removed from library', 'warning');
-        return prev.filter(m => !(String(m.id) === String(manga.id) && String(m.sourceId) === String(sourceId)));
-      }
-      toastRef.current?.('Added to library', 'success');
-      return [{ id: manga.id, title: manga.title, cover: manga.cover, sourceId, addedAt: Date.now() }, ...prev];
-    });
+    const exists = libraryRef.current.some(m => String(m.id) === String(manga.id) && String(m.sourceId) === String(sourceId));
+    const mangaKey = getMangaKey(manga.id, sourceId);
+    if (exists) {
+      setLibrary(prev => prev.filter(m => !(String(m.id) === String(manga.id) && String(m.sourceId) === String(sourceId))));
+      setChapterUpdateState(prev => {
+        const next = { ...prev };
+        delete next[mangaKey];
+        return next;
+      });
+      setUpdates(prev => prev.filter(item => getMangaKey(item.id, item.sourceId) !== mangaKey));
+      toastRef.current?.('Removed from library', 'warning');
+      return;
+    }
+    setLibrary(prev => [{ id: manga.id, title: manga.title, cover: manga.cover, sourceId, addedAt: Date.now() }, ...prev]);
+    if (Array.isArray(manga.chapters)) {
+      setChapterUpdateState(prev => ({ ...prev, [mangaKey]: chapterUpdateBaseline(manga.chapters) }));
+    }
+    toastRef.current?.('Added to library', 'success');
   }, []);
 
 
@@ -793,7 +664,7 @@ const DataProvider = memo(({ children }) => {
   const addToHistory = useCallback((manga, sourceId, details) => {
     setHistory(prev => {
       const filtered = prev.filter(m => !(String(m.id) === String(manga.id) && String(m.sourceId) === String(sourceId)));
-      return [{ id: manga.id, title: details?.title || manga.title, cover: details?.cover || manga.cover, sourceId, author: details?.author, lastRead: Date.now() }, ...filtered].slice(0, 100);
+      return [{ id: manga.id, title: details?.title || manga.title, cover: details?.cover || manga.cover, sourceId, author: details?.author, totalChapters: details?.totalChapters || manga.totalChapters, lastRead: Date.now() }, ...filtered].slice(0, 100);
     });
   }, []);
 
@@ -831,25 +702,31 @@ const DataProvider = memo(({ children }) => {
       delete next[mKey];
       return next;
     });
+    setChapterUpdateState(prev => {
+      const next = { ...prev };
+      delete next[mKey];
+      return next;
+    });
+    setUpdates(prev => prev.filter(item => getMangaKey(item.id, item.sourceId) !== mKey));
     deleteAllChapterBlobsForManga(mKey).then(refreshDownloads);
-  }, [getMangaKey, refreshDownloads]);
+  }, [refreshDownloads]);
 
   const updateProgress = useCallback((mangaId, chapterId, chapterNum, page, sourceId) => {
     if (!mangaId) return;
     const key = getMangaKey(mangaId, sourceId);
     const now = Date.now();
-    setProgress(prev => {
-      const current = prev[key];
-      if (
-        current?.chapterId === chapterId &&
-        current?.chapterNum === chapterNum &&
-        current?.page === page &&
-        now - (current?.lastRead || 0) < 2000
-      ) {
-        return prev;
-      }
-      return { ...prev, [key]: { chapterId, chapterNum, page, lastRead: now } };
-    });
+    const current = progressRef.current[key];
+    if (
+      String(current?.chapterId ?? '') === String(chapterId ?? '') &&
+      String(current?.chapterNum ?? '') === String(chapterNum ?? '') &&
+      current?.page === page &&
+      now - (current?.lastRead || 0) < 2000
+    ) return;
+
+    const next = { ...progressRef.current, [key]: { chapterId, chapterNum, page, lastRead: now } };
+    progressRef.current = next;
+    storage.set('progress', next);
+    setProgress(next);
     setHistory(prev => prev.map(m => getMangaKey(m.id, m.sourceId) === key ? { ...m, lastRead: now } : m));
     setLibrary(prev => prev.map(m => getMangaKey(m.id, m.sourceId) === key ? { ...m, lastRead: now } : m));
   }, []);
@@ -867,12 +744,42 @@ const DataProvider = memo(({ children }) => {
     if (isRead && settings?.autoDeleteRead) {
       deleteChapterBlobs(getMangaKey(mangaId, sourceId), chapterId).then(refreshDownloads);
     }
-  }, [settings?.autoDeleteRead, getMangaKey, refreshDownloads]);
+    if (isRead) {
+      const key = getMangaKey(mangaId, sourceId);
+      setChapterUpdateState(prev => {
+        const current = prev[key];
+        if (!current?.newIds?.includes(String(chapterId))) return prev;
+        return {
+          ...prev,
+          [key]: {
+            ...current,
+            newIds: current.newIds.filter(id => String(id) !== String(chapterId)),
+            newChapters: (current.newChapters || []).filter(chapter => String(chapter.id) !== String(chapterId)),
+          },
+        };
+      });
+      setUpdates(prev => prev.map(manga => {
+        if (getMangaKey(manga.id, manga.sourceId) !== key) return manga;
+        const newChapterIds = (manga.newChapterIds || []).filter(id => String(id) !== String(chapterId));
+        return {
+          ...manga,
+          newChapters: newChapterIds.length,
+          newChapterIds,
+          newChapterDetails: (manga.newChapterDetails || []).filter(chapter => String(chapter.id) !== String(chapterId)),
+        };
+      }).filter(manga => (manga.newChapterIds || []).length > 0));
+    }
+  }, [settings?.autoDeleteRead, refreshDownloads]);
 
   const addReadingTime = useCallback((mangaId, seconds, sourceId) => {
     if (!mangaId || seconds <= 0) return;
     const key = getMangaKey(mangaId, sourceId);
-    setReadingTime(prev => ({ ...prev, [key]: (prev[key] || 0) + seconds }));
+    const elapsed = Math.floor(seconds);
+    if (elapsed <= 0) return;
+    const next = { ...readingTimeRef.current, [key]: (readingTimeRef.current[key] || 0) + elapsed };
+    readingTimeRef.current = next;
+    storage.set('readingTime', next);
+    setReadingTime(next);
   }, []);
 
   const updateSetting = useCallback((key, value) => {
@@ -886,6 +793,11 @@ const DataProvider = memo(({ children }) => {
 
       const oldKey = getMangaKey(oldManga.id, oldManga.sourceId);
       const newKey = getMangaKey(newItem.id, newSource.id);
+      setChapterUpdateState(prev => {
+        const next = { ...prev, [newKey]: chapterUpdateBaseline(newMangaDetail.chapters) };
+        delete next[oldKey];
+        return next;
+      });
 
       // 1. Progress
       const oldProg = progress[oldKey];
@@ -917,12 +829,11 @@ const DataProvider = memo(({ children }) => {
       setReadChapters(prev => { const n = { ...prev }; delete n[oldKey]; return n; });
 
       return true;
-    } catch (e) {
+    } catch {
       return false;
     }
-  }, [fetchJSON, progress, library, mangaCategories, getMangaKey]);
+  }, [fetchJSON, progress, library, mangaCategories]);
 
-  const updateToastedRef = useRef(false);
   const cancelDownload = useCallback((id) => {
     setDownloadQueue(prev => prev.map(d => {
       if (d.id !== id) return d;
@@ -938,7 +849,8 @@ const DataProvider = memo(({ children }) => {
     ));
   }, []);
 
-  const queueChaptersForDownload = useCallback((chapters, mangaId, mangaTitle, sourceId) => {
+  const queueChaptersForDownload = useCallback((chapters, mangaId, mangaTitle, sourceId, options = {}) => {
+    const silent = options?.silent === true;
     navigator.storage?.persist?.().catch(() => {});
     const sorted = [...chapters].sort((a, b) => parseFloat(a.number) - parseFloat(b.number));
     const mangaKey = getMangaKey(mangaId, sourceId);
@@ -956,11 +868,14 @@ const DataProvider = memo(({ children }) => {
         .map(d => d.downloadKey || getDownloadKey(getMangaKey(d.mangaId, d.sourceId), d.chapterId)));
       downloadedKeys.forEach(key => existing.add(String(key)));
       const toAdd = newItems.filter(item => !existing.has(item.downloadKey));
-      if (!toAdd.length) { toastRef.current?.('All selected chapters already queued or downloaded', 'warning'); return prev; }
-      toastRef.current?.(`Queued ${toAdd.length} chapters for download`, 'info');
+      if (!toAdd.length) {
+        if (!silent) toastRef.current?.('All selected chapters already queued or downloaded', 'warning');
+        return prev;
+      }
+      if (!silent) toastRef.current?.(`Queued ${toAdd.length} chapters for download`, 'info');
       return [...prev, ...toAdd];
     });
-  }, [downloadedKeys, getMangaKey]);
+  }, [downloadedKeys]);
   useEffect(() => {
     clearTimeout(dlWakeTimerRef.current);
     dlWakeTimerRef.current = null;
@@ -1008,7 +923,12 @@ const DataProvider = memo(({ children }) => {
           const pct = Math.round(done / urls.length * 100);
           setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, progress: pct, pagesLoaded: done } : d));
         });
-        await saveChapterBlobs(getMangaKey(pending.mangaId, pending.sourceId), pending.chapterId, blobs);
+        await saveChapterBlobs(getMangaKey(pending.mangaId, pending.sourceId), pending.chapterId, blobs, {
+          mangaId: pending.mangaId,
+          mangaTitle: pending.mangaTitle,
+          sourceId: pending.sourceId,
+          chapterNum: pending.chapterNum,
+        });
         await refreshDownloads();
         setDownloadQueue(prev => prev.map(d => d.id === pending.id ? { ...d, status: 'done', progress: 100, error: null, updatedAt: Date.now() } : d));
         toastRef.current?.(`Ch. ${pending.chapterNum} of "${pending.mangaTitle}" saved`, 'success');
@@ -1038,45 +958,134 @@ const DataProvider = memo(({ children }) => {
         setDownloadQueue(prev => [...prev]);
       }
     })();
-  }, [backendOnline, downloadQueue, fetchJSON, getMangaKey, refreshDownloads]);
+  }, [backendOnline, downloadQueue, fetchJSON, refreshDownloads]);
   useEffect(() => () => {
     clearTimeout(dlWakeTimerRef.current);
     dlAbortRef.current?.abort();
   }, []);
 
-  const checkForUpdates = useCallback(async () => {
-    if (library.length === 0) return;
-    setCheckingUpdates(true);
-    try {
-      const scanResults = await mapWithConcurrency(library, UPDATE_SCAN_CONCURRENCY, async (manga) => {
-        try {
-          const source = sources[manga.sourceId];
-          if (!source) return null;
-          const data = await fetchJSON(`/source/${source.id}/manga/${manga.id}`);
-          if (data.error) return null;
-          const mKey = getMangaKey(manga.id, manga.sourceId);
-          const unreadChapterIds = getUnreadChapterIds(data.chapters, readChapters[mKey]);
-          if (unreadChapterIds.length > 0) {
-            return { ...manga, newChapters: unreadChapterIds.length };
+  const checkForUpdates = useCallback((options = {}) => {
+    if (updateScanPromiseRef.current) return updateScanPromiseRef.current;
+    const notify = options?.notify === true;
+    const background = options?.background === true;
+    const run = async () => {
+      if (library.length === 0) {
+        setUpdates([]);
+        setUpdateCheckSummary({ checkedAt: Date.now(), errors: 0, found: 0 });
+        return { checked: 0, errors: 0, found: 0 };
+      }
+
+      setCheckingUpdates(true);
+      const checkedAt = Date.now();
+      try {
+        const previousState = chapterUpdateStateRef.current;
+        const scanResults = await mapWithConcurrency(library, UPDATE_SCAN_CONCURRENCY, async manga => {
+          const mangaKey = getMangaKey(manga.id, manga.sourceId);
+          try {
+            const source = sources[manga.sourceId] || Object.values(sources).find(item => String(item.id) === String(manga.sourceId));
+            if (!source) throw new Error('Source extension is unavailable');
+            const data = await fetchJSON(`/source/${encodeURIComponent(source.id)}/manga/${encodeURIComponent(manga.id)}?force=1`, {}, 0);
+            const reconciliation = reconcileChapterUpdateState({
+              chapters: data.chapters,
+              previous: previousState[mangaKey],
+              readChapterIds: readChaptersRef.current[mangaKey],
+              checkedAt,
+            });
+            const pendingIds = new Set(reconciliation.state.newIds);
+            const latestReleaseAt = reconciliation.state.newChapters.reduce((latest, chapter) => {
+              if (!pendingIds.has(String(chapter.id)) || !chapter.publishedAt) return latest;
+              return !latest || new Date(chapter.publishedAt) > new Date(latest) ? chapter.publishedAt : latest;
+            }, '');
+            const discoveredIdSet = new Set(reconciliation.discoveredIds);
+            return {
+              ok: true,
+              mangaKey,
+              state: reconciliation.state,
+              discovered: reconciliation.discoveredIds.length,
+              discoveredChapters: reconciliation.state.newChapters.filter(chapter => discoveredIdSet.has(String(chapter.id))),
+              update: reconciliation.state.newIds.length > 0 ? {
+                ...manga,
+                newChapters: reconciliation.state.newIds.length,
+                newChapterIds: reconciliation.state.newIds,
+                newChapterDetails: reconciliation.state.newChapters,
+                latestReleaseAt,
+              } : null,
+            };
+          } catch (error) {
+            return { ok: false, mangaKey, manga, error: error?.message || 'Update check failed' };
           }
-        } catch (e) {
-          // Ignore individual source failures so one broken extension does not block the update scan.
+        });
+
+        const nextState = { ...previousState };
+        const nextUpdates = [];
+        let found = 0;
+        let errors = 0;
+        for (const result of scanResults) {
+          if (!result?.ok) {
+            errors += 1;
+            const pendingIds = previousState[result?.mangaKey]?.newIds || [];
+            if (pendingIds.length > 0 && result?.manga) {
+              nextUpdates.push({
+                ...result.manga,
+                newChapters: pendingIds.length,
+                newChapterIds: pendingIds,
+                newChapterDetails: previousState[result.mangaKey]?.newChapters || pendingIds.map(id => ({ id })),
+              });
+            }
+            continue;
+          }
+          nextState[result.mangaKey] = result.state;
+          found += result.discovered;
+          if (result.update) nextUpdates.push(result.update);
         }
-        return null;
-      });
-      setUpdates(scanResults.filter(Boolean));
-    } finally {
-      setCheckingUpdates(false);
-    }
-  }, [library, sources, fetchJSON, readChapters, getMangaKey]);
+        chapterUpdateStateRef.current = nextState;
+        storage.set('chapterUpdateStateV1', nextState);
+        setChapterUpdateState(nextState);
+        setUpdates(nextUpdates);
+        setUpdateCheckSummary({ checkedAt, errors, found });
+
+        if (settings?.autoDownloadNewChapters) {
+          for (const result of scanResults) {
+            if (!result?.ok || !result.discoveredChapters?.length) continue;
+            queueChaptersForDownload(result.discoveredChapters, result.update?.id, result.update?.title || result.manga?.title, result.update?.sourceId, { silent: true });
+          }
+        }
+
+        if (background && found > 0 && settings?.notifyNewChapters !== false) {
+          const titles = nextUpdates.slice(0, 2).map(item => item.title).filter(Boolean);
+          const extra = nextUpdates.length > titles.length ? ` and ${nextUpdates.length - titles.length} more` : '';
+          window.electronAPI?.showNotification?.({
+            title: 'New chapters available',
+            body: `${found} new chapter${found === 1 ? '' : 's'}${titles.length ? ` · ${titles.join(', ')}${extra}` : ''}`,
+          });
+        }
+
+        if (notify) {
+          const issueSuffix = errors ? ` ${errors} title${errors === 1 ? '' : 's'} could not be checked.` : '';
+          if (found > 0) toastRef.current?.(`Found ${found} new chapter${found === 1 ? '' : 's'}.${issueSuffix}`, errors ? 'warning' : 'success');
+          else if (errors === library.length) toastRef.current?.('Update check failed for every source. Try again after checking your connection.', 'error');
+          else toastRef.current?.(`No new chapters found.${issueSuffix}`, errors ? 'warning' : 'success');
+        }
+        return { checked: library.length - errors, errors, found };
+      } finally {
+        setCheckingUpdates(false);
+      }
+    };
+
+    const promise = run().finally(() => {
+      if (updateScanPromiseRef.current === promise) updateScanPromiseRef.current = null;
+    });
+    updateScanPromiseRef.current = promise;
+    return promise;
+  }, [library, sources, fetchJSON, queueChaptersForDownload, settings?.autoDownloadNewChapters, settings?.notifyNewChapters]);
 
   useEffect(() => {
-    if (library.length > 0 && backendOnline) {
-      checkForUpdates();
-      const interval = setInterval(checkForUpdates, CONFIG.UPDATE_INTERVAL);
-      return () => clearInterval(interval);
-    }
-  }, [library, backendOnline, checkForUpdates]);
+    const intervalMs = Number(settings?.chapterUpdateInterval ?? CONFIG.UPDATE_INTERVAL);
+    if (library.length === 0 || !backendOnline || Object.keys(sources).length === 0 || intervalMs <= 0) return undefined;
+    const delay = nextChapterUpdateDelay({ intervalMs, lastCheckedAt: updateCheckSummary.checkedAt });
+    const timer = setTimeout(() => checkForUpdates({ background: true }), Math.max(250, delay || 0));
+    return () => clearTimeout(timer);
+  }, [library.length, backendOnline, sources, settings?.chapterUpdateInterval, updateCheckSummary.checkedAt, checkForUpdates]);
 
   useEffect(() => {
     const managedStartup = !!window.electronAPI?.ensureServices;
@@ -1105,7 +1114,7 @@ const DataProvider = memo(({ children }) => {
 
   const value = useMemo(() => ({
     backendOnline, sources, extensions, library, history, progress,
-    mangaCategories, installing, readingTime, settings, updates, checkingUpdates,
+    mangaCategories, installing, readingTime, settings, updates, checkingUpdates, updateCheckSummary,
     readChapters, suwayomiReady, setSuwayomiReady,
     downloadQueue, setDownloadQueue, overlayHidden, setOverlayHidden,
     fetchJSON, checkHealth, fetchSources, fetchExtensions,
@@ -1114,9 +1123,9 @@ const DataProvider = memo(({ children }) => {
     updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates, handleMigrate,
     queueChaptersForDownload, cancelDownload, cancelActiveDownloads,
     addCategory, removeCategory, categories,
-    getMangaKey, downloadedKeys, refreshDownloads,
+    getMangaKey, downloadedKeys, downloadedChapters, refreshDownloads,
     inLibrary: (id, sourceId) => library.some(m => String(m.id) === String(id) && (sourceId ? String(m.sourceId) === String(sourceId) : true))
-  }), [backendOnline, sources, extensions, library, history, progress, mangaCategories, installing, readingTime, settings, updates, checkingUpdates, readChapters, suwayomiReady, setSuwayomiReady, downloadQueue, overlayHidden, fetchJSON, checkHealth, fetchSources, fetchExtensions, installExt, uninstallExt, updateExt, toggleLibrary, setCategory, addToHistory, removeFromHistory, removeMangaCompletely, updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates, handleMigrate, queueChaptersForDownload, cancelDownload, cancelActiveDownloads, addCategory, removeCategory, categories, downloadedKeys, refreshDownloads]);
+  }), [backendOnline, sources, extensions, library, history, progress, mangaCategories, installing, readingTime, settings, updates, checkingUpdates, updateCheckSummary, readChapters, suwayomiReady, setSuwayomiReady, downloadQueue, overlayHidden, fetchJSON, checkHealth, fetchSources, fetchExtensions, installExt, uninstallExt, updateExt, toggleLibrary, setCategory, addToHistory, removeFromHistory, removeMangaCompletely, updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates, handleMigrate, queueChaptersForDownload, cancelDownload, cancelActiveDownloads, addCategory, removeCategory, categories, downloadedKeys, downloadedChapters, refreshDownloads]);
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 });
@@ -1410,6 +1419,8 @@ const SettingsPage = memo(() => {
   const [diagnosticsWorking, setDiagnosticsWorking] = useState(false);
   const [repairWorking, setRepairWorking] = useState(false);
   const [backupWorking, setBackupWorking] = useState(false);
+  const [discordPresence, setDiscordPresence] = useState({ enabled: false, mode: 'browsing', status: 'unsupported' });
+  const [discordPresenceWorking, setDiscordPresenceWorking] = useState(false);
 
   const saveExtensionRepos = useCallback(async (nextRepos, successMessage) => {
     if (!window.electronAPI?.setExtensionRepos) {
@@ -1434,6 +1445,37 @@ const SettingsPage = memo(() => {
       setRepoWorking(false);
     }
   }, [toast, updateSetting]);
+
+  const setDiscordPresenceEnabled = useCallback(async (enabled) => {
+    const api = window.electronAPI;
+    if (!api?.setDiscordPresenceEnabled) {
+      toast('Discord Rich Presence is available in the desktop app', 'warning');
+      return;
+    }
+    setDiscordPresenceWorking(true);
+    try {
+      const next = await api.setDiscordPresenceEnabled(enabled);
+      if (next) setDiscordPresence(next);
+      if (!enabled) toast('Discord Rich Presence turned off', 'info');
+    } catch {
+      toast('Could not update Discord Rich Presence', 'error');
+    } finally {
+      setDiscordPresenceWorking(false);
+    }
+  }, [toast]);
+
+  const retryDiscordPresence = useCallback(async () => {
+    if (!window.electronAPI?.retryDiscordPresence) return;
+    setDiscordPresenceWorking(true);
+    try {
+      const next = await window.electronAPI.retryDiscordPresence();
+      if (next) setDiscordPresence(next);
+    } catch {
+      toast('Discord could not be reached. Make sure the desktop app is open.', 'warning');
+    } finally {
+      setDiscordPresenceWorking(false);
+    }
+  }, [toast]);
 
   useEffect(() => {
     let unsub = null;
@@ -1489,6 +1531,17 @@ const SettingsPage = memo(() => {
     return () => {
       if (typeof unsub === 'function') unsub();
     };
+  }, []);
+
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api?.getDiscordPresence) return undefined;
+    api.getDiscordPresence().then(state => {
+      if (state) setDiscordPresence(state);
+    }).catch(() => {});
+    return api.onDiscordPresenceStatus?.(state => {
+      if (state) setDiscordPresence(state);
+    });
   }, []);
 
   const installedExtCount = useMemo(() => {
@@ -1589,11 +1642,19 @@ const SettingsPage = memo(() => {
     </div>
   );
 
-  const Toggle = ({ value, onChange }) => (
-    <button onClick={() => onChange(!value)} style={{ width: 48, height: 26, borderRadius: 13, background: value ? 'var(--accent)' : 'rgba(255,255,255,0.12)', border: 'none', cursor: 'pointer', position: 'relative', transition: 'background 0.3s' }}>
+  const Toggle = ({ value, onChange, ariaLabel, disabled = false }) => (
+    <button type="button" role="switch" aria-label={ariaLabel} aria-checked={value} aria-disabled={disabled} disabled={disabled} onClick={() => { if (!disabled) onChange(!value); }} style={{ width: 48, height: 26, borderRadius: 13, background: value ? 'var(--accent)' : 'rgba(255,255,255,0.12)', border: 'none', cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1, position: 'relative', transition: 'background 0.3s' }}>
       <div style={{ position: 'absolute', top: 3, left: value ? 22 : 3, width: 20, height: 20, borderRadius: '50%', background: '#fff', transition: 'left 0.3s', boxShadow: '0 2px 6px rgba(0,0,0,0.3)' }} />
     </button>
   );
+
+  const discordStatusCopy = {
+    connected: 'Connected',
+    connecting: 'Connecting to Discord…',
+    unavailable: 'Discord desktop is not running',
+    disabled: 'Off',
+    unsupported: 'Available in the desktop app',
+  }[discordPresence.status] || 'Unable to connect';
 
   const checkAppUpdate = async () => {
     if (!window.electronAPI?.checkForAppUpdate) {
@@ -1825,7 +1886,7 @@ const SettingsPage = memo(() => {
           </div>
         </Row>
         <Row label="Sidebar Collapsed" sub="Start with sidebar minimized">
-          <Toggle value={settings?.sidebarCollapsed || false} onChange={v => updateSetting('sidebarCollapsed', v)} />
+          <Toggle ariaLabel="Start with sidebar collapsed" value={settings?.sidebarCollapsed || false} onChange={v => updateSetting('sidebarCollapsed', v)} />
         </Row>
       </Section>
 
@@ -1951,9 +2012,52 @@ const SettingsPage = memo(() => {
         </div>
       </Section>
 
+      <Section title="🔔 Chapter Updates">
+        <div style={{ padding: '12px 16px', background: 'rgba(249,115,22,0.06)', borderRadius: 12, border: '1px solid rgba(249,115,22,0.15)', fontSize: 12, color: 'var(--muted)', lineHeight: 1.65 }}>
+          akaReader checks every library title directly against its source. Checks continue while the app is minimized to the tray.
+        </div>
+        <Row label="Automatic checks" sub="Choose how often to look for new chapters">
+          <select
+            aria-label="Automatic chapter update interval"
+            value={Number(settings?.chapterUpdateInterval ?? CONFIG.UPDATE_INTERVAL)}
+            onChange={event => updateSetting('chapterUpdateInterval', Number(event.target.value))}
+            style={{ background: 'var(--card2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 9, padding: '8px 10px', fontSize: 12, outline: 'none' }}
+          >
+            {UPDATE_INTERVAL_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+        </Row>
+        <Row label="Desktop notifications" sub="Notify you only when an automatic check discovers a new chapter">
+          <Toggle ariaLabel="Desktop notifications" value={settings?.notifyNewChapters !== false} onChange={value => updateSetting('notifyNewChapters', value)} />
+        </Row>
+        <Row label="Auto-download new chapters" sub="Queue newly discovered chapters for offline reading; disabled by default">
+          <Toggle ariaLabel="Auto-download new chapters" value={!!settings?.autoDownloadNewChapters} onChange={value => updateSetting('autoDownloadNewChapters', value)} />
+        </Row>
+      </Section>
+
+      <Section title="🟣 Discord">
+        <div style={{ padding: '12px 16px', background: 'rgba(88,101,242,0.09)', borderRadius: 12, border: '1px solid rgba(88,101,242,0.25)', fontSize: 12, color: 'var(--muted)', lineHeight: 1.65 }}>
+          When enabled, Discord only sees whether you are browsing manga or reading manga. Manga titles, chapter names, sources, and reading history stay private.
+        </div>
+        <Row label="Discord Rich Presence" sub={discordStatusCopy}>
+          <Toggle
+            ariaLabel="Discord Rich Presence"
+            value={discordPresence.enabled}
+            disabled={!window.electronAPI?.setDiscordPresenceEnabled || discordPresenceWorking}
+            onChange={setDiscordPresenceEnabled}
+          />
+        </Row>
+        {discordPresence.enabled && discordPresence.status !== 'connected' && window.electronAPI?.retryDiscordPresence && (
+          <Row label="Discord connection" sub="Keep the Discord desktop app open, then try again.">
+            <Btn variant="outline" size="sm" disabled={discordPresenceWorking} onClick={retryDiscordPresence}>
+              {discordPresenceWorking ? <><Spin size={13} /> Connecting…</> : <><RefreshCw size={13} /> Retry</>}
+            </Btn>
+          </Row>
+        )}
+      </Section>
+
       <Section title="⚠️ Data Management">
         <Row label="Auto-Delete Read Chapters" sub="Automatically remove offline downloaded chapters when you finish reading them">
-          <Toggle value={settings?.autoDeleteRead || false} onChange={v => updateSetting('autoDeleteRead', v)} />
+          <Toggle ariaLabel="Auto-delete read chapters" value={settings?.autoDeleteRead || false} onChange={v => updateSetting('autoDeleteRead', v)} />
         </Row>
         <Row label="Clear Reading History" sub={`${history.length} entries`}>
           <Btn variant="danger" size="sm" onClick={() => setConfirmClear('history')}><Trash2 size={14} /> Clear</Btn>
@@ -1969,6 +2073,7 @@ const SettingsPage = memo(() => {
       <Section title="🖥️ App Behavior">
         <Row label="Close to Tray" sub="Closing the window keeps the app running in the system tray instead of quitting">
           <Toggle
+            ariaLabel="Close to tray"
             value={settings?.closeToTray !== false}
             onChange={v => {
               updateSetting('closeToTray', v);
@@ -1979,6 +2084,7 @@ const SettingsPage = memo(() => {
         {window.electronAPI?.setStartWithWindows && (
           <Row label="Start with Windows" sub="Launch akaReader automatically when you log in">
             <Toggle
+              ariaLabel="Start with Windows"
               value={!!settings?.startWithWindows}
               onChange={v => {
                 updateSetting('startWithWindows', v);
@@ -2083,18 +2189,6 @@ const SettingsPage = memo(() => {
         </Row>
         <p style={{ fontSize: 11, color: 'var(--muted)', padding: '0 4px', lineHeight: 1.6 }}>Before an app update downloads, akaReader also keeps a private safety backup in the data folder and retains the latest five.</p>
       </Section>
-      <Section title="☕ Support Development">
-        <div style={{ padding: '20px', background: 'var(--card)', borderRadius: 14, border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
-          <div>
-            <p style={{ fontWeight: 700, fontSize: 14, color: 'var(--text)', marginBottom: 4 }}>Enjoying akaReader?</p>
-            <p style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.6 }}>If this app saves you time or brings you joy,<br />a coffee would be greatly appreciated!</p>
-          </div>
-          <a href="https://ko-fi.com/akawazak" target="_blank" rel="noreferrer" style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '10px 22px', borderRadius: 12, background: 'linear-gradient(135deg,#ff5e5b,#ff8c42)', color: '#fff', fontWeight: 700, fontSize: 13, textDecoration: 'none', boxShadow: '0 4px 16px rgba(255,94,91,0.3)', flexShrink: 0 }}>
-            <Coffee size={16} /> Buy me a coffee
-          </a>
-        </div>
-      </Section>
-
       {confirmClear && (
         <div className="anim-fadeIn" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 20, padding: 32, maxWidth: 380, width: '90%', textAlign: 'center' }}>
@@ -2253,27 +2347,145 @@ const GlobalSearch = memo(({ sources, onSelectManga, onClose, fetchJSON }) => {
 // ==================== UPDATES TAB ====================
 
 const UpdatesTab = memo(({ onOpenManga }) => {
-  const { updates, checkingUpdates, checkForUpdates, getMangaKey } = useData();
+  const {
+    updates, checkingUpdates, checkForUpdates, updateCheckSummary, sources,
+    markChapterRead, fetchJSON, queueChaptersForDownload, settings,
+  } = useData();
+  const [range, setRange] = useState('all');
+  const [sourceFilter, setSourceFilter] = useState('all');
+  const [searchValue, setSearchValue] = useState('');
+  const lastCheckedLabel = updateCheckSummary?.checkedAt
+    ? new Date(updateCheckSummary.checkedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : '';
+  const releases = useMemo(() => updates.flatMap(manga => {
+    const details = manga.newChapterDetails?.length
+      ? manga.newChapterDetails
+      : (manga.newChapterIds || []).map(id => ({ id }));
+    return details.map(chapter => ({ manga, chapter }));
+  }).sort((a, b) => {
+    const aTime = new Date(a.chapter.publishedAt || 0).getTime() || 0;
+    const bTime = new Date(b.chapter.publishedAt || 0).getTime() || 0;
+    return bTime - aTime;
+  }), [updates]);
+  const sourceChoices = useMemo(() => [...new Set(releases.map(item => String(item.manga.sourceId)))].map(id => ({
+    id,
+    name: sources[id]?.name || Object.values(sources).find(source => String(source.id) === id)?.name || 'Unknown source',
+  })), [releases, sources]);
+  const filteredReleases = useMemo(() => {
+    const normalizedSearch = searchValue.trim().toLowerCase();
+    const now = Date.now();
+    return releases.filter(({ manga, chapter }) => {
+      if (sourceFilter !== 'all' && String(manga.sourceId) !== sourceFilter) return false;
+      const publishedAt = new Date(chapter.publishedAt || '').getTime();
+      if (range === 'today' && (!publishedAt || now - publishedAt > 86400000)) return false;
+      if (range === 'week' && (!publishedAt || now - publishedAt > 7 * 86400000)) return false;
+      if (!normalizedSearch) return true;
+      return [manga.title, chapter.number, chapter.name, chapter.group]
+        .some(value => String(value || '').toLowerCase().includes(normalizedSearch));
+    });
+  }, [releases, range, sourceFilter, searchValue]);
+
+  const markReleaseRead = useCallback(({ manga, chapter }) => {
+    markChapterRead(manga.id, chapter.id, true, manga.sourceId);
+    fetchJSON(`/chapter/${encodeURIComponent(chapter.id)}/read`, {
+      method: 'PATCH',
+      body: JSON.stringify({ isRead: true }),
+    }).catch(() => {});
+  }, [markChapterRead, fetchJSON]);
+
+  const markVisibleRead = useCallback(() => {
+    filteredReleases.forEach(markReleaseRead);
+  }, [filteredReleases, markReleaseRead]);
 
   return (
     <div className="page-transition">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <h2 style={{ fontSize: 18, fontWeight: 600 }}>Manga with Unread Chapters</h2>
-        <Btn variant="outline" size="sm" onClick={checkForUpdates} disabled={checkingUpdates}>
-          <RefreshCw size={14} className={checkingUpdates ? 'anim-spin' : ''} style={{ marginRight: 6 }} />
-          {checkingUpdates ? 'Checking...' : 'Check Now'}
-        </Btn>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 18, gap: 12, flexWrap: 'wrap' }}>
+        <div>
+          <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>Updates Center</h2>
+          <p style={{ fontSize: 12, color: updateCheckSummary?.errors ? '#fbbf24' : 'var(--muted)' }}>
+            {lastCheckedLabel ? `Last checked ${lastCheckedLabel}` : 'Not checked yet'}
+            {updateCheckSummary?.errors ? ` · ${updateCheckSummary.errors} title${updateCheckSummary.errors === 1 ? '' : 's'} failed` : ''}
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          {filteredReleases.length > 0 && <Btn variant="ghost" size="sm" onClick={markVisibleRead}><Check size={14} /> Mark visible read</Btn>}
+          <Btn variant="outline" size="sm" onClick={() => checkForUpdates({ notify: true })} disabled={checkingUpdates}>
+            <RefreshCw size={14} className={checkingUpdates ? 'anim-spin' : ''} />
+            {checkingUpdates ? 'Checking...' : 'Check Now'}
+          </Btn>
+        </div>
       </div>
 
-      {updates.length === 0 ? (
-        <EmptyState icon={BellRing} title="No updates" sub="You are caught up with your library" compact />
-      ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 18 }}>
-          {updates.map((manga, i) => (
-            <div key={getMangaKey(manga.id, manga.sourceId)} style={{ position: 'relative' }}>
-              <MangaCard manga={manga} onClick={onOpenManga || (() => { })} index={i} badge={`+${manga.newChapters}`} />
-            </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,minmax(0,1fr))', gap: 10, marginBottom: 16 }}>
+        {[
+          { label: 'New chapters', value: releases.length, color: 'var(--accent)' },
+          { label: 'Updated titles', value: updates.length, color: '#60a5fa' },
+          { label: 'Auto-check', value: Number(settings?.chapterUpdateInterval ?? CONFIG.UPDATE_INTERVAL) > 0 ? 'On' : 'Off', color: '#4ade80' },
+        ].map(item => (
+          <div key={item.label} style={{ padding: '12px 14px', borderRadius: 12, background: 'var(--card)', border: '1px solid var(--border)' }}>
+            <p style={{ fontSize: 18, fontWeight: 800, color: item.color }}>{item.value}</p>
+            <p style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em' }}>{item.label}</p>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 18, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div style={{ position: 'relative', flex: '1 1 220px' }}>
+          <Search size={14} style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)' }} />
+          <input aria-label="Search chapter updates" value={searchValue} onChange={event => setSearchValue(event.target.value)} placeholder="Search manga, chapter, or group" style={{ width: '100%', padding: '9px 12px 9px 34px', borderRadius: 10, border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--text)', outline: 'none', fontSize: 12 }} />
+        </div>
+        <div style={{ display: 'flex', padding: 3, borderRadius: 10, background: 'var(--card)', border: '1px solid var(--border)' }}>
+          {[['all', 'All'], ['today', 'Today'], ['week', '7 days']].map(([value, label]) => (
+            <button key={value} type="button" onClick={() => setRange(value)} style={{ border: 'none', borderRadius: 7, padding: '6px 10px', cursor: 'pointer', fontSize: 11, fontWeight: 700, background: range === value ? 'var(--accent)' : 'transparent', color: range === value ? '#fff' : 'var(--muted)' }}>{label}</button>
           ))}
+        </div>
+        {sourceChoices.length > 1 && (
+          <select aria-label="Filter updates by source" value={sourceFilter} onChange={event => setSourceFilter(event.target.value)} style={{ padding: '8px 10px', borderRadius: 10, border: '1px solid var(--border)', background: 'var(--card)', color: 'var(--text)', fontSize: 11 }}>
+            <option value="all">All sources</option>
+            {sourceChoices.map(source => <option key={source.id} value={source.id}>{source.name}</option>)}
+          </select>
+        )}
+      </div>
+
+      {releases.length === 0 ? (
+        <EmptyState
+          icon={BellRing}
+          title={updateCheckSummary?.errors ? 'No confirmed updates' : 'No new releases'}
+          sub={updateCheckSummary?.errors ? 'Some sources could not be checked; try again when they are available.' : 'No chapters have appeared since the last successful check.'}
+          compact
+        />
+      ) : filteredReleases.length === 0 ? (
+        <EmptyState icon={Filter} title="No matching releases" sub="Try another date range, source, or search." compact />
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+          {filteredReleases.map(({ manga, chapter }) => {
+            const publishedAt = chapter.publishedAt ? new Date(chapter.publishedAt) : null;
+            const exactDate = publishedAt && Number.isFinite(publishedAt.getTime())
+              ? publishedAt.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' })
+              : chapter.date || 'Release date unavailable';
+            return (
+              <article key={`${manga.sourceId}__${manga.id}__${chapter.id}`} style={{ display: 'flex', gap: 13, alignItems: 'center', padding: 12, borderRadius: 14, background: 'var(--card)', border: '1px solid var(--border)', contentVisibility: 'auto', containIntrinsicSize: '72px' }}>
+                <button type="button" onClick={() => onOpenManga?.(manga)} title={`Open ${manga.title}`} style={{ width: 46, height: 62, padding: 0, flexShrink: 0, overflow: 'hidden', border: 'none', borderRadius: 8, background: 'var(--card2)', cursor: 'pointer', display: 'grid', placeItems: 'center' }}>
+                  {manga.cover ? <img src={proxyImg(manga.cover)} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : <BookOpen size={18} style={{ color: 'var(--muted)' }} />}
+                </button>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <button type="button" onClick={() => onOpenManga?.(manga)} style={{ display: 'block', maxWidth: '100%', padding: 0, border: 0, background: 'none', color: 'var(--text)', cursor: 'pointer', fontWeight: 750, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>{manga.title}</button>
+                  <p style={{ marginTop: 4, fontSize: 12, color: 'var(--text-dim)', fontWeight: 650 }}>
+                    {chapter.number !== '' && chapter.number !== undefined ? `Chapter ${chapter.number}` : 'New chapter'}{chapter.name ? ` · ${chapter.name}` : ''}
+                  </p>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px 10px', marginTop: 5, fontSize: 10, color: 'var(--muted)' }}>
+                    <time dateTime={chapter.publishedAt || undefined}>{exactDate}{chapter.publishedAt ? ` · ${formatRelativeChapterDate(chapter.publishedAt)}` : ''}</time>
+                    {chapter.group && <span>By {chapter.group}</span>}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                  <Btn variant="ghost" size="icon" title="Download chapter" onClick={() => queueChaptersForDownload([chapter], manga.id, manga.title, manga.sourceId)}><Download size={14} /></Btn>
+                  <Btn variant="ghost" size="icon" title="Mark chapter read" onClick={() => markReleaseRead({ manga, chapter })}><Check size={14} /></Btn>
+                  <Btn variant="ghost" size="icon" title="Open manga" onClick={() => onOpenManga?.(manga)}><ChevronRight size={16} /></Btn>
+                </div>
+              </article>
+            );
+          })}
         </div>
       )}
     </div>
@@ -2282,7 +2494,10 @@ const UpdatesTab = memo(({ onOpenManga }) => {
 
 // ==================== DOWNLOADS TAB ====================
 
-const DownloadsTab = memo(({ queue, onClear, onRemove, onRetry, onCancel, onCancelAll }) => {
+const DownloadsTab = memo(({
+  queue, downloadedRecords, library, readChapters,
+  getMangaKey, onClear, onRemove, onRetry, onCancel, onCancelAll, onDeleteStored,
+}) => {
   const pending = queue.filter(d => d.status === 'pending').length;
   const active = queue.filter(d => d.status === 'downloading').length;
   const done = queue.filter(d => d.status === 'done').length;
@@ -2295,9 +2510,17 @@ const DownloadsTab = memo(({ queue, onClear, onRemove, onRetry, onCancel, onCanc
 
   return (
     <div className="page-transition">
+      <StorageManager
+        records={downloadedRecords}
+        library={library}
+        readChapters={readChapters}
+        onDeleteKeys={onDeleteStored}
+        getMangaKey={getMangaKey}
+        resolveCover={proxyImg}
+      />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 10 }}>
         <div>
-          <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 6 }}>Downloads</h2>
+          <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 6 }}>Download activity</h2>
           <div style={{ display: 'flex', gap: 16 }}>
             {active > 0 && <span style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600 }}>{active} active</span>}
             {pending > 0 && <span style={{ fontSize: 12, color: 'var(--muted-fg)' }}>{pending} queued</span>}
@@ -2316,7 +2539,7 @@ const DownloadsTab = memo(({ queue, onClear, onRemove, onRetry, onCancel, onCanc
       </div>
 
       {queue.length === 0 ? (
-        <EmptyState icon={Download} title="No downloads" sub="Queue chapters from the manga detail page — right-click a chapter or use the buttons above the chapter list" compact />
+        <EmptyState icon={Download} title="No download activity" sub="Queue chapters from the manga detail page — saved chapters remain listed in Offline storage above" compact />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {queue.map((item) => {
@@ -2420,7 +2643,7 @@ function openDB() {
   });
 }
 
-async function saveChapterBlobs(mangaId, chapterId, urlsAndBlobs) {
+async function saveChapterBlobs(mangaId, chapterId, urlsAndBlobs, metadata = {}) {
   const pages = urlsAndBlobs.map(({ blob }) => blob);
 
   const db = await openDB();
@@ -2432,7 +2655,17 @@ async function saveChapterBlobs(mangaId, chapterId, urlsAndBlobs) {
       res();
     };
     tx.onerror = () => rej(tx.error);
-    tx.objectStore('chapters').put({ key, pages, savedAt: Date.now() });
+    tx.objectStore('chapters').put({
+      key,
+      pages,
+      savedAt: Date.now(),
+      mangaKey: mangaId,
+      chapterId: String(chapterId),
+      mangaId: metadata.mangaId,
+      mangaTitle: metadata.mangaTitle,
+      sourceId: metadata.sourceId,
+      chapterNum: metadata.chapterNum,
+    });
   });
 }
 
@@ -2464,16 +2697,23 @@ async function loadChapterBlobs(mangaId, chapterId) {
 }
 
 async function deleteChapterBlobs(mangaId, chapterId) {
+  return deleteDownloadedChapterKeys([getDownloadKey(mangaId, chapterId)]);
+}
+
+async function deleteDownloadedChapterKeys(keys) {
+  const normalizedKeys = [...new Set((keys || []).map(String).filter(Boolean))];
+  if (!normalizedKeys.length) return;
   try {
     const db = await openDB();
-    return new Promise((res, rej) => {
+    return await new Promise((res, rej) => {
       const tx = db.transaction('chapters', 'readwrite');
+      const store = tx.objectStore('chapters');
+      normalizedKeys.forEach(key => store.delete(key));
       tx.oncomplete = () => {
         window.dispatchEvent(new Event('downloads-updated'));
         res();
       };
       tx.onerror = () => rej(tx.error);
-      tx.objectStore('chapters').delete(getDownloadKey(mangaId, chapterId));
     });
   } catch { }
 }
@@ -2481,33 +2721,49 @@ async function deleteChapterBlobs(mangaId, chapterId) {
 async function deleteAllChapterBlobsForManga(mangaId) {
   const keys = await listDownloadedKeys();
   const prefix = `${mangaId}___`;
-  await Promise.all(
-    keys
-      .map(String)
-      .filter(key => key.startsWith(prefix))
-      .map(key => {
-        const chapterId = key.slice(prefix.length);
-        return deleteChapterBlobs(mangaId, chapterId);
-      })
-  );
+  await deleteDownloadedChapterKeys(keys.map(String).filter(key => key.startsWith(prefix)));
 }
 
-async function listDownloadedKeys() {
+const storedPageSize = page => {
+  if (page instanceof Blob) return page.size;
+  if (typeof page === 'string') return new Blob([page]).size;
+  return 0;
+};
+
+async function listDownloadedChapterRecords() {
   try {
     const db = await openDB();
     const tx = db.transaction('chapters', 'readonly');
     const st = tx.objectStore('chapters');
-    return new Promise(res => {
-      const req = st.getAllKeys();
-      req.onsuccess = () => res(req.result || []);
+    return await new Promise(res => {
+      const req = st.getAll();
+      req.onsuccess = () => res((req.result || []).map(record => {
+        const pages = Array.isArray(record.pages) ? record.pages : [];
+        return {
+          key: String(record.key),
+          mangaKey: record.mangaKey,
+          chapterId: record.chapterId,
+          mangaId: record.mangaId,
+          mangaTitle: record.mangaTitle,
+          sourceId: record.sourceId,
+          chapterNum: record.chapterNum,
+          savedAt: Number(record.savedAt) || 0,
+          pageCount: pages.length,
+          sizeBytes: pages.reduce((total, page) => total + storedPageSize(page), 0),
+        };
+      }));
       req.onerror = () => res([]);
     });
   } catch { return []; }
 }
 
+async function listDownloadedKeys() {
+  return (await listDownloadedChapterRecords()).map(record => record.key);
+}
+
 function useDownloads() {
-  const { downloadedKeys, refreshDownloads } = useData();
-  return { downloadedKeys, refreshDownloads };
+  const { downloadedKeys, downloadedChapters, refreshDownloads } = useData();
+  return { downloadedKeys, downloadedChapters, refreshDownloads };
 }
 
 const isBlobUrl = value => typeof value === 'string' && value.startsWith('blob:');
@@ -4393,19 +4649,19 @@ const App = memo(() => {
   const toast = useToast();
   const {
     backendOnline, sources, extensions, library, history, progress,
-    mangaCategories, installing, readingTime, settings, updates, checkingUpdates,
+    mangaCategories, installing, readingTime, settings, updates,
     readChapters, markChapterRead,
     downloadQueue, setDownloadQueue, overlayHidden, setOverlayHidden,
     fetchJSON, checkHealth, fetchSources, fetchExtensions,
     installExt, uninstallExt, updateExt, toggleLibrary, setCategory,
     addToHistory, removeFromHistory, clearHistory, removeMangaCompletely, updateProgress, inLibrary,
-    checkForUpdates, addReadingTime, updateSetting, handleMigrate,
+    updateSetting, handleMigrate,
     queueChaptersForDownload, cancelDownload, cancelActiveDownloads,
     suwayomiReady, setSuwayomiReady,
     categories, getMangaKey,
   } = data;
 
-  const { downloadedKeys, refreshDownloads } = useDownloads();
+  const { downloadedKeys, downloadedChapters, refreshDownloads } = useDownloads();
 
   const dlProcessingRef = useRef(false);
 
@@ -4422,6 +4678,10 @@ const App = memo(() => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => settings?.sidebarCollapsed || false);
   const [isNarrowViewport, setIsNarrowViewport] = useState(() => window.innerWidth < 760);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
+
+  useEffect(() => {
+    window.electronAPI?.setDiscordPresenceMode?.(view === 'reader' ? 'reading' : 'browsing').catch(() => {});
+  }, [view]);
 
   const [showOnboarding, setShowOnboarding] = useState(() => !storage.get('onboardingDone', false));
 
@@ -4440,6 +4700,18 @@ const App = memo(() => {
     } catch {
       return null;
     }
+  }, []);
+
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api?.onBeforeWindowClose || !api?.completeWindowCloseFlush) return undefined;
+    return api.onBeforeWindowClose(({ requestId } = {}) => {
+      try {
+        window.dispatchEvent(new Event('akareader-before-window-close'));
+      } finally {
+        api.completeWindowCloseFlush(requestId);
+      }
+    });
   }, []);
 
   useEffect(() => {
@@ -4602,6 +4874,9 @@ const App = memo(() => {
   const [mangaDetail, setMangaDetail] = useState(null);
   const [mangaLoading, setMangaLoading] = useState(false);
   const [mangaError, setMangaError] = useState('');
+  const [mangaRefreshing, setMangaRefreshing] = useState(false);
+  const [mangaRefreshError, setMangaRefreshError] = useState('');
+  const [archiveExporting, setArchiveExporting] = useState('');
   const [chapSearch, setChapSearch] = useState('');
   const [chapterSort, setChapterSort] = useState('desc');
 
@@ -4620,6 +4895,7 @@ const App = memo(() => {
   const [sourceVerificationPanel, setSourceVerificationPanel] = useState({ active: false });
 
   const [activeCategory, setActiveCategory] = useState('all');
+  const [librarySmartFilter, setLibrarySmartFilter] = useState('all');
   const [libraryView, setLibraryView] = useState(() => settings?.libraryView || 'grid');
   const [librarySearch, setLibrarySearch] = useState('');
   const [historyView, setHistoryView] = useState('grid');
@@ -4962,7 +5238,7 @@ const App = memo(() => {
     }
 
     setActiveSource(source); setSelectedManga(manga); setMangaDetail(null);
-    setMangaError(''); setChapSearch(''); setView('manga'); setMangaLoading(true);
+    setMangaError(''); setMangaRefreshError(''); setChapSearch(''); setView('manga'); setMangaLoading(true);
 
     try {
       const d = await fetchJSON(`/source/${source.id}/manga/${manga.id}`);
@@ -4975,6 +5251,32 @@ const App = memo(() => {
     }
     finally { setMangaLoading(false); }
   }, [activeSource, sources, fetchJSON, addToHistory, removeMangaCompletely, refreshDownloads, toast]);
+
+  const refreshMangaDetails = useCallback(async () => {
+    const sourceId = activeSource?.id || mangaDetail?.sourceId || selectedManga?.sourceId;
+    const mangaId = mangaDetail?.id || selectedManga?.id;
+    if (!sourceId || !mangaId || mangaRefreshing) return;
+
+    setMangaRefreshing(true);
+    setMangaRefreshError('');
+    const previousIds = new Set((mangaDetail?.chapters || []).map(chapter => String(chapter.id)));
+    try {
+      const refreshed = await fetchJSON(`/source/${encodeURIComponent(sourceId)}/manga/${encodeURIComponent(mangaId)}?force=1`, {}, 0);
+      const newlyVisible = (refreshed.chapters || []).filter(chapter => !previousIds.has(String(chapter.id))).length;
+      setMangaDetail(refreshed);
+      setMangaError('');
+      if (selectedManga) addToHistory(selectedManga, sourceId, refreshed);
+      toast(newlyVisible > 0
+        ? `Found ${newlyVisible} new chapter${newlyVisible === 1 ? '' : 's'}`
+        : 'Chapter list is up to date', 'success');
+    } catch (error) {
+      const message = describeSourceError(error, 'source').message;
+      setMangaRefreshError(message);
+      toast(`Could not refresh chapters: ${message}`, 'error');
+    } finally {
+      setMangaRefreshing(false);
+    }
+  }, [activeSource?.id, addToHistory, fetchJSON, mangaDetail, mangaRefreshing, selectedManga, toast]);
 
   useEffect(() => {
     if (view !== 'manga' || !mangaError || !selectedManga || sourceVerifying || sourceRepairing) return;
@@ -4998,7 +5300,7 @@ const App = memo(() => {
     const mKey = getMangaKey(mId, srcId);
     
     const existingProg = progress[mKey];
-    const defaultPage = (existingProg && existingProg.chapterId === chapter.id) ? existingProg.page : 0;
+    const defaultPage = (existingProg && String(existingProg.chapterId) === String(chapter.id)) ? existingProg.page : 0;
     const startPage = explicitPage !== undefined ? explicitPage : defaultPage;
 
     setCurrentChapter(chapter); setPages([]); setChapterError(''); setReaderPage(startPage); setView('reader'); setPagesLoading(true);
@@ -5104,9 +5406,7 @@ const App = memo(() => {
     }
 
     const source = sources[m.sourceId] || Object.values(sources).find(s => s.id === String(m.sourceId));
-    let chId = p.chapterId;
-    let page = p.page || 0;
-    let chapter = { id: chId, number: p.chapterNum };
+    let { chapter, page } = resolveContinueTarget([], p);
 
     if (source) setActiveSource(source);
     setSelectedManga(m);
@@ -5120,28 +5420,77 @@ const App = memo(() => {
         setMangaDetail(res);
         addToHistory(m, m.sourceId, res);
         chapRef.current = res.chapters;
-        const isFullyRead = readChapters[getMangaKey(m.id, m.sourceId)]?.includes(String(chId));
-        if (isFullyRead) {
-          const chIdx = res.chapters.findIndex(c => c.id === chId);
-          if (chIdx > 0) {
-            chId = res.chapters[chIdx - 1].id;
-            page = 0;
-          }
-        }
-        chapter = res.chapters.find(c => c.id === chId) || chapter;
+        ({ chapter, page } = resolveContinueTarget(res.chapters, p));
       }
     } catch (e) {
       setMangaError(describeSourceError(e, 'source').message);
     }
 
-    openChapter(chapter, m.sourceId, m.id, page);
-  }, [progress, getMangaKey, sources, openManga, fetchJSON, readChapters, openChapter, addToHistory]);
+    if (chapter) openChapter(chapter, m.sourceId, m.id, page);
+  }, [progress, getMangaKey, sources, openManga, fetchJSON, openChapter, addToHistory]);
 
   const handleDownload = useCallback((chapter) => {
     if (!mangaDetail) return;
     queueChaptersForDownload([chapter], mangaDetail.id, mangaDetail.title, activeSource?.id);
     setOverlayHidden(false); // Show overlay when a new download starts
   }, [mangaDetail, activeSource, queueChaptersForDownload]);
+
+  const handleDeleteStoredChapters = useCallback(async keys => {
+    await deleteDownloadedChapterKeys(keys);
+    await refreshDownloads();
+    toast(`Deleted ${keys.length} offline chapter${keys.length === 1 ? '' : 's'}`, 'success');
+  }, [refreshDownloads, toast]);
+
+  const exportChapterCbz = useCallback(async chapter => {
+    if (!mangaDetail) return;
+    if (!window.electronAPI?.exportChapterCbz) {
+      toast('CBZ export is available in the desktop app', 'warning');
+      return;
+    }
+    setArchiveExporting(String(chapter.id));
+    try {
+      const result = await window.electronAPI.exportChapterCbz({
+        sourceId: activeSource?.id || mangaDetail.sourceId,
+        chapterId: chapter.id,
+        chapterNum: chapter.number,
+        chapterTitle: chapter.title,
+        mangaTitle: mangaDetail.title,
+      });
+      if (result?.ok) toast(`Exported Ch. ${chapter.number} as CBZ`, 'success');
+      else if (!result?.cancelled) toast(result?.error || 'CBZ export failed', 'error');
+    } catch (error) {
+      toast(error?.message || 'CBZ export failed', 'error');
+    } finally {
+      setArchiveExporting('');
+    }
+  }, [mangaDetail, activeSource, toast]);
+
+  const exportMangaCbz = useCallback(async () => {
+    if (!mangaDetail?.chapters?.length) return;
+    if (!window.electronAPI?.exportMangaCbz) {
+      toast('CBZ export is available in the desktop app', 'warning');
+      return;
+    }
+    setArchiveExporting('all');
+    try {
+      const result = await window.electronAPI.exportMangaCbz({
+        sourceId: activeSource?.id || mangaDetail.sourceId,
+        mangaTitle: mangaDetail.title,
+        chapters: mangaDetail.chapters.map(chapter => ({
+          chapterId: chapter.id,
+          chapterNum: chapter.number,
+          chapterTitle: chapter.title,
+        })),
+      });
+      if (result?.ok) {
+        toast(`Exported ${result.saved} CBZ file${result.saved === 1 ? '' : 's'}${result.failed ? ` · ${result.failed} failed` : ''}`, result.failed ? 'warning' : 'success');
+      } else if (!result?.cancelled) toast(result?.error || 'Manga CBZ export failed', 'error');
+    } catch (error) {
+      toast(error?.message || 'Manga CBZ export failed', 'error');
+    } finally {
+      setArchiveExporting('');
+    }
+  }, [mangaDetail, activeSource, toast]);
 
   const handleChapterContextMenu = useCallback((e, ch) => {
     e.preventDefault();
@@ -5177,6 +5526,10 @@ const App = memo(() => {
         action: () => handleDownload(ch)
       },
       {
+        label: 'Export chapter as CBZ', icon: Archive,
+        action: () => exportChapterCbz(ch)
+      },
+      {
         label: 'Queue this chapter', icon: Archive,
         action: () => queueChaptersForDownload([ch], mangaDetail.id, mangaDetail.title, activeSource?.id)
       },
@@ -5191,7 +5544,7 @@ const App = memo(() => {
       },
     ];
     setContextMenu({ x: e.clientX, y: e.clientY, items });
-  }, [mangaDetail, readChapters, markChapterRead, fetchJSON, handleDownload, queueChaptersForDownload, activeSource, toast]);
+  }, [mangaDetail, readChapters, markChapterRead, fetchJSON, handleDownload, exportChapterCbz, queueChaptersForDownload, activeSource, toast]);
 
   const handleTagClick = useCallback((tag, sourceId) => {
     const targetSourceId = sourceId || activeSource?.id;
@@ -5235,8 +5588,32 @@ const App = memo(() => {
     return [...byPkg.values()];
   }, [extensions]);
 
+  const progressedLibraryKeys = useMemo(() => new Set(Object.keys(progress).filter(key => progress[key]?.chapterId)), [progress]);
+  const updatedLibraryKeys = useMemo(() => new Set(updates.map(manga => getMangaKey(manga.id, manga.sourceId))), [updates, getMangaKey]);
+  const downloadedLibraryKeys = useMemo(() => downloadedMangaKeys(downloadedKeys), [downloadedKeys]);
+  const smartFilterState = useMemo(() => ({
+    progressedKeys: progressedLibraryKeys,
+    updatedKeys: updatedLibraryKeys,
+    downloadedKeys: downloadedLibraryKeys,
+    readChapters,
+    mangaCategories,
+  }), [progressedLibraryKeys, updatedLibraryKeys, downloadedLibraryKeys, readChapters, mangaCategories]);
+  const librarySmartCounts = useMemo(() => smartLibraryCounts({
+    library,
+    getMangaKey,
+    ...smartFilterState,
+  }), [library, getMangaKey, smartFilterState]);
+
   const filteredLibrary = useMemo(() => {
     let list = activeCategory === 'all' ? library : library.filter(m => mangaCategories[getMangaKey(m.id, m.sourceId)] === activeCategory);
+    if (librarySmartFilter !== 'all') {
+      list = list.filter(manga => matchesSmartLibraryFilter({
+        ...smartFilterState,
+        filter: librarySmartFilter,
+        manga,
+        mangaKey: getMangaKey(manga.id, manga.sourceId),
+      }));
+    }
     if (librarySearch.trim()) {
       const q = librarySearch.toLowerCase();
       list = list.filter(m => m.title.toLowerCase().includes(q) || m.author?.toLowerCase().includes(q));
@@ -5259,7 +5636,7 @@ const App = memo(() => {
       return bp - ap;
     });
     return list;
-  }, [library, activeCategory, mangaCategories, librarySearch, librarySort, progress, getMangaKey]);
+  }, [library, activeCategory, mangaCategories, librarySmartFilter, smartFilterState, librarySearch, librarySort, progress, getMangaKey]);
   const installedSources = useMemo(() => Object.values(sources), [sources]);
   const groupedInstalledSources = useMemo(() => {
     const groups = new Map();
@@ -5429,7 +5806,6 @@ const App = memo(() => {
     );
     const readerMangaId = mangaDetail?.id || selectedManga?.id;
     const readerSourceId = mangaDetail?.sourceId || selectedManga?.sourceId || activeSource?.id;
-    const mKeyForReader = getMangaKey(readerMangaId, readerSourceId);
 
     return (
       <NewReader
@@ -5456,7 +5832,7 @@ const App = memo(() => {
         fetchNextChapter={fetchNextChapter}
         hasNext={hasNextCh} hasPrev={hasPrevCh}
         onPageChange={handleReaderPositionChange}
-        initialPage={progress[mKeyForReader]?.page || 0}
+        initialPage={readerPage}
         mangaId={readerMangaId}
         mangaSourceId={readerSourceId}
         mangaCover={mangaDetail?.cover || selectedManga?.cover} isLoading={pagesLoading}
@@ -5469,7 +5845,7 @@ const App = memo(() => {
       {showOnboarding && <Onboarding onFinish={() => { setShowOnboarding(false); storage.set('onboardingDone', true); }} />}
       {catchUpManga && <CatchUpModal manga={catchUpManga} onClose={() => setCatchUpManga(null)} onJumpTo={ch => { setCatchUpManga(null); openChapter(ch, activeSource?.id || mangaDetail?.sourceId, mangaDetail?.id || selectedManga?.id); }} />}
       {showShareCard && <ShareCardModal library={library} history={history} progress={progress} readChapters={readChapters} settings={settings} onClose={() => setShowShareCard(false)} />}
-      {showErrorModal && <ServiceErrorModal issue={serviceIssue} onRestart={() => { setShowErrorModal(false); setServiceIssue(null); setForceProceed(false); checkHealth(); }} />}
+      {showErrorModal && !showOnboarding && <ServiceErrorModal issue={serviceIssue} onRestart={() => { setShowErrorModal(false); setServiceIssue(null); setForceProceed(false); checkHealth(); }} />}
       {showReleaseNotes && <ReleaseNotesModal notes={releaseNotes} version={updateAvailable} onClose={() => setShowReleaseNotes(false)} />}
       {contextMenu && <ContextMenu x={contextMenu.x} y={contextMenu.y} items={contextMenu.items} onClose={() => setContextMenu(null)} />}
       {backendOnline && !suwayomiReady && !showErrorModal && (forceProceed || canUseShellOffline) && (
@@ -5908,19 +6284,8 @@ const App = memo(() => {
                             <Btn onClick={() => {
                               const mKey = getMangaKey(mangaDetail.id, activeSource?.id);
                               const last = progress[mKey];
-                              let ch = last ? mangaDetail.chapters.find(c => c.id === last.chapterId) || mangaDetail.chapters[mangaDetail.chapters.length - 1] : mangaDetail.chapters[mangaDetail.chapters.length - 1];
-
-                              let startPage = last?.page || 0;
-                              const isFullyRead = readChapters[mKey]?.includes(String(ch.id)) || ch.read;
-
-                              if (isFullyRead) {
-                                const chIdx = mangaDetail.chapters.findIndex(c => c.id === ch.id);
-                                if (chIdx > 0) {
-                                  ch = mangaDetail.chapters[chIdx - 1];
-                                  startPage = 0;
-                                }
-                              }
-                              openChapter(ch, activeSource?.id || mangaDetail.sourceId, mangaDetail.id, startPage);
+                              const target = resolveContinueTarget(mangaDetail.chapters, last);
+                              if (target.chapter) openChapter(target.chapter, activeSource?.id || mangaDetail.sourceId, mangaDetail.id, target.page);
                             }} size="lg" icon={Play}>{progress[getMangaKey(mangaDetail.id, activeSource?.id || mangaDetail.sourceId)] ? 'Continue' : 'Start Reading'}</Btn>
                           ) : null}
                         {mangaDetail?.chapters?.length > 10 && (
@@ -6005,17 +6370,29 @@ const App = memo(() => {
 
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
-                    <h3 style={{ fontFamily: "'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight: 700, fontSize: 18, display: 'flex', alignItems: 'center', gap: 8 }}>
-                      Chapters <Badge variant="outline" size="sm">{filteredChapters.length}</Badge>
-                    </h3>
+                    <div>
+                      <h3 style={{ fontFamily: "'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight: 700, fontSize: 18, display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+                        Chapters <Badge variant="outline" size="sm">{filteredChapters.length}</Badge>
+                      </h3>
+                      <p style={{ fontSize: 11, color: mangaRefreshError ? '#fbbf24' : 'var(--muted)' }}>
+                        {mangaRefreshError || (mangaDetail.chapterListRefreshedAt
+                          ? `Checked at ${new Date(mangaDetail.chapterListRefreshedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+                          : 'Showing the latest locally available chapter list')}
+                      </p>
+                    </div>
                     <div style={{ display: 'flex', gap: 8 }}>
+                      <Btn variant="outline" size="sm" onClick={refreshMangaDetails} disabled={mangaRefreshing} title="Ask the source for the newest chapter list">
+                        <RefreshCw size={13} className={mangaRefreshing ? 'anim-spin' : ''} />
+                        {mangaRefreshing ? 'Checking' : 'Refresh'}
+                      </Btn>
                       <Btn variant="outline" size="sm" onClick={() => {
                         const mKey = getMangaKey(mangaDetail.id, activeSource?.id);
                         const unread = mangaDetail.chapters.filter(ch => !ch.read && !(readChapters[mKey]?.includes(String(ch.id))));
                         if (!unread.length) { toast('No unread chapters to download', 'warning'); return; }
                         queueChaptersForDownload(unread, mangaDetail.id, mangaDetail.title, activeSource?.id);
-                      }} icon={EyeOff} title="Download unread chapters only">Unread</Btn>
-                      <Btn variant="outline" size="sm" onClick={() => queueChaptersForDownload(mangaDetail.chapters, mangaDetail.id, mangaDetail.title, activeSource?.id)} icon={Archive}>All</Btn>
+                      }} icon={EyeOff} title="Download unread chapters only">Download unread</Btn>
+                      <Btn variant="outline" size="sm" onClick={() => queueChaptersForDownload(mangaDetail.chapters, mangaDetail.id, mangaDetail.title, activeSource?.id)} icon={Download}>Download all</Btn>
+                      <Btn variant="outline" size="sm" onClick={exportMangaCbz} disabled={!!archiveExporting} icon={Archive} title="Choose a folder and export every chapter as a separate CBZ file">{archiveExporting === 'all' ? 'Exporting…' : 'Export CBZs'}</Btn>
                       <Btn variant="ghost" size="sm" onClick={() => setChapterSort(s => s === 'desc' ? 'asc' : 'desc')} icon={chapterSort === 'desc' ? ChevronDown : ChevronUp}>
                         {chapterSort === 'desc' ? 'Newest' : 'Oldest'}
                       </Btn>
@@ -6068,9 +6445,21 @@ const App = memo(() => {
                               {isDownloaded && <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', color: '#60a5fa', background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.25)', borderRadius: 4, padding: '1px 5px', flexShrink: 0 }}>offline</span>}
                               {queuedDownload && <span style={{ fontSize: 9, fontWeight: 700, textTransform: 'uppercase', color: '#93c5fd', background: 'rgba(59,130,246,0.1)', border: '1px solid rgba(59,130,246,0.2)', borderRadius: 4, padding: '1px 5px', flexShrink: 0 }}>{queuedDownload.status === 'downloading' ? `${queuedDownload.progress}%` : 'queued'}</span>}
                             </div>
-                            <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-                              {ch.date && <span style={{ fontSize: 11, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 3 }}><Calendar size={10} />{ch.date}</span>}
-                              {ch.group && <span style={{ fontSize: 11, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 180 }}>{ch.group}</span>}
+                            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                              {(ch.publishedAt || ch.date) && (() => {
+                                const releaseValue = ch.publishedAt || ch.date;
+                                const releaseDate = new Date(releaseValue);
+                                const exactDate = Number.isNaN(releaseDate.getTime())
+                                  ? ch.date
+                                  : releaseDate.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+                                const relativeDate = formatRelativeChapterDate(releaseValue);
+                                return (
+                                  <time dateTime={ch.publishedAt || undefined} title={Number.isNaN(releaseDate.getTime()) ? exactDate : releaseDate.toLocaleString()} style={{ fontSize: 11, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                                    <Calendar size={10} />{exactDate}{relativeDate ? ` · ${relativeDate}` : ''}
+                                  </time>
+                                );
+                              })()}
+                              {ch.group && <span title={`Scanlation group: ${ch.group}`} style={{ fontSize: 11, color: 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 220 }}>By {ch.group}</span>}
                             </div>
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -6081,6 +6470,9 @@ const App = memo(() => {
                             )}
                             <Btn variant="outline" size="icon" onClick={e => { e.stopPropagation(); handleDownload(ch); }} style={{ padding: 4, borderRadius: 8, color: isDownloaded ? '#60a5fa' : 'var(--muted)', borderColor: isDownloaded ? 'rgba(59,130,246,0.3)' : 'var(--border)' }} title={isDownloaded ? 'Re-download' : 'Save for offline'}>
                               <Download size={14} />
+                            </Btn>
+                            <Btn variant="outline" size="icon" disabled={!!archiveExporting} onClick={e => { e.stopPropagation(); exportChapterCbz(ch); }} style={{ padding: 4, borderRadius: 8, color: 'var(--muted)' }} title="Export chapter as CBZ">
+                              {archiveExporting === String(ch.id) ? <Spin size={13} /> : <Archive size={13} />}
                             </Btn>
                             <ChevronRight size={16} style={{ color: isCurrent ? 'var(--accent)' : 'var(--muted)' }} />
                           </div>
@@ -6253,6 +6645,19 @@ const App = memo(() => {
                 })}
               </div>
 
+              <div aria-label="Smart library views" style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 14, overflowX: 'auto', paddingBottom: 3 }}>
+                <span style={{ paddingRight: 4, color: 'var(--muted)', fontSize: 10, fontWeight: 750, letterSpacing: '.08em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>Smart views</span>
+                {SMART_LIBRARY_FILTERS.map(filter => {
+                  const selected = librarySmartFilter === filter.id;
+                  const count = librarySmartCounts[filter.id] || 0;
+                  return (
+                    <button key={filter.id} type="button" aria-pressed={selected} onClick={() => setLibrarySmartFilter(filter.id)} style={{ padding: '6px 11px', borderRadius: 9, border: `1px solid ${selected ? 'rgba(249,115,22,.45)' : 'var(--border)'}`, background: selected ? 'rgba(249,115,22,.12)' : 'var(--card)', color: selected ? 'var(--accent)' : 'var(--text-dim)', fontWeight: 650, fontSize: 11, cursor: 'pointer', whiteSpace: 'nowrap', opacity: filter.id !== 'all' && count === 0 ? .5 : 1 }}>
+                      {filter.label} <span style={{ color: selected ? 'var(--accent)' : 'var(--muted)' }}>{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
               <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 18, flexWrap: 'wrap' }}>
                 <div style={{ position: 'relative', flex: '1 1 200px', minWidth: 180 }}>
                   <Search size={14} style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)', pointerEvents: 'none' }} />
@@ -6308,7 +6713,9 @@ const App = memo(() => {
               {filteredLibrary.length === 0 ? (
                 librarySearch
                   ? <EmptyState icon={Search} title={`No results for "${librarySearch}"`} sub="Try a different search term" compact action={<Btn variant="outline" size="sm" onClick={() => setLibrarySearch('')}><X size={14} /> Clear</Btn>} />
-                  : <EmptyState icon={Library} title={activeCategory === 'all' ? "Your library is empty" : `No manga in ${categories.find(c => c.id === activeCategory)?.name}`} sub={activeCategory === 'all' ? "Add manga from Browse to start" : "Move manga to this category from context menu"} action={activeCategory === 'all' && <Btn onClick={() => switchTab('browse')}>Browse Manga <ArrowRight size={16} /></Btn>} />
+                  : librarySmartFilter !== 'all'
+                    ? <EmptyState icon={Filter} title={`No ${SMART_LIBRARY_FILTERS.find(filter => filter.id === librarySmartFilter)?.label.toLowerCase()} manga`} sub="This smart view updates automatically as your library changes" compact action={<Btn variant="outline" size="sm" onClick={() => setLibrarySmartFilter('all')}><X size={14} /> Clear smart view</Btn>} />
+                    : <EmptyState icon={Library} title={activeCategory === 'all' ? "Your library is empty" : `No manga in ${categories.find(c => c.id === activeCategory)?.name}`} sub={activeCategory === 'all' ? "Add manga from Browse to start" : "Move manga to this category from context menu"} action={activeCategory === 'all' && <Btn onClick={() => switchTab('browse')}>Browse Manga <ArrowRight size={16} /></Btn>} />
               ) : libraryView === 'list' ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                   {filteredLibrary.map((m, i) => (
@@ -6484,11 +6891,16 @@ const App = memo(() => {
           {tab === 'updates' && <UpdatesTab onOpenManga={openManga} />}
           {tab === 'downloads' && <DownloadsTab
             queue={downloadQueue}
+            downloadedRecords={downloadedChapters}
+            library={library}
+            readChapters={readChapters}
+            getMangaKey={getMangaKey}
             onClear={() => setDownloadQueue(prev => prev.filter(d => d.status === 'pending' || d.status === 'downloading' || d.status === 'error'))}
             onRemove={id => setDownloadQueue(prev => prev.filter(d => d.id !== id))}
             onRetry={id => setDownloadQueue(prev => prev.map(d => d.id === id ? { ...d, status: 'pending', progress: 0, pagesLoaded: 0, pagesTotal: 0, attempts: 0, retryAt: 0, recovered: false, error: null, updatedAt: Date.now() } : d))}
             onCancel={cancelDownload}
             onCancelAll={cancelActiveDownloads}
+            onDeleteStored={handleDeleteStoredChapters}
           />}
           {tab === 'settings' && <SettingsPage />}
           {migrateManga && <SourceMigrationModal manga={migrateManga} sources={sources} onClose={() => setMigrateManga(null)} onMigrate={handleMigrate} />}

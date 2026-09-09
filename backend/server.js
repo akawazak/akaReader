@@ -200,10 +200,18 @@ const fetchAllowedImage = async (value, redirectCount = 0, signal) => {
   return response;
 };
 
-const fmtDate = value => {
+const normalizeDate = value => {
   if (!value) return '';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString();
+  const numeric = typeof value === 'number' || /^\d+$/.test(String(value).trim())
+    ? Number(value)
+    : null;
+  const date = new Date(numeric === null ? value : (numeric < 1e12 ? numeric * 1000 : numeric));
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+};
+
+const fmtDate = value => {
+  const normalized = normalizeDate(value);
+  return normalized ? new Date(normalized).toLocaleDateString() : '';
 };
 
 function fmtNum(n) {
@@ -533,9 +541,10 @@ app.get('/api/source/:sourceId/manga/:mangaId', async (req, res) => {
   const sourceId = String(req.params.sourceId);
   const mangaId = parseInt(req.params.mangaId);
   if (isNaN(mangaId)) return res.status(400).json({ error: 'Invalid ID' });
+  const force = ['1', 'true'].includes(String(req.query.force || '').toLowerCase());
   const cacheKey = getMangaCacheKey(sourceId, mangaId);
   try {
-    const cached = caches.manga.get(cacheKey);
+    const cached = !force && caches.manga.get(cacheKey);
     if (cached) return res.json(cached);
     let manga;
     try {
@@ -547,21 +556,24 @@ app.get('/api/source/:sourceId/manga/:mangaId', async (req, res) => {
       manga = d.manga;
     }
     let chapters = [];
+    let chaptersRefreshed = false;
     try {
+      const d = await gql(`mutation($id:Int!){ fetchChapters(input:{mangaId:$id}){ chapters{ id name chapterNumber uploadDate scanlator isRead } } }`, { id: mangaId });
+      chapters = d.fetchChapters?.chapters || [];
+      chaptersRefreshed = true;
+    } catch (error) {
+      if (force) throw error;
+    }
+    if (!chaptersRefreshed) {
       const d = await gql(`query($id:Int!){ manga(id:$id){ chapters{ nodes{ id name chapterNumber uploadDate scanlator isRead } } } }`, { id: mangaId });
       chapters = d.manga?.chapters?.nodes || [];
-    } catch {}
-    if (chapters.length === 0) {
-      try {
-        const d = await gql(`mutation($id:Int!){ fetchChapters(input:{mangaId:$id}){ chapters{ id name chapterNumber uploadDate scanlator isRead } } }`, { id: mangaId });
-        chapters = d.fetchChapters?.chapters || [];
-      } catch {}
     }
     const mapped = chapters.map(ch => ({
       id: String(ch.id),
       number: fmtNum(ch.chapterNumber) ?? ch.name?.match(/[\d.]+/)?.[0] ?? '?',
       title: ch.name || '',
       date: fmtDate(ch.uploadDate),
+      publishedAt: normalizeDate(ch.uploadDate),
       group: ch.scanlator || '',
       read: ch.isRead || false,
     })).sort((a, b) => parseFloat(b.number) - parseFloat(a.number));
@@ -572,6 +584,7 @@ app.get('/api/source/:sourceId/manga/:mangaId', async (req, res) => {
       author: manga.author || '', description: manga.description || '', status: manga.status?.toLowerCase() || '',
       tags: Array.isArray(manga.genre) ? manga.genre : (manga.genre ? String(manga.genre).split(', ').filter(Boolean) : []),
       totalChapters: mapped.length, chapters: mapped,
+      chapterListRefreshedAt: chaptersRefreshed ? Date.now() : null,
     };
     caches.manga.set(cacheKey, result);
     res.json(result);

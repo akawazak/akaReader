@@ -34,11 +34,37 @@ const waitForBackend = async baseUrl => {
 test('local API and image proxy enforce their security boundary', async t => {
   const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
   let backendBaseUrl = '';
+  let chapterVersion = 1;
+  let chapterRefreshCalls = 0;
   let markSlowCoverStarted;
   let markSlowCoverCancelled;
   const slowCoverStarted = new Promise(resolve => { markSlowCoverStarted = resolve; });
   const slowCoverCancelled = new Promise(resolve => { markSlowCoverCancelled = resolve; });
   const suwayomi = http.createServer((req, res) => {
+    if (req.url === '/api/graphql' && req.method === 'POST') {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        const query = JSON.parse(body || '{}').query || '';
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        if (query.includes('aboutServer')) return res.end(JSON.stringify({ data: { aboutServer: { version: 'test' } } }));
+        if (query.includes('fetchManga')) {
+          return res.end(JSON.stringify({ data: { fetchManga: { manga: { id: 1, title: 'Fixture Manga', url: '/manga/1', thumbnailUrl: '/cover', author: 'Fixture Author', description: '', status: 'ONGOING', genre: ['Action'] } } } }));
+        }
+        if (query.includes('fetchChapters')) {
+          chapterRefreshCalls += 1;
+          const chapters = [{ id: 101, name: 'Chapter 1', chapterNumber: 1, uploadDate: 1787875200, scanlator: 'Fixture Group', isRead: false }];
+          if (chapterVersion >= 2) chapters.unshift({ id: 102, name: 'Chapter 2', chapterNumber: 2, uploadDate: 1787961600000, scanlator: 'Fixture Group', isRead: false });
+          return res.end(JSON.stringify({ data: { fetchChapters: { chapters } } }));
+        }
+        if (query.includes('fetchChapterPages')) {
+          return res.end(JSON.stringify({ data: { fetchChapterPages: { pages: [`http://127.0.0.1:${suwayomiPort}/cover`] } } }));
+        }
+        return res.end(JSON.stringify({ data: {} }));
+      });
+      return;
+    }
     if (req.url === '/cover') {
       res.writeHead(200, { 'Content-Type': 'image/png' });
       res.end(imageBytes);
@@ -115,6 +141,38 @@ test('local API and image proxy enforce their security boundary', async t => {
     });
     assert.equal(response.status, 200);
     assert.equal((await response.json()).ok, true);
+  });
+
+  await t.test('streams an authenticated chapter CBZ archive', async () => {
+    const response = await fetch(`${backendBaseUrl}/api/source/fixture/chapter/101/download?title=Fixture%20Chapter`, {
+      headers: { 'X-AkaReader-Token': API_TOKEN, Origin: ALLOWED_ORIGIN },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'application/zip');
+    assert.match(response.headers.get('content-disposition') || '', /Fixture Chapter\.cbz/);
+    const archive = Buffer.from(await response.arrayBuffer());
+    assert.deepEqual([...archive.subarray(0, 2)], [0x50, 0x4b]);
+  });
+
+  await t.test('forced manga refresh bypasses cache and asks the source for chapters', async () => {
+    const headers = { 'X-AkaReader-Token': API_TOKEN, Origin: ALLOWED_ORIGIN };
+    const first = await fetch(`${backendBaseUrl}/api/source/fixture/manga/1`, { headers });
+    assert.equal(first.status, 200);
+    const firstBody = await first.json();
+    assert.deepEqual(firstBody.chapters.map(chapter => chapter.id), ['101']);
+    assert.equal(chapterRefreshCalls, 1);
+    assert.match(firstBody.chapters[0].publishedAt, /^2026-/);
+
+    chapterVersion = 2;
+    const cached = await fetch(`${backendBaseUrl}/api/source/fixture/manga/1`, { headers });
+    assert.deepEqual((await cached.json()).chapters.map(chapter => chapter.id), ['101']);
+    assert.equal(chapterRefreshCalls, 1);
+
+    const refreshed = await fetch(`${backendBaseUrl}/api/source/fixture/manga/1?force=1`, { headers });
+    const refreshedBody = await refreshed.json();
+    assert.deepEqual(refreshedBody.chapters.map(chapter => chapter.id), ['102', '101']);
+    assert.equal(chapterRefreshCalls, 2);
+    assert.equal(typeof refreshedBody.chapterListRefreshedAt, 'number');
   });
 
   await t.test('blocks direct requests to a different loopback service', async () => {

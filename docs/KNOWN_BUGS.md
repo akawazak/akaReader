@@ -7,6 +7,50 @@ Severity labels:
 - `P2` medium-risk instability or incorrect UX
 - `P3` cleanup/refactor debt
 
+### Improved 2026-08-30: Optional privacy-safe Discord Rich Presence
+
+- Files: `manga-nexus/runtime/discord-presence.cjs`, `manga-nexus/electron-main.js`, `manga-nexus/preload.js`, `manga-nexus/src/App.jsx`
+- Previous limitation: akaReader had no lightweight way to show desktop activity in Discord, and adding detailed reader metadata would have exposed more personal reading context than needed.
+- Improvement: Settings now provides an opt-in Discord integration with a visible connection state and retry action. Local RPC publishes only `Browsing manga` or `Reading manga`; manga titles, chapters, sources, URLs, and reading history are never included. Missing or closed Discord remains non-fatal, retries locally, and disabling/closing akaReader clears the activity.
+- Regression proof: focused controller tests assert the exact generic payload, absence of title/chapter fields, cleanup on disable, unavailable-client safety, and allowlisted modes.
+
+### Fixed 2026-09-09: Packaged launch smoke test could reuse a locked user profile
+
+- Files: `manga-nexus/scripts/smoke-packaged-runtime.mjs`
+- Symptom: a local packaged smoke test could exit before opening port 3001 when another Electron/akaReader session had a Chromium profile lock.
+- Fix: the smoke runner now gives only its short-lived package process an isolated temporary Chromium profile and deletes it after the test. Normal user data is never touched, and the backend port check remains the release gate.
+
+### Improved 2026-08-28: Offline storage management, native CBZ export, and smart library views
+
+- Files: `manga-nexus/src/App.jsx`, `manga-nexus/src/components/downloads/StorageManager.jsx`, `manga-nexus/src/utils/downloadStorage.mjs`, `manga-nexus/src/utils/libraryFilters.mjs`, `manga-nexus/electron-main.js`, `manga-nexus/preload.js`, `manga-nexus/runtime/chapter-export.cjs`
+- Previous limitation: Downloads showed queue activity but not the offline data already stored in IndexedDB; the working backend CBZ route had no renderer action; and categories were the only persistent library subset controls.
+- Improvement: saved chapter records now include compact display metadata while remaining compatible with page-only records. Downloads calculates exact Blob bytes/pages, origin quota usage, and grouped cleanup actions. Chapter and whole-manga CBZ exports use native dialogs and main-process streaming with safe non-colliding names. Library smart views combine with categories and derive membership from stable IDs/state.
+- Regression proof: focused tests cover composite download-key parsing, grouped sizes/read cleanup, smart-view membership/counts, and export validation/name sanitization. The release validation and rendered interaction pass cover the integrated UI.
+
+### Fixed 2026-08-28: Chapter release details and reliable new-chapter discovery
+
+- Files: `backend/server.js`, `backend/test/security-boundary.test.js`, `manga-nexus/src/App.jsx`, `manga-nexus/src/utils/chapterUpdates.mjs`, `manga-nexus/src/utils/appBackup.mjs`
+- Symptom: chapter dates were sparse and server-locale-dependent; manual refresh and Check Now could return a ten-minute cached list; cache misses normally reused Suwayomi's stored chapters without asking the source; and the Updates tab called every unread chapter "new."
+- Cause: the manga route had no forced-refresh contract and queried stored chapters before `fetchChapters`. The renderer derived updates solely from unread IDs and had no persisted known-chapter baseline or partial-failure status.
+- Fix: manga cache misses now actively fetch source chapters, `?force=1` bypasses the cache for explicit checks, source failures remain visible, and upload dates include normalized ISO timestamps. The renderer persists known and pending-new chapter IDs, treats the first scan as a baseline, deduplicates scans, preserves notifications across temporary source failures, and clears read/removed releases. Manga details show exact plus relative dates, scanlation groups, checked time, and a real Refresh action.
+- Follow-up: pending releases now retain compact chapter metadata and appear as individual rows with search, date/source filters, download, and mark-read actions. The last scan timestamp persists across launches; configurable background checks use one rescheduled timer, can send desktop notifications, and can optionally enqueue newly discovered chapters for offline reading.
+- Regression proof: backend integration coverage proves cached versus forced behavior and timestamp normalization; renderer tests cover baselines, discovery, metadata retention, scheduling, cleanup, and calendar-day labels; rendered QA exercised initial detail → forced refresh → library baseline → one new update → repeated no-duplicate check with a clean console.
+
+### Fixed 2026-08-26: Native close acknowledgement and reader control accessibility
+
+- Files: `manga-nexus/electron-main.js`, `manga-nexus/preload.js`, `manga-nexus/runtime/window-lifecycle.cjs`, `manga-nexus/src/App.jsx`, `manga-nexus/src/components/reader/Reader.jsx`
+- Symptom: the renderer checkpointed on browser lifecycle events, but Electron could hide or quit before receiving proof that the active reader had flushed. Reader settings also behaved visually like a dialog without dialog semantics, reliable focus entry/return, or stateful control announcements.
+- Fix: Electron now requests and awaits a renderer flush acknowledgement before hide, quit, or update installation, with a 400 ms fail-safe timeout. The reader settings panel now exposes modal-dialog semantics, restores focus, labels sliders, and reports pressed/switch states.
+- Regression proof: focused lifecycle tests cover close-to-tray decisions, quit behavior, timeout bounds, and IPC wiring; accessibility tests cover the dialog and control contracts; rendered QA checks actual focus movement.
+
+### Fixed 2026-08-25: Continue, Alt+F4 persistence, and reader zoom reliability
+
+- Files: `manga-nexus/src/App.jsx`, `manga-nexus/src/components/reader/Reader.jsx`, `manga-nexus/src/utils/readerProgress.mjs`, `manga-nexus/src/index.css`
+- Symptom: Continue could move away from the saved chapter, a quick reader exit or Alt+F4 could lose the most recent page, reading-time totals stayed at zero, double-page zoom affected only one image, and zoom stopped at 300% behind the settings drawer.
+- Cause: page persistence used a 1.5-second reader timer that teardown discarded; Continue duplicated array-order/read-state heuristics; the reader initialized its active page at zero and then ignored `openChapter()`'s resolved start page in favor of any manga-level stored page; `addReadingTime` was never called; the second spread image had separate fixed sizing.
+- Fix: progress and elapsed reading time now checkpoint synchronously on page changes, visibility loss, page hide, explicit exit, and teardown. Both Continue entry points use one normalized-ID resolver and resume the exact stored page. Zoom now reaches 500% with visible minus/reset/plus controls, keyboard and Ctrl+wheel support, recentering, and consistent spread sizing. Home progress uses a known chapter total instead of assuming every title has 100 chapters. The pass also prevents onboarding/service-error modal stacking and restores light-theme header contrast.
+- Result: closing or hiding the desktop window preserves the live reading position, Continue is predictable, reading stats accumulate, and zoom is usable without opening settings.
+
 ## Audit Notes
 
 Last deep scan: 2026-05-23.

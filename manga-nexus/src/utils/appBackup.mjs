@@ -10,6 +10,8 @@ export const BACKUP_STORAGE_KEYS = Object.freeze([
   'categories',
   'readChapters',
   'readingTime',
+  'chapterUpdateStateV1',
+  'chapterUpdateSummaryV1',
   'appSettings',
   'keyMigrationV2',
   'onboardingDone',
@@ -17,7 +19,7 @@ export const BACKUP_STORAGE_KEYS = Object.freeze([
 ]);
 
 const ARRAY_KEYS = new Set(['library', 'history', 'categories', 'aka:dup-dismissed']);
-const OBJECT_KEYS = new Set(['progress', 'mangaCategories', 'readChapters', 'readingTime', 'appSettings']);
+const OBJECT_KEYS = new Set(['progress', 'mangaCategories', 'readChapters', 'readingTime', 'chapterUpdateStateV1', 'chapterUpdateSummaryV1', 'appSettings']);
 const BOOLEAN_KEYS = new Set(['keyMigrationV2', 'onboardingDone']);
 
 function hasExpectedBackupType(key, value) {

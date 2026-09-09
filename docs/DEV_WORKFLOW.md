@@ -56,6 +56,8 @@ Protected sources are handled adaptively. akaReader never downloads FlareSolverr
 
 Electron also writes the built-in Keiyoushi catalog to Suwayomi's `server.extensionStores` setting before launch. Additional repositories added in Settings are validated as HTTP(S) URLs, persisted in `electron-settings.json`, and applied by restarting the managed local services. The built-in entry is intentionally visible but cannot be removed from the UI. Startup rewrites the complete list and automatically removes the dangling list tail created by the old line-only migration, so a previously malformed `server.conf` self-recovers.
 
+Discord Rich Presence is an Electron-only, opt-in feature. To check it manually, start the Discord desktop app, open akaReader Settings, enable **Discord Rich Presence**, then open and leave a reader session. Discord should show only `Browsing manga` or `Reading manga`; it must not show a manga title, chapter, source, URL, or history. Quit Discord and confirm akaReader continues normally with an unavailable status; reopen Discord or use Retry to reconnect. Disable the switch and confirm the activity clears.
+
 ## Build Commands
 
 From `manga-nexus/`:
@@ -100,7 +102,7 @@ Checks that an unpacked release contains the backend entry files and production 
 npm run smoke:packaged-runtime -- dist-electron/win-unpacked
 ```
 
-Launches the unpacked release and requires its backend to bind port 3001 within 60 seconds. Run it only while another akaReader instance is not using that port.
+Launches the unpacked release with an isolated temporary Chromium profile and requires its backend to bind port 3001 within 60 seconds. Run it only while another akaReader instance is not using that port; the profile isolation avoids false failures from an already-open app.
 
 ```powershell
 npm run electron:build
@@ -122,8 +124,8 @@ Packaged Windows builds use a one-click NSIS installer. `electron-updater` downl
 
 Current state:
 
-- the backend has focused tests for local API authentication, origin checks, image-proxy target/redirect restrictions, and source-error sanitization
-- the renderer package has focused unit coverage for chapter-ID statistics, unread-update detection, Java version parsing, startup-failure classification, extension-store configuration migration, and source-error presentation
+- the backend has focused tests for local API authentication, origin checks, forced chapter refresh/cache bypass, upload-date normalization, image-proxy target/redirect restrictions, and source-error sanitization
+- the renderer package has focused unit coverage for chapter-ID statistics, real new-release baselines, pending-update cleanup, calendar-aware release labels, exact Continue targeting, reader zoom limits, reader accessibility contracts, Electron close/flush decisions, Java version parsing, startup-failure classification, extension-store configuration migration, and source-error presentation
 - no dedicated e2e runner is present
 - validation is primarily manual/runtime-driven, plus local lint/build/hook-order checks
 
@@ -175,11 +177,13 @@ For multi-page sources, confirm page 2 and later requests begin automatically af
 Check:
 
 1. `/api/source/:sourceId/manga/:mangaId`
-2. `/api/source/:sourceId/chapter/:chapterId`
-3. `openManga()` and `openChapter()` in `src/App.jsx`
-4. `fetchNextChapter()` in `src/App.jsx` if the failure happens while chaining chapters
-5. `Reader.jsx` if the failure is inside the reading session
-6. `npm run check:hook-order` if the error says `Cannot access '<name>' before initialization`
+2. `/api/source/:sourceId/manga/:mangaId?force=1` when the Refresh button or update scan claims it checked the source
+3. `/api/source/:sourceId/chapter/:chapterId`
+4. `openManga()`, `refreshMangaDetails()`, and `openChapter()` in `src/App.jsx`
+5. `checkForUpdates()` plus `src/utils/chapterUpdates.mjs` when the release feed, persisted chapter metadata, or automatic schedule is wrong
+6. `fetchNextChapter()` in `src/App.jsx` if the failure happens while chaining chapters
+7. `Reader.jsx` if the failure is inside the reading session
+8. `npm run check:hook-order` if the error says `Cannot access '<name>' before initialization`
 
 ### Offline download issues
 
@@ -197,6 +201,8 @@ Check:
 6. `navigator.storage.estimate()` results when the failure says storage is nearly full
 
 Interrupted jobs are expected to resume after a relaunch. The queue stores metadata only; page blobs are committed atomically to IndexedDB when the entire chapter finishes. Transient network/server failures receive up to three attempts, while client errors, verification requirements, and low-storage errors wait for user action.
+
+The Downloads storage manager reads stored record metadata and Blob sizes without creating reader object URLs. Exercise per-title cleanup, Delete read, and Delete all only with disposable test downloads; each action must refresh exact chapter/page/byte totals and the Library's Offline smart-view count. From manga details, export one chapter as CBZ and confirm the native save dialog writes a readable archive. Export a small manga to a folder and confirm existing filenames receive numeric suffixes rather than being overwritten. Canceling either dialog must not show an error or leave a partial file.
 
 ### Diagnostics and backup issues
 
@@ -225,11 +231,20 @@ Backup files use schema `akareader-backup` version 3 and are capped at 10 MB. Re
 - Launch Electron and verify the startup screen progresses to online.
 - Open extensions, install/uninstall one extension, and confirm source refresh.
 - Browse a source, open a manga, and load a chapter.
+- In manga details, confirm every available chapter upload timestamp renders as an exact date plus a calendar-aware age and that the scanlation group is labelled. Click Refresh and confirm the source is actually queried, the checked-at time changes, newly returned chapters appear without leaving the page, and a failed refresh leaves the existing list visible with a readable error.
+- Add a manga to the library, run the first Updates check, and confirm the existing unread backlog becomes the baseline rather than a false update. Add one fixture/source chapter, check again, and confirm one chapter row appears with its number, title, release date, and scanlation group. Exercise search, Today/7 days, source filtering, download, mark-read, and Mark visible read. Repeat the check to confirm it does not duplicate. Simulate one failing source and confirm its prior rows remain while the partial failure count is shown.
+- In Library, combine a user category with Continue, Unread, Updated, Offline, and Completed smart views. Confirm counts react to progress, update scans, downloads/deletions, read state, and category changes without depending on decimal or special chapter labels.
+- Change the automatic interval and confirm the persisted last-check time determines the next run after reload. With desktop notifications enabled, hide the window and add a source chapter; confirm one notification appears and clicking it restores akaReader. Enable auto-download and confirm only newly discovered chapters enter the queue once. Manual-only mode must create no timer.
 - When testing a large automatically loaded catalog, open a manga while covers are still loading, then open a chapter. Confirm the old cover requests are cancelled and the first reader page appears without waiting for the abandoned catalog images. Navigate back during an image load and confirm the backend does not keep fetching it.
 - For a source challenge, first confirm an already-installed helper begins warming as soon as a source is selected, that a later recovery reuses the same launch, and that results return without clicking Retry. Confirm the compact state never shows a raw Java/Kotlin trace and keeps `Verify manually` enabled with accurate wording while the helper starts. Complete a human check only when needed; verify a new same-source clearance cookie or the existing page signals close the embedded view and native results return without clicking `Load now`. Confirm the fallback `Load now`, Cancel, and Escape actions remain safe. A first-time setup must still verify the archive, bind only to loopback, restart Suwayomi only when configuration changes, and load results.
 - Force-close akaReader while its helper browser is starting, relaunch, and revisit the protected source. Confirm akaReader stops the stale process only when its executable exactly matches FlareSolverr's managed `undetected_chromedriver` path, becomes ready without a shared-driver permission error, and returns quickly with a readable error if the helper process itself exits. Also open a protected chapter directly from history/library and confirm recovery retries the chapter rather than leaving the reader stranded.
 - Read forward until next-chapter prefetch triggers.
+- Move to a later page, Alt+F4 or hide the Electron window immediately, relaunch, and confirm Continue opens the exact chapter/page. Repeat from both Home/history and manga details, and confirm reading-time stats increase. Verify the close finishes promptly even if the renderer is unresponsive; Electron's flush wait is capped at 400 ms.
+- Exercise reader zoom at 50%, 100%, and 500% using toolbar buttons, `+`/`-`/`0`, Ctrl+wheel, and the settings slider. In paged double-spread mode confirm both images scale together and the enlarged viewport remains pannable.
+- Open Reader Settings with the keyboard, confirm focus enters the dialog, Escape or the close control dismisses it, and focus returns to the settings trigger. Inspect sliders, switches, mode cards, themes, and active toolbar options with a screen reader or accessibility tree.
 - Download a chapter for offline use, reopen it offline, and verify IndexedDB-backed blob loading.
+- Open Downloads and confirm Offline storage reports the saved manga, chapter count, page count, exact Blob bytes, and origin quota usage.
+- Export one chapter and a small manga as CBZ files, inspect the archives, and cancel a second export to confirm it leaves no partial file.
 - Cancel an in-progress download and confirm it stops instead of finishing in the background.
 - Force-close during a chapter download, relaunch, wait for backend readiness, and confirm the recovered queue resumes without re-queuing the chapter manually.
 - In Settings, run the full system check. Confirm each component has a readable result, repair appears only when needed, and the report does not contain the API token.

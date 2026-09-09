@@ -54,5 +54,4 @@ npm audit --audit-level=high
 
 - akaReader is a reader/client, not a content provider.
 - Do not describe releases as including licensed manga content.
-- Monetization should stay limited to support and convenience features unless content licensing is handled separately.
 - Unsigned Windows builds may show SmartScreen warnings until the app gains reputation or is code-signed.
