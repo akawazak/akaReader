@@ -79,6 +79,8 @@ akareader/
   Durable internal documentation for architecture, risks, workflows, and file ownership.
 - `docs/PUBLISHING.md`
   Pre-tag release checklist and publishing notes.
+- `obsidian-vault/`
+  Obsidian vault of linked notes mapping architecture, flows, routes, IPC, storage keys, tests, and risks. Start at `00-Index/Home.md`; repo docs remain the source of truth.
 
 ### CI
 

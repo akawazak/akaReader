@@ -49,6 +49,8 @@ The app's goal is to give users a polished local manga-reading experience on top
   CI/release packaging workflow for Electron artifacts.
 - `docs/`
   Repository memory for architecture, workflow, file map, and risk tracking. Keep this current.
+- `obsidian-vault/`
+  Obsidian graph of linked notes over the same project memory (start at `00-Index/Home.md`). Refresh affected notes alongside `docs/` when a major change lands.
 
 ## Data Flow
 

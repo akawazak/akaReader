@@ -1,0 +1,10 @@
+{
+  "colorGroups": [
+    { "query": "path:20-Electron", "color": { "a": 1, "rgb": 4565225 } },
+    { "query": "path:30-Backend", "color": { "a": 1, "rgb": 15105570 } },
+    { "query": "path:40-Renderer", "color": { "a": 1, "rgb": 3066993 } },
+    { "query": "path:50-Flows", "color": { "a": 1, "rgb": 10181046 } },
+    { "query": "path:60-Reference", "color": { "a": 1, "rgb": 9807270 } },
+    { "query": "path:00-Index", "color": { "a": 1, "rgb": 16766720 } }
+  ]
+}
