@@ -43,7 +43,7 @@ const HeroRow = memo(({ title, link, onLink, items, progress, getMangaKey, onSel
   );
 });
 
-export const HomeView = memo(({ history, library, progress, sources, updates = [], stats = null, getMangaKey, onSelect, onContinue, onSwitchTab }) => {
+export const HomeView = memo(({ history, library, progress, sources, updates = [], getMangaKey, onSelect, onContinue, onSwitchTab }) => {
   const [heroLoaded, setHeroLoaded] = useState(false);
   const hero = useMemo(() => history.find(m => progress[getMangaKey(m.id, m.sourceId)]) || history[0] || null, [history, progress, getMangaKey]);
   const continueReading = useMemo(() => history.filter(m => progress[getMangaKey(m.id, m.sourceId)]).slice(0, 15), [history, progress, getMangaKey]);
@@ -53,6 +53,8 @@ export const HomeView = memo(({ history, library, progress, sources, updates = [
   const sourceCount = Object.keys(sources).length;
   const heroChapter = chapterLabel(heroProgress?.chapterNum);
   const upNext = useMemo(() => continueReading.filter(m => m !== hero).slice(0, 3), [continueReading, hero]);
+  // Fill the column with library titles that haven't been opened yet, newest first.
+  const notStarted = useMemo(() => recentLib.filter(m => (!hero || getMangaKey(m.id, m.sourceId) !== getMangaKey(hero.id, hero.sourceId)) && !progress[getMangaKey(m.id, m.sourceId)]).slice(0, Math.max(0, 3 - upNext.length)), [recentLib, hero, progress, getMangaKey, upNext.length]);
   const unreadByKey = useMemo(() => Object.fromEntries(updates.map(m => [getMangaKey(m.id, m.sourceId), m.newChapters || 0])), [updates, getMangaKey]);
   const newChapters = useMemo(() => updates.slice(0, 4).map(m => {
     const details = Array.isArray(m.newChapterDetails) ? m.newChapterDetails : [];
@@ -109,48 +111,46 @@ return (
             </div>
           </section>
 
-          {upNext.length > 0 && (
-            <section className="home-upnext" aria-label="Up next">
-              <h2>Up next</h2>
-              {upNext.map(m => {
-                const saved = progress[getMangaKey(m.id, m.sourceId)];
-                const pct = calculateMangaProgressPercent(m, saved);
-                const unread = unreadByKey[getMangaKey(m.id, m.sourceId)];
-                return (
-                  <button key={getMangaKey(m.id, m.sourceId)} type="button" className="home-upnext-item" onClick={() => (onContinue || onSelect)(m)}>
-                    <span className="thumb">{m.cover ? <img src={proxyImg(m.cover)} alt="" /> : <BookOpen size={14} />}</span>
-                    <span className="txt">
-                      <b>{m.title}</b>
-                      <small>{[chapterLabel(saved?.chapterNum) && `Ch. ${chapterLabel(saved.chapterNum)}`, unread ? `${unread} new` : null].filter(Boolean).join(' · ') || 'Resume'}</small>
-                      {pct > 0 && <span className="home-bar thin"><i style={{ width: `${pct}%` }} /></span>}
-                    </span>
-                    <span className="when">{saved?.lastRead ? timeAgo(saved.lastRead) : ''}</span>
-                  </button>
-                );
-              })}
-              {continueReading.length > upNext.length + 1 && (
-                <button type="button" className="home-link" style={{ marginTop: 'auto', alignSelf: 'flex-start' }} onClick={() => onSwitchTab('history')}>
-                  {continueReading.length - upNext.length - 1} more in progress <ChevronRight size={14} />
+          <section className="home-upnext" aria-label="Up next">
+            <h2>Up next</h2>
+            {upNext.map(m => {
+              const saved = progress[getMangaKey(m.id, m.sourceId)];
+              const pct = calculateMangaProgressPercent(m, saved);
+              const unread = unreadByKey[getMangaKey(m.id, m.sourceId)];
+              return (
+                <button key={getMangaKey(m.id, m.sourceId)} type="button" className="home-upnext-item" onClick={() => (onContinue || onSelect)(m)}>
+                  <span className="thumb">{m.cover ? <img src={proxyImg(m.cover)} alt="" /> : <BookOpen size={14} />}</span>
+                  <span className="txt">
+                    <b>{m.title}</b>
+                    <small>{[chapterLabel(saved?.chapterNum) && `Ch. ${chapterLabel(saved.chapterNum)}`, unread ? `${unread} new` : null].filter(Boolean).join(' · ') || 'Resume'}</small>
+                    {pct > 0 && <span className="home-bar thin"><i style={{ width: `${pct}%` }} /></span>}
+                  </span>
+                  <span className="when">{saved?.lastRead ? timeAgo(saved.lastRead) : ''}</span>
                 </button>
-              )}
-            </section>
-          )}
-
-          {upNext.length === 0 && stats && (
-            <section className="home-upnext home-stats" aria-label="Your reading">
-              <h2>Your reading</h2>
-              <div className="home-stat-grid">
-                <div><b className="accent">{stats.streak || 0}</b><small>day streak</small></div>
-                <div><b>{(stats.totalChapters || 0).toLocaleString()}</b><small>chapters read</small></div>
-                <div><b>{stats.totalMinutes >= 60 ? `${Math.floor(stats.totalMinutes / 60)}h ${stats.totalMinutes % 60}m` : `${stats.totalMinutes || 0}m`}</b><small>reading time</small></div>
-                <div><b>{library.length}</b><small>in library</small></div>
+              );
+            })}
+            {notStarted.map(m => (
+              <button key={getMangaKey(m.id, m.sourceId)} type="button" className="home-upnext-item" onClick={() => onSelect(m)}>
+                <span className="thumb">{m.cover ? <img src={proxyImg(m.cover)} alt="" /> : <BookOpen size={14} />}</span>
+                <span className="txt">
+                  <b>{m.title}</b>
+                  <small>{m.author || 'In your library'}</small>
+                </span>
+                <span className="home-tag">Not started</span>
+              </button>
+            ))}
+            {upNext.length + notStarted.length === 0 && (
+              <div className="home-upnext-empty">
+                <p>Nothing else in progress. Titles you add to your library will line up here.</p>
+                <Btn variant="outline" size="sm" icon={BookOpen} onClick={() => onSwitchTab('browse')}>Browse sources</Btn>
               </div>
-              <div style={{ display: 'flex', gap: 8, marginTop: 'auto', flexWrap: 'wrap' }}>
-                <Btn variant="outline" size="sm" icon={BookOpen} onClick={() => onSwitchTab('browse')}>Find something new</Btn>
-                <Btn variant="ghost" size="sm" onClick={() => onSwitchTab('library')}>Open library</Btn>
-              </div>
-            </section>
-          )}
+            )}
+            {continueReading.length > upNext.length + 1 && (
+              <button type="button" className="home-link" style={{ marginTop: 'auto', alignSelf: 'flex-start' }} onClick={() => onSwitchTab('history')}>
+                {continueReading.length - upNext.length - 1} more in progress <ChevronRight size={14} />
+              </button>
+            )}
+          </section>
         </div>
       )}
 

@@ -13,13 +13,15 @@ import {
   ChevronUp, ChevronDown, ZoomIn, ZoomOut, Settings, Sliders, BellRing,
   SlidersHorizontal, AlertCircle, RotateCcw, ChevronRightCircle,
   Pen, Sparkles, Bookmark, Award, StickyNote, Pencil, Pause, Settings2, Plus,
-  AlignJustify, HardDrive, Info, Server, Plug, DatabaseBackup
+  AlignJustify, HardDrive, Info, Server, Plug, DatabaseBackup, Cloud, LogOut
 } from 'lucide-react';
 
 import { Reader as NewReader } from './components/reader/Reader';
 import { HomeView as HomeTab } from './views/HomeView';
 import { DataContext, useData } from './contexts/DataContext';
 import MobileApp from './mobile/MobileApp';
+import { MobileToasts } from './mobile/MobileNotices';
+import GoogleLogo from './components/GoogleLogo';
 import { ExtensionsTab } from './components/extensions/ExtensionsTab';
 import { StorageManager } from './components/downloads/StorageManager';
 import { countReadChapterIds } from './utils/chapterTracking.mjs';
@@ -39,8 +41,10 @@ import {
   storageCapacityResult,
 } from './utils/downloadQueue.mjs';
 import { applyAppBackup, createAppBackup } from './utils/appBackup.mjs';
+import { CLOUD_CONFIG, buildLocalDoc, createCloudClient, createPkcePair, docsEqual, indexMangaDetail, makeSyncKey, mergeDocs, planExtensionInstalls, planLocalChanges, splitSyncKey } from './utils/cloudSync.mjs';
 import { calculateMangaProgressPercent, resolveContinueTarget } from './utils/readerProgress.mjs';
-import { downloadedMangaKeys } from './utils/downloadStorage.mjs';
+import { downloadedMangaKeys, summarizeDownloadedChapters } from './utils/downloadStorage.mjs';
+import { timeAgo } from './utils/helpers';
 import {
   SMART_LIBRARY_FILTERS,
   matchesSmartLibraryFilter,
@@ -246,7 +250,7 @@ const calculateStreak = (history) => {
 
 // ==================== GLOBAL STYLES ====================
 
-const GlobalStyles = memo(({ appTheme, accentColor }) => {
+const GlobalStyles = memo(({ appTheme, accentColor, uiScale }) => {
   useEffect(() => {
     const root = document.documentElement;
     if (appTheme === 'light') {
@@ -255,6 +259,9 @@ const GlobalStyles = memo(({ appTheme, accentColor }) => {
       root.removeAttribute('data-theme');
     }
   }, [appTheme]);
+  useEffect(() => {
+    window.electronAPI?.setZoomFactor?.(uiScale || 1);
+  }, [uiScale]);
   useEffect(() => {
     if (!accentColor || accentColor === '#f97316') { ['--accent', '--accent2', '--accent-glow'].forEach(v => document.documentElement.style.removeProperty(v)); return; }
     const h = accentColor.replace('#', ''), r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16), d = v => Math.max(0, Math.round(v * .82));
@@ -312,12 +319,19 @@ const ToastProvider = memo(({ children }) => {
     timeoutIdsRef.current.forEach(clearTimeout);
     timeoutIdsRef.current.clear();
   }, []);
+  const dismiss = useCallback((id) => setToasts(p => p.filter(t => t.id !== id)), []);
+  if (IS_ANDROID_APP) {
+    return (
+      <ToastContext.Provider value={show}>
+        {children}
+        <MobileToasts toasts={toasts} onDismiss={dismiss} />
+      </ToastContext.Provider>
+    );
+  }
   return (
     <ToastContext.Provider value={show}>
       {children}
-      <div style={IS_ANDROID_APP
-        ? { position: 'fixed', left: 16, right: 16, bottom: 92, zIndex: 9999, display: 'flex', flexDirection: 'column-reverse', gap: 8, pointerEvents: 'none' }
-        : { position: 'fixed', top: 90, right: 20, zIndex: 9999, display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 360, pointerEvents: 'none' }}>
+      <div style={{ position: 'fixed', top: 90, right: 20, zIndex: 9999, display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 360, pointerEvents: 'none' }}>
         {toasts.map(t => (
           <div key={t.id} className="toast-enter" style={{
             padding: '14px 18px', borderRadius: 14, border: '1px solid var(--border)',
@@ -384,6 +398,29 @@ const DataProvider = memo(({ children }) => {
   const [readChapters, setReadChapters] = useState(() => storage.get('readChapters', {}));
   const readChaptersRef = useRef(readChapters);
   readChaptersRef.current = readChapters;
+  // Local manga/chapter IDs -> stable source URL and chapter numbers, for account sync.
+  const [syncIndex, setSyncIndex] = useState(() => storage.get('syncIndexV1', {}));
+  const syncIndexRef = useRef(syncIndex);
+  syncIndexRef.current = syncIndex;
+  useEffect(() => storage.set('syncIndexV1', syncIndex), [syncIndex]);
+  // Called whenever a title's details load: maps its local IDs to the source URL and chapter numbers.
+  const recordSyncDetail = useCallback((mangaId, sourceId, detail) => {
+    const key = getMangaKey(mangaId, sourceId);
+    if (!key || !detail?.url) return;
+    setSyncIndex(prev => indexMangaDetail(prev, key, sourceId, { ...detail, id: mangaId }));
+    setLibrary(prev => (prev.some(m => getMangaKey(m.id, m.sourceId) === key && !m.url)
+      ? prev.map(m => (getMangaKey(m.id, m.sourceId) === key ? { ...m, url: detail.url } : m))
+      : prev));
+  }, []);
+
+  // A title removed here must not come back from the other device's older copy.
+  const recordLibraryRemoval = useCallback((mangaId, sourceId) => {
+    const key = getMangaKey(mangaId, sourceId);
+    const entry = libraryRef.current.find(m => getMangaKey(m.id, m.sourceId) === key);
+    const syncKey = syncIndexRef.current[key]?.syncKey || makeSyncKey(sourceId, entry?.url);
+    if (syncKey) storage.set('syncRemovalsV1', { ...storage.get('syncRemovalsV1', {}), [syncKey]: Date.now() });
+  }, []);
+
   const [installing, setInstalling] = useState(new Set());
   const [readingTime, setReadingTime] = useState(() => storage.get('readingTime', {}));
   const readingTimeRef = useRef(readingTime);
@@ -484,6 +521,7 @@ const DataProvider = memo(({ children }) => {
   const toastRef = useRef(null);
   toastRef.current = useToast();
   const sourcesRef = useRef({});
+  const historyRef = useRef([]);
   const extRef = useRef([]);
   const sourcesRequestRef = useRef(null);
   const extensionsRequestRef = useRef(null);
@@ -600,6 +638,11 @@ const DataProvider = memo(({ children }) => {
     return sharedRequest;
   }, [fetchJSON]);
 
+  // Installs and removals made here, for account sync (`syncExtV1`).
+  const recordExtensionChange = (pkgName, installed, name) => {
+    storage.set('syncExtV1', { ...storage.get('syncExtV1', {}), [pkgName]: { installed, at: Date.now(), name: name || '' } });
+  };
+
   const installExt = useCallback(async (pkgName) => {
     setInstalling(s => new Set([...s, pkgName]));
     try {
@@ -607,6 +650,7 @@ const DataProvider = memo(({ children }) => {
       const exts = await fetchExtensions(true);
       await fetchSources(true);
       const found = exts.find(e => e.pkgName === pkgName || e.id === pkgName);
+      recordExtensionChange(pkgName, true, found?.name);
       toastRef.current?.(`${found?.name || pkgName} installed`, 'success');
     } catch (e) { toastRef.current?.(`Install failed: ${e.message}`, 'error'); }
     finally { setInstalling(s => { const n = new Set(s); n.delete(pkgName); return n; }); }
@@ -616,6 +660,7 @@ const DataProvider = memo(({ children }) => {
     setInstalling(s => new Set([...s, pkgName]));
     try {
       const result = await fetchJSON(`/extensions/uninstall/${encodeURIComponent(pkgName)}`, { method: 'POST' });
+      recordExtensionChange(pkgName, false, extRef.current.find(e => e.pkgName === pkgName)?.name);
       await fetchExtensions(true);
       await fetchSources(true);
       const removedCount = Array.isArray(result?.removedFiles) ? result.removedFiles.length : 0;
@@ -632,10 +677,24 @@ const DataProvider = memo(({ children }) => {
     finally { setInstalling(s => { const n = new Set(s); n.delete(pkgName); return n; }); }
   }, [fetchJSON, fetchExtensions, fetchSources]);
 
+  // After a backup restore, install the backup's extensions that this device is missing.
+  // Runs once, when the store list has loaded; the list is cleared before installing.
+  useEffect(() => {
+    if (!backendOnline || !extensions.length) return;
+    const pending = storage.get('pendingExtensionInstalls', null);
+    if (!Array.isArray(pending)) return;
+    localStorage.removeItem('pendingExtensionInstalls');
+    const missing = pending.filter(pkg => extensions.some(e => e.pkgName === pkg && !e.isInstalled));
+    if (!missing.length) return;
+    toastRef.current?.(`Installing ${missing.length} extension${missing.length === 1 ? '' : 's'} from your backup…`, 'info');
+    (async () => { for (const pkg of missing) await installExt(pkg); })();
+  }, [backendOnline, extensions, installExt]);
+
   const toggleLibrary = useCallback((manga, sourceId) => {
     const exists = libraryRef.current.some(m => String(m.id) === String(manga.id) && String(m.sourceId) === String(sourceId));
     const mangaKey = getMangaKey(manga.id, sourceId);
     if (exists) {
+      recordLibraryRemoval(manga.id, sourceId);
       setLibrary(prev => prev.filter(m => !(String(m.id) === String(manga.id) && String(m.sourceId) === String(sourceId))));
       setChapterUpdateState(prev => {
         const next = { ...prev };
@@ -646,12 +705,12 @@ const DataProvider = memo(({ children }) => {
       toastRef.current?.('Removed from library', 'warning');
       return;
     }
-    setLibrary(prev => [{ id: manga.id, title: manga.title, cover: manga.cover, sourceId, addedAt: Date.now() }, ...prev]);
+    setLibrary(prev => [{ id: manga.id, title: manga.title, cover: manga.cover, sourceId, url: manga.url || undefined, addedAt: Date.now() }, ...prev]);
     if (Array.isArray(manga.chapters)) {
       setChapterUpdateState(prev => ({ ...prev, [mangaKey]: chapterUpdateBaseline(manga.chapters) }));
     }
     toastRef.current?.('Added to library', 'success');
-  }, []);
+  }, [recordLibraryRemoval]);
 
 
   const addCategory = useCallback((name, color) => {
@@ -668,11 +727,12 @@ const DataProvider = memo(({ children }) => {
   }, []);
 
   const addToHistory = useCallback((manga, sourceId, details) => {
+    if (details?.url) recordSyncDetail(manga.id, sourceId, details);
     setHistory(prev => {
       const filtered = prev.filter(m => !(String(m.id) === String(manga.id) && String(m.sourceId) === String(sourceId)));
       return [{ id: manga.id, title: details?.title || manga.title, cover: details?.cover || manga.cover, sourceId, author: details?.author, totalChapters: details?.totalChapters || manga.totalChapters, lastRead: Date.now() }, ...filtered].slice(0, 100);
     });
-  }, []);
+  }, [recordSyncDetail]);
 
   const removeFromHistory = useCallback((mangaId, sourceId) => {
     setHistory(prev => prev.filter(m => !(String(m.id) === String(mangaId) && String(m.sourceId) === String(sourceId))));
@@ -686,6 +746,7 @@ const DataProvider = memo(({ children }) => {
     const key = String(mangaId);
     const srcId = String(sourceId);
     const mKey = getMangaKey(mangaId, sourceId);
+    if (libraryRef.current.some(m => getMangaKey(m.id, m.sourceId) === mKey)) recordLibraryRemoval(mangaId, sourceId);
     setLibrary(prev => prev.filter(m => !(String(m.id) === key && String(m.sourceId) === srcId)));
     setHistory(prev => prev.filter(m => !(String(m.id) === key && String(m.sourceId) === srcId)));
     setProgress(prev => {
@@ -715,7 +776,7 @@ const DataProvider = memo(({ children }) => {
     });
     setUpdates(prev => prev.filter(item => getMangaKey(item.id, item.sourceId) !== mKey));
     deleteAllChapterBlobsForManga(mKey).then(refreshDownloads);
-  }, [refreshDownloads]);
+  }, [refreshDownloads, recordLibraryRemoval]);
 
   const updateProgress = useCallback((mangaId, chapterId, chapterNum, page, sourceId) => {
     if (!mangaId) return;
@@ -834,7 +895,7 @@ const DataProvider = memo(({ children }) => {
         const cat = mangaCategories[oldKey];
         setLibrary(prev => {
           const filtered = prev.filter(m => !(String(m.id) === String(oldManga.id) && String(m.sourceId) === String(oldManga.sourceId)) && !(String(m.id) === String(newItem.id) && String(m.sourceId) === String(newSource.id)));
-          return [{ id: newItem.id, title: newItem.title, cover: newItem.cover, sourceId: newSource.id, addedAt: libEntry.addedAt }, ...filtered];
+          return [{ id: newItem.id, title: newItem.title, cover: newItem.cover, sourceId: newSource.id, url: newItem.url || undefined, addedAt: libEntry.addedAt }, ...filtered];
         });
         if (cat) setMangaCategories(prev => ({ ...prev, [newKey]: cat }));
       }
@@ -1005,6 +1066,7 @@ const DataProvider = memo(({ children }) => {
             const source = sources[manga.sourceId] || Object.values(sources).find(item => String(item.id) === String(manga.sourceId));
             if (!source) throw new Error('Source extension is unavailable');
             const data = await fetchJSON(`/source/${encodeURIComponent(source.id)}/manga/${encodeURIComponent(manga.id)}?force=1`, {}, 0);
+            recordSyncDetail(manga.id, source.id, data);
             const reconciliation = reconcileChapterUpdateState({
               chapters: data.chapters,
               previous: previousState[mangaKey],
@@ -1097,7 +1159,7 @@ const DataProvider = memo(({ children }) => {
     });
     updateScanPromiseRef.current = promise;
     return promise;
-  }, [library, sources, fetchJSON, queueChaptersForDownload, settings?.autoDownloadNewChapters, settings?.notifyNewChapters]);
+  }, [library, sources, fetchJSON, queueChaptersForDownload, settings?.autoDownloadNewChapters, settings?.notifyNewChapters, recordSyncDetail]);
 
   useEffect(() => {
     const intervalMs = Number(settings?.chapterUpdateInterval ?? CONFIG.UPDATE_INTERVAL);
@@ -1132,6 +1194,228 @@ const DataProvider = memo(({ children }) => {
     toastRef.current?.(`Moved to ${categories.find(c => c.id === categoryId)?.name || 'category'}`, 'success');
   }, [categories]);
 
+  // ── Account sync (see utils/cloudSync.mjs) ──────────────────────────────
+  const cloud = useMemo(() => createCloudClient(CLOUD_CONFIG), []);
+  const [cloudSession, setCloudSessionState] = useState(() => storage.get('cloudSessionV1', null));
+  const cloudSessionRef = useRef(cloudSession);
+  const setCloudSession = useCallback((session) => {
+    cloudSessionRef.current = session;
+    if (session) storage.set('cloudSessionV1', session); else localStorage.removeItem('cloudSessionV1');
+    setCloudSessionState(session);
+  }, []);
+  const [cloudStatus, setCloudStatus] = useState({ state: 'idle', lastSyncAt: storage.get('cloudLastSyncV1', 0), error: '' });
+  const cloudBusyRef = useRef(false);
+  historyRef.current = history;
+
+
+  const applyCloudDoc = useCallback((doc) => {
+    const plan = planLocalChanges({
+      doc, library: libraryRef.current, progress: progressRef.current, readChapters: readChaptersRef.current,
+      index: syncIndexRef.current, getMangaKey,
+    });
+    if (Object.keys(plan.progress).length) {
+      const next = { ...progressRef.current, ...plan.progress };
+      progressRef.current = next;
+      storage.set('progress', next);
+      setProgress(next);
+    }
+    if (Object.keys(plan.read).length) {
+      setReadChapters(prev => {
+        const next = { ...prev };
+        for (const [key, ids] of Object.entries(plan.read)) next[key] = [...new Set([...(next[key] || []), ...ids])];
+        return next;
+      });
+    }
+    if (plan.history.length) {
+      setHistory(prev => {
+        let next = [...prev];
+        for (const item of plan.history) {
+          const existing = next.find(m => String(m.id) === item.id && String(m.sourceId) === item.sourceId);
+          next = next.filter(m => m !== existing);
+          next.push({ ...existing, id: item.id, sourceId: item.sourceId, title: existing?.title || item.title, cover: existing?.cover || item.cover, lastRead: Math.max(existing?.lastRead || 0, item.lastRead) });
+        }
+        return next.sort((a, b) => (b.lastRead || 0) - (a.lastRead || 0)).slice(0, 100);
+      });
+    }
+    if (plan.addToLibrary.length || plan.removeFromLibrary.length) {
+      const removed = new Set(plan.removeFromLibrary);
+      const added = plan.addToLibrary.map(t => ({ id: t.id, title: t.title, cover: syncIndexRef.current[t.mangaKey]?.cover || t.cover, sourceId: t.sourceId, url: splitSyncKey(t.syncKey)?.url, addedAt: t.libraryAt || Date.now() }));
+      libraryRef.current = [...added, ...libraryRef.current.filter(m => !removed.has(getMangaKey(m.id, m.sourceId)))];
+      setLibrary(libraryRef.current);
+    }
+    return plan.unresolved;
+  }, []);
+
+  // Titles never opened on this device are found by searching their source for the title
+  // and matching the source URL. Missing sources and failed lookups wait six hours.
+  const resolveCloudTitles = useCallback(async (unresolved) => {
+    const attempts = storage.get('syncLookupsV1', {});
+    const now = Date.now();
+    let found = false;
+    let looked = 0;
+    for (const t of unresolved) {
+      if (looked >= 5) break;
+      const target = splitSyncKey(t.syncKey);
+      if (!target || !t.title || now - (attempts[t.syncKey] || 0) < 6 * 3600 * 1000) continue;
+      if (!sourcesRef.current[target.sourceId]) continue;
+      looked += 1;
+      attempts[t.syncKey] = now;
+      try {
+        const sourcePath = `/source/${encodeURIComponent(target.sourceId)}`;
+        // The phone can open a title straight from its URL; Suwayomi can only find it by search.
+        const match = IS_ANDROID_APP
+          ? await fetchJSON(`${sourcePath}/lookup?url=${encodeURIComponent(target.url)}&title=${encodeURIComponent(t.title)}`, {}, 0)
+          : ((await fetchJSON(`${sourcePath}/search?q=${encodeURIComponent(t.title)}&page=1`, {}, 0))?.results || []).find(m => m.url === target.url);
+        if (match?.id) {
+          const key = getMangaKey(match.id, target.sourceId);
+          // Loading details gives chapter numbers (read chapters, progress) and a cover that works here.
+          const detail = await fetchJSON(`${sourcePath}/manga/${encodeURIComponent(match.id)}`, {}, 0).catch(() => null);
+          const indexed = detail ? indexMangaDetail(syncIndexRef.current, key, target.sourceId, { ...detail, url: target.url, id: match.id }) : syncIndexRef.current;
+          const entry = { ...(indexed[key] || { syncKey: t.syncKey, id: String(match.id), sourceId: target.sourceId, chapters: {} }), cover: detail?.cover || match.cover || '' };
+          syncIndexRef.current = { ...syncIndexRef.current, [key]: entry };
+          setSyncIndex(syncIndexRef.current);
+          delete attempts[t.syncKey];
+          found = true;
+        }
+      } catch { /* retried after the wait */ }
+    }
+    storage.set('syncLookupsV1', attempts);
+    return found;
+  }, [fetchJSON]);
+
+  // Titles read before sign-in were never indexed. Load their details (served from the
+  // backend cache when possible) so their progress and read chapters can upload.
+  const backfillSyncIndex = useCallback(async () => {
+    const lookups = storage.get('syncLookupsV1', {});
+    const now = Date.now();
+    const candidates = new Map();
+    const add = (id, sourceId) => {
+      const key = getMangaKey(id, sourceId);
+      if (key && id != null && sourceId != null && !syncIndexRef.current[key]) candidates.set(key, { id: String(id), sourceId: String(sourceId) });
+    };
+    libraryRef.current.forEach(m => add(m.id, m.sourceId));
+    historyRef.current.forEach(m => add(m.id, m.sourceId));
+    let fetched = 0;
+    for (const [key, { id, sourceId }] of candidates) {
+      if (fetched >= 8) break;
+      if (!sourcesRef.current[sourceId] || now - (lookups[`idx:${key}`] || 0) < 6 * 3600 * 1000) continue;
+      fetched += 1;
+      lookups[`idx:${key}`] = now;
+      try {
+        const detail = await fetchJSON(`/source/${encodeURIComponent(sourceId)}/manga/${encodeURIComponent(id)}`, {}, 0);
+        const next = indexMangaDetail(syncIndexRef.current, key, sourceId, { ...detail, id });
+        if (next !== syncIndexRef.current) { syncIndexRef.current = next; setSyncIndex(next); delete lookups[`idx:${key}`]; }
+      } catch { /* retried after the wait */ }
+    }
+    storage.set('syncLookupsV1', lookups);
+  }, [fetchJSON]);
+
+  const runCloudSync = useCallback(async () => {
+    let session = cloudSessionRef.current;
+    if (!session || cloudBusyRef.current || !cloud.configured) return;
+    cloudBusyRef.current = true;
+    setCloudStatus(s => ({ ...s, state: 'syncing' }));
+    try {
+      if (!session.expiresAt || session.expiresAt - Date.now() < 120000) {
+        session = await cloud.refresh(session);
+        setCloudSession(session);
+      }
+      await backfillSyncIndex();
+      const previous = storage.get('syncDocV1', null);
+      const sourceNames = Object.fromEntries(Object.values(sourcesRef.current).map(s => [String(s.id), s.displayName || s.name]));
+      const local = buildLocalDoc({
+        library: libraryRef.current, history: historyRef.current, progress: progressRef.current, readChapters: readChaptersRef.current,
+        index: syncIndexRef.current, removals: storage.get('syncRemovalsV1', {}), getMangaKey, previous, sourceNames,
+        installedExtensions: extRef.current.filter(e => e.isInstalled), extensionChanges: storage.get('syncExtV1', {}),
+      });
+      const remote = await cloud.pull(session);
+      const merged = mergeDocs(remote || { titles: {} }, local);
+      const unresolved = applyCloudDoc(merged);
+      if (!remote || !docsEqual(remote, merged)) await cloud.push(session, merged);
+      storage.set('syncDocV1', merged);
+      const at = Date.now();
+      storage.set('cloudLastSyncV1', at);
+      const waiting = {};
+      unresolved.forEach(t => {
+        const sourceId = splitSyncKey(t.syncKey)?.sourceId;
+        if (sourceId && !sourcesRef.current[sourceId]) {
+          const name = (t.sourceName || 'another source').replace(/\s*\([A-Z-]+\)$/, '');
+          waiting[name] = (waiting[name] || 0) + 1;
+        }
+      });
+      setCloudStatus({ state: 'idle', lastSyncAt: at, error: '', waiting: Object.entries(waiting).map(([source, count]) => ({ source, count })) });
+      // Install the account's extensions this device lacks; a failed one waits six hours.
+      const lookups = storage.get('syncLookupsV1', {});
+      const toInstall = planExtensionInstalls(merged, extRef.current).filter(pkg => at - (lookups[`ext:${pkg}`] || 0) > 6 * 3600 * 1000).slice(0, 10);
+      if (toInstall.length) {
+        toInstall.forEach(pkg => { lookups[`ext:${pkg}`] = at; });
+        storage.set('syncLookupsV1', lookups);
+        toastRef.current?.(`Installing ${toInstall.length} extension${toInstall.length === 1 ? '' : 's'} from your account…`, 'info');
+        (async () => { for (const pkg of toInstall) await installExt(pkg); })();
+      }
+      // Titles found on their source are applied straight away.
+      if (unresolved.length && await resolveCloudTitles(unresolved)) applyCloudDoc(merged);
+    } catch (error) {
+      const authFailed = [400, 401, 403].includes(error?.status) && /refresh|jwt|token/i.test(error?.message || '');
+      if (authFailed) setCloudSession(null);
+      setCloudStatus(s => ({ ...s, state: 'error', error: authFailed ? 'Signed out. Sign in again to keep syncing.' : (error?.message || 'Sync failed') }));
+    } finally {
+      cloudBusyRef.current = false;
+    }
+  }, [cloud, setCloudSession, applyCloudDoc, resolveCloudTitles, backfillSyncIndex, installExt]);
+
+  const cloudSignIn = useCallback(async (email, password, createAccount) => {
+    const session = createAccount ? await cloud.signUp(email, password) : await cloud.signIn(email, password);
+    setCloudSession(session);
+    return session;
+  }, [cloud, setCloudSession]);
+
+  // Google sign-in: the system browser handles Google; Electron (loopback port) or the
+  // Android app (akareader:// link) hands the one-time code back for the PKCE exchange.
+  const cloudSignInWithGoogle = useCallback(async () => {
+    const bridge = window.electronAPI?.startOAuth ? window.electronAPI : window.akaReaderAndroid?.startOAuth ? window.akaReaderAndroid : null;
+    if (!bridge) throw new Error('Google sign-in works in the desktop and Android apps.');
+    const { verifier, challenge } = await createPkcePair();
+    const redirectTo = IS_ANDROID_APP ? 'akareader://auth-callback' : 'http://127.0.0.1:54329/auth/callback';
+    const result = await bridge.startOAuth(cloud.oauthUrl('google', redirectTo, challenge));
+    if (result?.cancelled) return null;
+    if (!result?.ok || !result.code) throw new Error(result?.error || 'Google sign-in did not finish.');
+    const session = await cloud.exchangeCode(result.code, verifier);
+    setCloudSession(session);
+    return session;
+  }, [cloud, setCloudSession]);
+
+  const cloudSignOut = useCallback(async () => {
+    const session = cloudSessionRef.current;
+    setCloudSession(null);
+    // The merged document and removals belong to that account; library data stays on the device.
+    ['syncDocV1', 'syncRemovalsV1', 'syncLookupsV1', 'syncExtV1', 'cloudLastSyncV1'].forEach(key => localStorage.removeItem(key));
+    setCloudStatus({ state: 'idle', lastSyncAt: 0, error: '' });
+    if (session) await cloud.signOut(session);
+  }, [cloud, setCloudSession]);
+
+  // Sync on sign-in, when the app comes back to the front, every two minutes, and
+  // 15 seconds after the last local change to the library, progress or read chapters.
+  const cloudUserId = cloudSession?.user?.id;
+  useEffect(() => {
+    if (!cloudUserId) return undefined;
+    runCloudSync();
+    const onVisible = () => { if (document.visibilityState === 'visible') runCloudSync(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    const timer = setInterval(onVisible, 120000);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+      clearInterval(timer);
+    };
+  }, [cloudUserId, runCloudSync]);
+  useEffect(() => {
+    if (!cloudSessionRef.current) return undefined;
+    const timer = setTimeout(runCloudSync, 15000);
+    return () => clearTimeout(timer);
+  }, [library, progress, readChapters, syncIndex, extensions, sources, runCloudSync]);
+
   const value = useMemo(() => ({
     backendOnline, sources, extensions, library, history, progress,
     mangaCategories, installing, readingTime, settings, updates, checkingUpdates, updateCheckSummary,
@@ -1144,8 +1428,9 @@ const DataProvider = memo(({ children }) => {
     queueChaptersForDownload, cancelDownload, cancelActiveDownloads,
     addCategory, removeCategory, categories,
     getMangaKey, downloadedKeys, downloadedChapters, refreshDownloads,
+    cloudSession, cloudStatus, cloudSignIn, cloudSignInWithGoogle, cloudSignOut, runCloudSync, recordSyncDetail, recordLibraryRemoval,
     inLibrary: (id, sourceId) => library.some(m => String(m.id) === String(id) && (sourceId ? String(m.sourceId) === String(sourceId) : true))
-  }), [backendOnline, sources, extensions, library, history, progress, mangaCategories, installing, readingTime, settings, updates, checkingUpdates, updateCheckSummary, readChapters, suwayomiReady, setSuwayomiReady, downloadQueue, overlayHidden, fetchJSON, checkHealth, fetchSources, fetchExtensions, installExt, uninstallExt, updateExt, toggleLibrary, setCategory, addToHistory, removeFromHistory, removeMangaCompletely, updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates, handleMigrate, queueChaptersForDownload, cancelDownload, cancelActiveDownloads, addCategory, removeCategory, categories, downloadedKeys, downloadedChapters, refreshDownloads]);
+  }), [backendOnline, sources, extensions, library, history, progress, mangaCategories, installing, readingTime, settings, updates, checkingUpdates, updateCheckSummary, readChapters, suwayomiReady, setSuwayomiReady, downloadQueue, overlayHidden, fetchJSON, checkHealth, fetchSources, fetchExtensions, installExt, uninstallExt, updateExt, toggleLibrary, setCategory, addToHistory, removeFromHistory, removeMangaCompletely, updateProgress, markChapterRead, addReadingTime, updateSetting, checkForUpdates, handleMigrate, queueChaptersForDownload, cancelDownload, cancelActiveDownloads, addCategory, removeCategory, categories, downloadedKeys, downloadedChapters, refreshDownloads, cloudSession, cloudStatus, cloudSignIn, cloudSignInWithGoogle, cloudSignOut, runCloudSync, recordSyncDetail, recordLibraryRemoval]);
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 });
@@ -1426,6 +1711,7 @@ const SETTINGS_SECTIONS = [
   { id: 'library', label: 'Library & updates', icon: Library, lede: 'Categories, and how often akaReader looks for new chapters.', keywords: 'categories chapter updates interval check notifications auto-download new chapters' },
   { id: 'downloads', label: 'Downloads & storage', icon: HardDrive, lede: 'What happens to chapters saved for offline reading.', keywords: 'offline auto-delete read chapters storage data folder directory' },
   { id: 'extensions', label: 'Extensions', icon: Puzzle, lede: 'Where akaReader finds extensions. Keiyoushi is built in.', keywords: 'repository repositories repo keiyoushi index store custom' },
+  { id: 'sync', label: 'Sync', icon: Cloud, lede: 'Keep your library and reading progress the same on your PC and phone.', keywords: 'account sync cloud sign in login email phone android devices progress' },
   { id: 'integrations', label: 'Integrations', icon: Plug, lede: 'Optional connections to other apps.', keywords: 'discord rich presence', divider: true },
   { id: 'data', label: 'Backup & data', icon: DatabaseBackup, lede: 'Back up your library and reading data, or clear parts of it.', keywords: 'backup export import restore clear history progress reading time' },
   { id: 'system', label: 'System', icon: Server, lede: "Local services akaReader runs for you. You normally won't need this page.", keywords: 'java suwayomi backend api server health check repair windows service config jar' },
@@ -1477,6 +1763,93 @@ const CategoryAddRow = memo(({ onAdd }) => {
   );
 });
 
+const syncStatusText = (status) => (status.state === 'syncing' ? 'Syncing…'
+  : status.state === 'error' ? status.error
+    : status.lastSyncAt ? `Last synced ${timeAgo(status.lastSyncAt)}` : 'Not synced yet');
+
+const SyncSettings = memo(() => {
+  const { cloudSession, cloudStatus, cloudSignIn, cloudSignInWithGoogle, cloudSignOut, runCloudSync } = useData();
+  const toast = useToast();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      await cloudSignIn(email.trim(), password, creating);
+      setPassword('');
+      toast(creating ? 'Account created. Syncing…' : 'Signed in. Syncing…', 'success');
+    } catch (error) {
+      toast(error?.message || 'Sign-in failed', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const google = async () => {
+    setBusy(true);
+    try {
+      if (await cloudSignInWithGoogle()) toast('Signed in with Google. Syncing…', 'success');
+    } catch (error) {
+      toast(error?.message || 'Google sign-in failed', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (cloudSession) {
+    return (
+      <>
+        <SetGroup title="Account">
+          <SetRow label={cloudSession.user?.email || 'Signed in'} sub={syncStatusText(cloudStatus)}>
+            <Btn variant="outline" size="sm" icon={RefreshCw} disabled={cloudStatus.state === 'syncing'} onClick={runCloudSync}>Sync now</Btn>
+            <Btn variant="outline" size="sm" icon={LogOut} onClick={cloudSignOut}>Sign out</Btn>
+          </SetRow>
+        </SetGroup>
+        {cloudStatus.waiting?.length > 0 && (
+          <SetGroup title="Waiting for extensions" note="These titles are in your account but come from sources this computer doesn't have yet. Extensions installed on your other device install here on their own; install any others from Browse > Extensions.">
+            {cloudStatus.waiting.map(w => <SetRow key={w.source} label={w.source} sub={`${w.count} title${w.count === 1 ? '' : 's'}`} />)}
+          </SetGroup>
+        )}
+        <SetGroup title="What syncs" note="Changes sync a few seconds after you make them, when the app comes back to the front, and every two minutes.">
+          <SetRow label="Library" sub="Titles you add or remove" />
+          <SetRow label="Reading progress" sub="The chapter and page you're on; the most recent read wins" />
+          <SetRow label="Read chapters" sub="Matched by chapter number on each device" />
+          <SetRow label="Extensions" sub="Installed on your other device installs here too; removing one here doesn't remove it there" />
+        </SetGroup>
+        <p className="set-hint">Downloaded chapters, categories and settings stay on each device.</p>
+      </>
+    );
+  }
+
+  return (
+    <SetGroup title={creating ? 'Create an account' : 'Sign in'} note="Use the same account on your phone and here. Only your library and reading progress are stored with it.">
+      <div className="set-row">
+        <div className="set-row-text"><p className="set-row-label">Google</p><p className="set-row-sub">Opens your browser to choose a Google account</p></div>
+        <div className="set-row-control"><Btn size="sm" variant="outline" icon={GoogleLogo} disabled={busy} onClick={google}>{busy ? 'Waiting for browser…' : 'Continue with Google'}</Btn></div>
+      </div>
+      <form className="set-row" onSubmit={submit} style={{ flexWrap: 'wrap', gap: 10 }}>
+        <input className="set-input" type="email" autoComplete="email" required value={email} onChange={e => setEmail(e.target.value)} placeholder="Email" aria-label="Email" />
+        <input className="set-input" type="password" autoComplete={creating ? 'new-password' : 'current-password'} required minLength={6} value={password} onChange={e => setPassword(e.target.value)} placeholder={creating ? 'Password (6+ characters)' : 'Password'} aria-label="Password" />
+        <div className="set-row-control">
+          <Btn size="sm" type="submit" icon={Cloud} disabled={busy || !email.trim() || password.length < 6}>{busy ? 'Working…' : creating ? 'Create account' : 'Sign in'}</Btn>
+        </div>
+      </form>
+      <div className="set-row">
+        <p className="set-row-sub" style={{ margin: 0 }}>
+          {creating ? 'Already have an account?' : 'No account yet?'}{' '}
+          <button type="button" onClick={() => setCreating(v => !v)} style={{ background: 'none', border: 'none', padding: 0, color: 'var(--accent)', font: 'inherit', fontWeight: 600, cursor: 'pointer' }}>
+            {creating ? 'Sign in' : 'Create one'}
+          </button>
+        </p>
+      </div>
+    </SetGroup>
+  );
+});
+
 // Mirrors the reader's mode, fit, background and brightness on a real cover from the library.
 const ReaderPreview = memo(({ settings, cover }) => {
   const themeKey = settings?.readerTheme || 'dark';
@@ -1510,10 +1883,225 @@ const ReaderPreview = memo(({ settings, cover }) => {
 });
 
 
+// Right-hand panel that shows what the open section affects, so wide windows aren't half empty.
+const SettingsAside = memo(({ section, previewCover }) => {
+  const {
+    settings, library, history, progress, categories, mangaCategories, extensions,
+    downloadedChapters, readChapters, updateCheckSummary, getMangaKey,
+  } = useData();
+  const [quota, setQuota] = useState(null);
+  useEffect(() => {
+    if (section !== 'downloads') return undefined;
+    let cancelled = false;
+    navigator.storage?.estimate?.().then(value => { if (!cancelled) setQuota(value); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [section]);
+  const storage = useMemo(() => (section === 'downloads'
+    ? summarizeDownloadedChapters({ records: downloadedChapters, library: library.map(m => ({ ...m, mangaKey: getMangaKey(m.id, m.sourceId) })), readChapters })
+    : null), [section, downloadedChapters, library, readChapters, getMangaKey]);
+
+  if (section === 'reader') return <aside className="set-aside"><ReaderPreview settings={settings} cover={previewCover} /></aside>;
+
+  if (section === 'general') {
+    const covers = [...history, ...library].filter(m => m?.cover).filter((m, i, all) => all.findIndex(x => x.cover === m.cover) === i).slice(0, 5);
+    const light = settings?.appTheme === 'light';
+    return (
+      <aside className="set-aside">
+        <h3 className="set-group-title">Preview</h3>
+        <div className={`set-app-preview${light ? ' light' : ''}`}>
+          <div className="nav"><i className="logo" /><i className="item on" /><i className="item" /><i className="item" /><i className="item" /></div>
+          <div className="body">
+            <b>Library</b>
+            <div className="covers">
+              {covers.length ? covers.map(m => <img key={m.cover} src={proxyImg(m.cover)} alt="" />) : [0, 1, 2, 3, 4].map(i => <span key={i} />)}
+            </div>
+            <span className="btn">Resume</span>
+          </div>
+        </div>
+        <p className="set-preview-cap">
+          {light ? 'Light' : 'Dark'} theme · {(settings?.accentColor || '#f97316').toUpperCase()} accent{window.electronAPI?.setZoomFactor ? ` · ${Math.round((settings?.uiScale || 1) * 100)}% UI size` : ''}
+        </p>
+      </aside>
+    );
+  }
+
+  if (section === 'library') {
+    const counts = {};
+    library.forEach(m => { const c = mangaCategories[getMangaKey(m.id, m.sourceId)]; if (c) counts[c] = (counts[c] || 0) + 1; });
+    return (
+      <aside className="set-aside">
+        <h3 className="set-group-title">Your categories</h3>
+        <div className="set-card">
+          {categories.map(cat => (
+            <div key={cat.id} className="set-row"><span className="set-row-label"><span className="set-dot" style={{ background: cat.color }} />{cat.name}</span><span className="set-aside-num">{counts[cat.id] || 0}</span></div>
+          ))}
+          <div className="set-row"><span className="set-row-label" style={{ color: 'var(--muted)' }}>Uncategorized</span><span className="set-aside-num">{library.length - Object.values(counts).reduce((a, b) => a + b, 0)}</span></div>
+        </div>
+        <h3 className="set-group-title" style={{ marginTop: 22 }}>Last check</h3>
+        <div className="set-card"><div className="set-row"><span className="set-row-sub" style={{ margin: 0 }}>
+          {updateCheckSummary?.checkedAt
+            ? `${timeAgo(updateCheckSummary.checkedAt)} · ${updateCheckSummary.found || 0} new chapter${updateCheckSummary.found === 1 ? '' : 's'}${updateCheckSummary.errors ? ` · ${updateCheckSummary.errors} title${updateCheckSummary.errors === 1 ? '' : 's'} failed` : ''}`
+            : 'No check has run yet'}
+        </span></div></div>
+      </aside>
+    );
+  }
+
+  if (section === 'downloads' && storage) {
+    const pct = quota?.quota > 0 ? Math.min(100, (quota.usage || 0) / quota.quota * 100) : null;
+    return (
+      <aside className="set-aside">
+        <h3 className="set-group-title">Offline storage</h3>
+        <div className="set-card" style={{ padding: '18px 20px' }}>
+          <p className="set-aside-big">{formatByteSize(storage.sizeBytes)}</p>
+          <p className="set-row-sub">{storage.mangaCount} titles · {storage.chapterCount} chapters · {storage.readCount} already read</p>
+          {pct !== null && (
+            <>
+              <div className="home-bar" style={{ margin: '14px 0 6px', height: 6 }}><i style={{ width: `${Math.max(pct, 0.5)}%` }} /></div>
+              <p className="set-row-sub">{formatByteSize(quota.usage || 0)} of {formatByteSize(quota.quota)} this app may use</p>
+            </>
+          )}
+        </div>
+        {storage.groups.length > 0 && (
+          <div className="set-card" style={{ marginTop: 14 }}>
+            {storage.groups.slice(0, 5).map(g => (
+              <div key={g.mangaKey} className="set-row"><span className="set-row-label" style={{ fontSize: 14.5 }}>{g.mangaTitle}</span><span className="set-aside-num">{formatByteSize(g.sizeBytes)}</span></div>
+            ))}
+          </div>
+        )}
+      </aside>
+    );
+  }
+
+  if (section === 'extensions') {
+    const installed = extensions.filter(e => e?.isInstalled);
+    const outdated = installed.filter(e => e.hasUpdate);
+    return (
+      <aside className="set-aside">
+        <h3 className="set-group-title">Installed · {installed.length}</h3>
+        <div className="set-card">
+          {(outdated.length ? outdated : installed).slice(0, 8).map(e => (
+            <div key={e.pkgName || e.name} className="set-row">
+              <span className="set-row-label" style={{ fontSize: 14.5 }}>{e.name}</span>
+              {e.hasUpdate ? <span className="set-tag accent">Update</span> : <span className="set-aside-num">{e.versionName || ''}</span>}
+            </div>
+          ))}
+          {installed.length === 0 && <div className="set-row"><span className="set-row-sub" style={{ margin: 0 }}>No extensions installed yet</span></div>}
+        </div>
+        {outdated.length > 0 && <p className="set-hint">{outdated.length} {outdated.length === 1 ? 'extension has' : 'extensions have'} an update. Update them from the Extensions tab.</p>}
+      </aside>
+    );
+  }
+
+  if (section === 'integrations') {
+    return (
+      <aside className="set-aside">
+        <h3 className="set-group-title">What Discord shows</h3>
+        <div className="set-discord">
+          <span className="set-discord-icon"><BookOpen size={22} /></span>
+          <div><b>akaReader</b><small>Reading manga</small></div>
+        </div>
+        <p className="set-hint">Only "Browsing manga" or "Reading manga". Titles, chapters, sources and history are never sent.</p>
+      </aside>
+    );
+  }
+
+  if (section === 'data') {
+    return (
+      <aside className="set-aside">
+        <h3 className="set-group-title">In a backup</h3>
+        <div className="set-card">
+          {[['Library titles', library.length], ['History entries', history.length], ['Titles with progress', Object.keys(progress).length], ['Categories', categories.length]].map(([label, value]) => (
+            <div key={label} className="set-row"><span className="set-row-label" style={{ fontSize: 14.5 }}>{label}</span><span className="set-aside-num">{value}</span></div>
+          ))}
+        </div>
+        <p className="set-hint">Settings, notes and reading time are included too. Downloaded chapter images are not.</p>
+      </aside>
+    );
+  }
+
+  return null;
+});
+
+// Backup export/restore. Desktop uses Electron's native dialogs; the Android app exposes the
+// same two calls through window.akaReaderAndroid (system file picker).
+// installedExtensions is the package list, so a restore can reinstall the same sources from the store.
+const collectBackupPayload = async (extensions = []) => {
+  const noteKeys = [];
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (key?.startsWith('aka:note:')) noteKeys.push(key);
+  }
+  const appVersion = await Promise.resolve(window.electronAPI?.getVersion?.()).catch(() => '');
+  const installedExtensions = [...new Set(extensions.filter(e => e?.isInstalled && e.pkgName).map(e => String(e.pkgName)))];
+  return createAppBackup((key) => (
+    key === 'installedExtensions' ? (installedExtensions.length ? installedExtensions : undefined)
+      : key.startsWith('aka:note:') ? localStorage.getItem(key) : storage.get(key, undefined)
+  ), {
+    appVersion: appVersion || import.meta.env.PACKAGE_VERSION || '',
+    platform: window.electronAPI?.platform || (IS_ANDROID_APP ? 'android' : navigator.platform || ''),
+    noteKeys,
+  });
+};
+
+const backupBridge = () => (window.electronAPI?.exportAppBackup ? window.electronAPI : window.akaReaderAndroid?.exportAppBackup ? window.akaReaderAndroid : null);
+
+const useBackupActions = () => {
+  const toast = useToast();
+  const { extensions } = useData();
+  const [backupWorking, setBackupWorking] = useState(false);
+
+  const exportBackup = useCallback(async () => {
+    const bridge = backupBridge();
+    if (!bridge) {
+      toast('Backup export is available in the desktop app', 'warning');
+      return;
+    }
+    setBackupWorking(true);
+    try {
+      const result = await bridge.exportAppBackup(await collectBackupPayload(extensions));
+      if (result?.cancelled) return;
+      if (!result?.ok) throw new Error(result?.error || 'Backup failed.');
+      toast('Backup saved', 'success');
+    } catch (error) {
+      toast(error?.message || 'Backup failed', 'error');
+    } finally {
+      setBackupWorking(false);
+    }
+  }, [toast, extensions]);
+
+  const importBackup = useCallback(async () => {
+    const bridge = backupBridge();
+    if (!bridge) {
+      toast('Backup restore is available in the desktop app', 'warning');
+      return;
+    }
+    setBackupWorking(true);
+    try {
+      const result = await bridge.importAppBackup();
+      if (result?.cancelled) return;
+      if (!result?.ok) throw new Error(result?.error || 'Restore failed.');
+      const restoredKeys = applyAppBackup(result.payload, (key, value) => {
+        if (key.startsWith('aka:note:')) localStorage.setItem(key, String(value ?? ''));
+        else if (key === 'installedExtensions') storage.set('pendingExtensionInstalls', value.filter(v => typeof v === 'string').slice(0, 300));
+        else storage.set(key, value);
+      });
+      toast(`Restored ${restoredKeys.length} data groups. Reloading…`, 'success');
+      setTimeout(() => window.location.reload(), 800);
+    } catch (error) {
+      toast(error?.message || 'Restore failed', 'error');
+    } finally {
+      setBackupWorking(false);
+    }
+  }, [toast]);
+
+  return { backupWorking, exportBackup, importBackup };
+};
+
 const SettingsPage = memo(() => {
   const {
     settings, updateSetting, backendOnline, checkHealth, library, history,
-    progress, readingTime, fetchSources, fetchExtensions,
+    progress, readingTime, fetchSources, fetchExtensions, extensions,
     suwayomiReady, categories, addCategory, removeCategory
   } = useData();
   const toast = useToast();
@@ -1528,7 +2116,7 @@ const SettingsPage = memo(() => {
   const [diagnostics, setDiagnostics] = useState(null);
   const [diagnosticsWorking, setDiagnosticsWorking] = useState(false);
   const [repairWorking, setRepairWorking] = useState(false);
-  const [backupWorking, setBackupWorking] = useState(false);
+  const { backupWorking, exportBackup, importBackup } = useBackupActions();
   const [discordPresence, setDiscordPresence] = useState({ enabled: false, mode: 'browsing', status: 'unsupported' });
   const [discordPresenceWorking, setDiscordPresenceWorking] = useState(false);
   const [section, setSection] = useState(() => storage.get('settingsSection', 'general'));
@@ -1768,21 +2356,6 @@ const SettingsPage = memo(() => {
     }
   };
 
-  const collectBackupPayload = useCallback(async () => {
-    const noteKeys = [];
-    for (let index = 0; index < localStorage.length; index += 1) {
-      const key = localStorage.key(index);
-      if (key?.startsWith('aka:note:')) noteKeys.push(key);
-    }
-    const appVersion = await Promise.resolve(window.electronAPI?.getVersion?.()).catch(() => '');
-    return createAppBackup((key) => (
-      key.startsWith('aka:note:') ? localStorage.getItem(key) : storage.get(key, undefined)
-    ), {
-      appVersion,
-      platform: window.electronAPI?.platform || navigator.platform || '',
-      noteKeys,
-    });
-  }, []);
 
   const runDiagnostics = useCallback(async () => {
     if (!window.electronAPI?.getSystemDiagnostics) {
@@ -1819,51 +2392,11 @@ const SettingsPage = memo(() => {
     }
   }, [checkHealth, toast]);
 
-  const exportBackup = useCallback(async () => {
-    if (!window.electronAPI?.exportAppBackup) {
-      toast('Backup export is available in the desktop app', 'warning');
-      return;
-    }
-    setBackupWorking(true);
-    try {
-      const result = await window.electronAPI.exportAppBackup(await collectBackupPayload());
-      if (result?.cancelled) return;
-      if (!result?.ok) throw new Error(result?.error || 'Backup failed.');
-      toast('Backup saved', 'success');
-    } catch (error) {
-      toast(error?.message || 'Backup failed', 'error');
-    } finally {
-      setBackupWorking(false);
-    }
-  }, [collectBackupPayload, toast]);
-
-  const importBackup = useCallback(async () => {
-    if (!window.electronAPI?.importAppBackup) {
-      toast('Backup restore is available in the desktop app', 'warning');
-      return;
-    }
-    setBackupWorking(true);
-    try {
-      const result = await window.electronAPI.importAppBackup();
-      if (result?.cancelled) return;
-      if (!result?.ok) throw new Error(result?.error || 'Restore failed.');
-      const restoredKeys = applyAppBackup(result.payload, (key, value) => {
-        if (key.startsWith('aka:note:')) localStorage.setItem(key, String(value ?? ''));
-        else storage.set(key, value);
-      });
-      toast(`Restored ${restoredKeys.length} data groups. Reloading…`, 'success');
-      setTimeout(() => window.location.reload(), 800);
-    } catch (error) {
-      toast(error?.message || 'Restore failed', 'error');
-    } finally {
-      setBackupWorking(false);
-    }
-  }, [toast]);
 
   const downloadAppUpdateSafely = useCallback(async () => {
     try {
       if (window.electronAPI?.saveAutomaticBackup) {
-        const backup = await window.electronAPI.saveAutomaticBackup(await collectBackupPayload());
+        const backup = await window.electronAPI.saveAutomaticBackup(await collectBackupPayload(extensions));
         if (!backup?.ok) throw new Error(backup?.error || 'The safety backup could not be created.');
       }
       const result = await window.electronAPI?.downloadAppUpdate?.();
@@ -1872,12 +2405,12 @@ const SettingsPage = memo(() => {
     } catch (error) {
       toast(`${error?.message || 'Update failed'} The update was not started.`, 'error');
     }
-  }, [collectBackupPayload, toast]);
+  }, [toast, extensions]);
 
   const installAppUpdateSafely = useCallback(async () => {
     try {
       if (window.electronAPI?.saveAutomaticBackup) {
-        const backup = await window.electronAPI.saveAutomaticBackup(await collectBackupPayload());
+        const backup = await window.electronAPI.saveAutomaticBackup(await collectBackupPayload(extensions));
         if (!backup?.ok) throw new Error(backup?.error || 'The safety backup could not be created.');
       }
       const result = await window.electronAPI?.installAppUpdate?.();
@@ -1885,7 +2418,7 @@ const SettingsPage = memo(() => {
     } catch (error) {
       toast(`${error?.message || 'Update failed'} akaReader was not restarted.`, 'error');
     }
-  }, [collectBackupPayload, toast]);
+  }, [toast, extensions]);
 
   const accent = (settings?.accentColor || '#f97316').toLowerCase();
   const customAccent = !ACCENT_PRESETS.includes(accent);
@@ -1927,7 +2460,7 @@ const SettingsPage = memo(() => {
             <React.Fragment key={s.id}>
               {s.divider && !railQueryText && <div className="set-rail-sep" />}
               <button type="button" className={`set-rail-item${s.id === current.id ? ' on' : ''}`} aria-current={s.id === current.id ? 'page' : undefined} onClick={() => openSection(s.id)}>
-                <Icon size={15} />
+                <Icon size={17} />
                 <span className="set-rail-label">{s.label}</span>
                 {tag && <span className={`set-tag ${tag.tone}`}>{tag.label}</span>}
               </button>
@@ -1937,13 +2470,19 @@ const SettingsPage = memo(() => {
         {visibleSections.length === 0 && <p className="set-rail-empty">No settings match “{railQuery.trim()}”</p>}
       </nav>
 
-      <div className="set-pane" key={current.id}>
+      <div className="set-main" key={current.id}>
+      <div className="set-pane">
         <h2 className="set-title">{current.label}</h2>
         {current.lede && <p className="set-lede">{current.lede}</p>}
 
         {current.id === 'general' && (
           <>
             <SetGroup title="Appearance">
+              {window.electronAPI?.setZoomFactor && (
+                <SetRow label="UI size" sub="Makes all text and controls larger on big screens">
+                  <SetSegs ariaLabel="UI size" value={settings?.uiScale || 1} options={[[1, '100%'], [1.1, '110%'], [1.25, '125%']]} onChange={v => updateSetting('uiScale', v)} />
+                </SetRow>
+              )}
               <SetRow label="App theme">
                 <SetSegs ariaLabel="App theme" value={settings?.appTheme || 'dark'} options={[['dark', 'Dark'], ['light', 'Light']]} onChange={v => updateSetting('appTheme', v)} />
               </SetRow>
@@ -1994,35 +2533,32 @@ const SettingsPage = memo(() => {
         )}
 
         {current.id === 'reader' && (
-          <div className="set-split">
-            <div className="set-split-main">
-              <SetGroup title="Layout">
-                <SetRow label="Reading mode" sub="Used when a chapter opens">
-                  <SetSegs ariaLabel="Reading mode" value={settings?.readerMode || 'scroll'} options={[['scroll', 'Scroll'], ['paged', 'Paged'], ['webtoon', 'Webtoon']]} onChange={v => updateSetting('readerMode', v)} />
-                </SetRow>
-                <SetRow label="Fit pages to" sub="Paged mode">
-                  <SetSegs ariaLabel="Fit pages to" value={settings?.fitMode || 'height'} options={[['height', 'Height'], ['width', 'Width'], ['original', 'Original']]} onChange={v => updateSetting('fitMode', v)} />
-                </SetRow>
-              </SetGroup>
-              <SetGroup title="Look">
-                <SetRow label="Background" sub={(THEMES[settings?.readerTheme] || THEMES.dark)?.label}>
-                  <div className="set-swatches square">
-                    {Object.entries(THEMES).map(([key, t]) => (
-                      <button key={key} type="button" title={t.label} aria-label={`${t.label} background`} aria-pressed={(settings?.readerTheme || 'dark') === key} className={(settings?.readerTheme || 'dark') === key ? 'on' : ''} style={{ background: t.bg }} onClick={() => updateSetting('readerTheme', key)} />
-                    ))}
-                  </div>
-                </SetRow>
-                <SetRow label="Brightness" sub={`${settings?.brightness || 100}%`}>
-                  <input type="range" className="set-range" min="40" max="150" aria-label="Brightness" value={settings?.brightness || 100}
-                    onPointerDown={e => e.stopPropagation()}
-                    onTouchStart={e => e.stopPropagation()}
-                    onChange={e => updateSetting('brightness', Number(e.target.value))} />
-                </SetRow>
-              </SetGroup>
-              <p className="set-hint">All of these can also be changed while reading, from the reader's settings panel.</p>
-            </div>
-            <ReaderPreview settings={settings} cover={previewCover} />
-          </div>
+          <>
+          <SetGroup title="Layout">
+            <SetRow label="Reading mode" sub="Used when a chapter opens">
+              <SetSegs ariaLabel="Reading mode" value={settings?.readerMode || 'scroll'} options={[['scroll', 'Scroll'], ['paged', 'Paged'], ['webtoon', 'Webtoon']]} onChange={v => updateSetting('readerMode', v)} />
+            </SetRow>
+            <SetRow label="Fit pages to" sub="Paged mode">
+              <SetSegs ariaLabel="Fit pages to" value={settings?.fitMode || 'height'} options={[['height', 'Height'], ['width', 'Width'], ['original', 'Original']]} onChange={v => updateSetting('fitMode', v)} />
+            </SetRow>
+          </SetGroup>
+          <SetGroup title="Look">
+            <SetRow label="Background" sub={(THEMES[settings?.readerTheme] || THEMES.dark)?.label}>
+              <div className="set-swatches square">
+                {Object.entries(THEMES).map(([key, t]) => (
+                  <button key={key} type="button" title={t.label} aria-label={`${t.label} background`} aria-pressed={(settings?.readerTheme || 'dark') === key} className={(settings?.readerTheme || 'dark') === key ? 'on' : ''} style={{ background: t.bg }} onClick={() => updateSetting('readerTheme', key)} />
+                ))}
+              </div>
+            </SetRow>
+            <SetRow label="Brightness" sub={`${settings?.brightness || 100}%`}>
+              <input type="range" className="set-range" min="40" max="150" aria-label="Brightness" value={settings?.brightness || 100}
+                onPointerDown={e => e.stopPropagation()}
+                onTouchStart={e => e.stopPropagation()}
+                onChange={e => updateSetting('brightness', Number(e.target.value))} />
+            </SetRow>
+          </SetGroup>
+          <p className="set-hint">All of these can also be changed while reading, from the reader's settings panel.</p>
+          </>
         )}
 
         {current.id === 'library' && (
@@ -2117,6 +2653,8 @@ const SettingsPage = memo(() => {
             )}
           </SetGroup>
         )}
+
+        {current.id === 'sync' && <SyncSettings />}
 
         {current.id === 'data' && (
           <>
@@ -2267,6 +2805,8 @@ const SettingsPage = memo(() => {
             </SetGroup>
           </>
         )}
+      </div>
+      <SettingsAside section={current.id} previewCover={previewCover} />
       </div>
       {confirmClear && (
         <div className="anim-fadeIn" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -2588,19 +3128,12 @@ const DownloadsTab = memo(({
   const statusLabel = { pending: 'Queued', downloading: 'Downloading…', done: 'Complete', error: 'Failed', cancelled: 'Cancelled' };
 
   return (
-    <div className="page-transition">
-      <StorageManager
-        records={downloadedRecords}
-        library={library}
-        readChapters={readChapters}
-        onDeleteKeys={onDeleteStored}
-        getMangaKey={getMangaKey}
-        resolveCover={proxyImg}
-      />
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 10 }}>
+    <div className="page-transition dl-layout">
+      <div className="dl-main">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
         <div>
-          <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 6 }}>Download activity</h2>
-          <div style={{ display: 'flex', gap: 16 }}>
+          <h2 className="dl-title">Download activity</h2>
+          <div style={{ display: 'flex', gap: 16, fontSize: 13 }}>
             {active > 0 && <span style={{ fontSize: 12, color: 'var(--accent)', fontWeight: 600 }}>{active} active</span>}
             {pending > 0 && <span style={{ fontSize: 12, color: 'var(--muted-fg)' }}>{pending} queued</span>}
             {done > 0 && <span style={{ fontSize: 12, color: '#4ade80' }}>{done} done</span>}
@@ -2618,7 +3151,7 @@ const DownloadsTab = memo(({
       </div>
 
       {queue.length === 0 ? (
-        <EmptyState icon={Download} title="No download activity" sub="Queue chapters from the manga detail page — saved chapters remain listed in Offline storage above" compact />
+        <EmptyState icon={Download} title="Nothing downloading" sub="Queue chapters from a title's page. Saved chapters are listed under Offline storage." compact />
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {queue.map((item) => {
@@ -2666,7 +3199,49 @@ const DownloadsTab = memo(({
           })}
         </div>
       )}
+      <ReadyToDownload />
+      </div>
+      <div className="dl-side">
+        <StorageManager
+          records={downloadedRecords}
+          library={library}
+          readChapters={readChapters}
+          onDeleteKeys={onDeleteStored}
+          getMangaKey={getMangaKey}
+          resolveCover={proxyImg}
+        />
+      </div>
     </div>
+  );
+});
+
+// Library titles whose new chapters aren't saved yet, each one click from the queue.
+const ReadyToDownload = memo(() => {
+  const { updates, downloadQueue, downloadedKeys, queueChaptersForDownload, getMangaKey } = useData();
+  const ready = useMemo(() => {
+    const taken = new Set([...(downloadedKeys || [])].map(String));
+    downloadQueue.forEach(d => { if (d.status !== 'error' && d.status !== 'cancelled') taken.add(String(d.downloadKey || getDownloadKey(getMangaKey(d.mangaId, d.sourceId), d.chapterId))); });
+    return updates.map(m => {
+      const key = getMangaKey(m.id, m.sourceId);
+      const chapters = (Array.isArray(m.newChapterDetails) ? m.newChapterDetails : []).filter(ch => ch?.id != null && !taken.has(String(getDownloadKey(key, ch.id))));
+      return { manga: m, chapters };
+    }).filter(item => item.chapters.length > 0).slice(0, 8);
+  }, [updates, downloadQueue, downloadedKeys, getMangaKey]);
+  if (!ready.length) return null;
+  return (
+    <section style={{ marginTop: 28 }}>
+      <h2 className="dl-title">Ready to download</h2>
+      <p style={{ fontSize: 13, color: 'var(--muted)', margin: '2px 0 12px' }}>New chapters in your library that aren't saved for offline reading yet.</p>
+      <div className="dl-ready">
+        {ready.map(({ manga, chapters }) => (
+          <div key={getMangaKey(manga.id, manga.sourceId)} className="dl-ready-item">
+            <span className="thumb">{manga.cover ? <img src={proxyImg(manga.cover)} alt="" loading="lazy" /> : <BookOpen size={16} />}</span>
+            <span className="txt"><b>{manga.title}</b><small>{chapters.length} new {chapters.length === 1 ? 'chapter' : 'chapters'}</small></span>
+            <Btn size="sm" icon={Download} onClick={() => queueChaptersForDownload(chapters, manga.id, manga.title, manga.sourceId)}>Download {chapters.length}</Btn>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 });
 
@@ -4688,6 +5263,7 @@ const ShareCardModal = memo(({ library, history, progress, readChapters, setting
 const App = memo(() => {
   const data = useData();
   const toast = useToast();
+  const backup = useBackupActions();
   const {
     backendOnline, sources, extensions, library, history, progress,
     mangaCategories, installing, readingTime, settings, updates,
@@ -5917,6 +6493,7 @@ const App = memo(() => {
           installedSources: groupedInstalledSources, extensions: normalizedExts,
           extensionUpdates: installedExts.filter(e => e.hasUpdate).length,
           hasSources: installedSources.length > 0,
+          backup,
         }}
       />
     );
@@ -6546,7 +7123,7 @@ const App = memo(() => {
           {tab === 'home' && (
             <HomeTab
               history={history} library={library} progress={progress}
-              sources={sources} updates={updates} stats={stats}
+              sources={sources} updates={updates}
               getMangaKey={getMangaKey}
               onSelect={openManga}
               onContinue={handleContinueReading}
@@ -7009,7 +7586,7 @@ const RootInner = () => {
   const { settings } = useData();
   return (
     <>
-      <GlobalStyles appTheme={settings?.appTheme || 'dark'} accentColor={settings?.accentColor || '#f97316'} />
+      <GlobalStyles appTheme={settings?.appTheme || 'dark'} accentColor={settings?.accentColor || '#f97316'} uiScale={settings?.uiScale || 1} />
       <App />
     </>
   );

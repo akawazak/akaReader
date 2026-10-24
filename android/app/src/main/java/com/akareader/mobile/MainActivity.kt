@@ -97,19 +97,112 @@ class MainActivity : Activity() {
             val uri = Uri.parse(url)
             if (uri.scheme == "https" || uri.scheme == "http") runCatching { startActivity(Intent(Intent.ACTION_VIEW, uri)) }
         }
+
+        /** Account sign-in: opens the Supabase authorize URL in the browser; the code returns via onNewIntent. */
+        @JavascriptInterface
+        fun startOAuth(callId: String, url: String) = runOnUiThread {
+            if (!url.startsWith(OAUTH_ALLOWED_PREFIX)) {
+                resolve(callId, JSONObject().put("ok", false).put("error", "Invalid sign-in address."))
+                return@runOnUiThread
+            }
+            pendingOAuth?.let { resolve(it, JSONObject().put("ok", false).put("cancelled", true)) }
+            pendingOAuth = callId
+            runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                .onFailure { pendingOAuth = null; resolve(callId, JSONObject().put("ok", false).put("error", "Could not open the browser.")) }
+        }
+
+        /** Backup export: the system "save as" picker, then the renderer's JSON is written there. */
+        @JavascriptInterface
+        fun saveBackup(callId: String, text: String) = runOnUiThread {
+            if (text.length > BACKUP_MAX_BYTES) {
+                resolve(callId, JSONObject().put("ok", false).put("error", "This backup is too large to save."))
+                return@runOnUiThread
+            }
+            pendingBackup = callId
+            pendingBackupText = text
+            val name = "akareader-backup-${java.time.LocalDate.now()}.json"
+            @Suppress("DEPRECATION")
+            startActivityForResult(
+                Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("application/json").putExtra(Intent.EXTRA_TITLE, name),
+                REQUEST_SAVE_BACKUP,
+            )
+        }
+
+        /** Backup restore: the system file picker; the file's text goes back for the renderer to validate. */
+        @JavascriptInterface
+        fun openBackup(callId: String, @Suppress("UNUSED_PARAMETER") unused: String) = runOnUiThread {
+            pendingBackup = callId
+            @Suppress("DEPRECATION")
+            startActivityForResult(
+                Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("*/*")
+                    .putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/json", "text/plain", "application/octet-stream")),
+                REQUEST_OPEN_BACKUP,
+            )
+        }
     }
 
     private var pendingVerification: String? = null
+    private var pendingBackup: String? = null
+    private var pendingOAuth: String? = null
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        val uri = intent.data ?: return
+        if (uri.scheme != "akareader" || uri.host != "auth-callback") return
+        val callId = pendingOAuth ?: return
+        pendingOAuth = null
+        val code = uri.getQueryParameter("code")
+        val error = uri.getQueryParameter("error_description") ?: uri.getQueryParameter("error")
+        resolve(callId, if (code != null) JSONObject().put("ok", true).put("code", code) else JSONObject().put("ok", false).put("error", error ?: "Sign-in was cancelled."))
+    }
+    private var pendingBackupText: String? = null
 
     @Deprecated("Activity results")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         @Suppress("DEPRECATION")
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != REQUEST_VERIFY) return
-        val callId = pendingVerification ?: return
-        pendingVerification = null
-        val result = if (resultCode == RESULT_OK) JSONObject().put("ok", true) else JSONObject().put("ok", false).put("cancelled", true)
-        resolve(callId, result)
+        val cancelled = JSONObject().put("ok", false).put("cancelled", true)
+        when (requestCode) {
+            REQUEST_VERIFY -> {
+                val callId = pendingVerification ?: return
+                pendingVerification = null
+                resolve(callId, if (resultCode == RESULT_OK) JSONObject().put("ok", true) else cancelled)
+            }
+            REQUEST_SAVE_BACKUP, REQUEST_OPEN_BACKUP -> {
+                val callId = pendingBackup ?: return
+                val text = pendingBackupText
+                pendingBackup = null
+                pendingBackupText = null
+                val uri = data?.data
+                if (resultCode != RESULT_OK || uri == null) { resolve(callId, cancelled); return }
+                Thread {
+                    val result = runCatching {
+                        if (requestCode == REQUEST_SAVE_BACKUP) {
+                            contentResolver.openOutputStream(uri, "wt")!!.use { it.write(text!!.toByteArray()) }
+                            JSONObject().put("ok", true)
+                        } else {
+                            val bytes = contentResolver.openInputStream(uri)!!.use { readCapped(it, BACKUP_MAX_BYTES + 1) }
+                            if (bytes.size > BACKUP_MAX_BYTES) JSONObject().put("ok", false).put("error", "This backup is too large to import safely.")
+                            else JSONObject().put("ok", true).put("text", String(bytes))
+                        }
+                    }.getOrElse { JSONObject().put("ok", false).put("error", "The backup file could not be ${if (requestCode == REQUEST_SAVE_BACKUP) "saved" else "opened"}.") }
+                    runOnUiThread { resolve(callId, result) }
+                }.start()
+            }
+        }
+    }
+
+    /** InputStream.readNBytes needs API 33; minSdk is 26. */
+    private fun readCapped(input: java.io.InputStream, limit: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(64 * 1024)
+        while (out.size() < limit) {
+            val n = input.read(buffer, 0, minOf(buffer.size, limit - out.size()))
+            if (n < 0) break
+            out.write(buffer, 0, n)
+        }
+        return out.toByteArray()
     }
 
     private fun resolve(callId: String, result: JSONObject) {
@@ -138,6 +231,10 @@ class MainActivity : Activity() {
 
     private companion object {
         const val REQUEST_VERIFY = 1001
+        const val REQUEST_SAVE_BACKUP = 1002
+        const val REQUEST_OPEN_BACKUP = 1003
+        const val BACKUP_MAX_BYTES = 10 * 1024 * 1024
+        const val OAUTH_ALLOWED_PREFIX = "https://bmavfeblgaeyjnstcwad.supabase.co/auth/v1/authorize?"
 
         val BRIDGE_SCRIPT = """
             (function () {
@@ -156,6 +253,15 @@ class MainActivity : Activity() {
               }
               config.verifySourceUrl = function (url) { return call("verifySource", url); };
               config.openExternal = function (url) { AkaNative.openExternal(String(url)); return Promise.resolve(true); };
+              config.startOAuth = function (url) { return call("startOAuth", url); };
+              config.exportAppBackup = function (payload) { return call("saveBackup", JSON.stringify(payload)); };
+              config.importAppBackup = function () {
+                return call("openBackup", "").then(function (result) {
+                  if (!result || !result.ok) return result;
+                  try { return { ok: true, payload: JSON.parse(result.text) }; }
+                  catch (e) { return { ok: false, error: "This file is not an akaReader backup." }; }
+                });
+              };
               window.akaReaderAndroid = Object.freeze(config);
             })();
         """.trimIndent()

@@ -16,9 +16,10 @@ export const BACKUP_STORAGE_KEYS = Object.freeze([
   'keyMigrationV2',
   'onboardingDone',
   'aka:dup-dismissed',
+  'installedExtensions',
 ]);
 
-const ARRAY_KEYS = new Set(['library', 'history', 'categories', 'aka:dup-dismissed']);
+const ARRAY_KEYS = new Set(['library', 'history', 'categories', 'aka:dup-dismissed', 'installedExtensions']);
 const OBJECT_KEYS = new Set(['progress', 'mangaCategories', 'readChapters', 'readingTime', 'chapterUpdateStateV1', 'chapterUpdateSummaryV1', 'appSettings']);
 const BOOLEAN_KEYS = new Set(['keyMigrationV2', 'onboardingDone']);
 

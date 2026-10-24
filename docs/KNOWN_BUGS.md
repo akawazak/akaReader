@@ -572,10 +572,18 @@ Verification run:
 
 ## Confirmed / Highly Likely Open Problems
 
+### Account sync limits (2026-10-24)
+
+- Marking a chapter unread does not sync; read chapters are a union across devices.
+- Categories, settings, notes and reading time do not sync. Extension removals do not spread (by design); extensions the other device's store doesn't offer stay missing.
+- A synced title appears on a device only once its source extension is installed there (sync installs it when the store offers it) and, on desktop only, a title search on that source returns the same URL (Android looks titles up by URL).
+- Google sign-in is in testing mode in Google Cloud (project `careful-griffin-512612-f7`); only listed test users can use it until the app is published there.
+- Verified 2026-10-24 with one Google account on the PC dev build and an Android phone: library, progress and extensions crossed both ways.
+
 ### Android app gaps (2026-10-24)
 
 - The phone reader (`NewReader` with `phone`) and `mobile/MobileSettings.jsx` were checked on a device once. The last change (a fixed orange accent for the phone reader controls, and a 3x2 update-interval grid) is installed on the phone but has not been looked at on screen.
-- No sync yet; library/progress live in the WebView's localStorage on each device.
+- No account sync yet; library/progress live in the WebView's localStorage on each device. Moving data between PC and phone works through a backup file (Settings > Backup on the phone, Settings > Data on desktop). The phone save/open picker and the extension reinstall after a restore have not been exercised on the device yet.
 - Downloads reuse the IndexedDB path; offline reading was not verified on device.
 - Manual source verification compiles and is wired to the renderer's recovery flow, but has not been exercised against a real Cloudflare-protected source.
 - The extension engine downloads and executes code, which Google Play does not allow; a Play build needs a different content model.

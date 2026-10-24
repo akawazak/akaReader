@@ -11,6 +11,7 @@ import { countReadChapterIds } from '../utils/chapterTracking.mjs';
 import { summarizeDownloadedChapters } from '../utils/downloadStorage.mjs';
 import { describeSourceError, isSourceVerificationError } from '../utils/sourceErrors.mjs';
 import MobileSettings from './MobileSettings';
+import { ActivityPill } from './MobileNotices';
 import './mobile.css';
 
 /*
@@ -629,7 +630,7 @@ const MangaScreen = memo(({ app, onSheet }) => {
 
   const startTarget = useMemo(() => {
     if (!chapters.length) return null;
-    if (prog?.chapterId) {
+    if (prog?.chapterId || (prog?.chapterNum && String(prog.chapterNum) !== '0')) {
       const { chapter, page } = resolveContinueTarget(chapters, prog);
       if (chapter) return { chapter, page, label: `Resume · Ch. ${chapter.number}` };
     }
@@ -641,7 +642,7 @@ const MangaScreen = memo(({ app, onSheet }) => {
   }, [chapters, prog, isRead]);
 
   const read = (ch, page) => app.openChapter(ch, sourceId, mangaId, page);
-  const toggleSaved = () => toggleLibrary({ id: mangaId, title, cover, chapters: detail?.chapters }, sourceId);
+  const toggleSaved = () => toggleLibrary({ id: mangaId, title, cover, url: detail?.url || base.url, chapters: detail?.chapters }, sourceId);
   const setRead = (list, value) => {
     list.forEach(ch => {
       markChapterRead(mangaId, ch.id, value, sourceId);
@@ -938,7 +939,7 @@ const MobileApp = ({ app }) => {
                 <button className="m-icon-btn" onClick={() => setSubPage(null)} aria-label="Back"><ChevronLeft size={24} /></button>
                 <h1>Settings</h1>
               </header>
-              <MobileSettings onSheet={onSheet} />
+              <MobileSettings onSheet={onSheet} backup={app.backup} />
             </div>
           )
           : mTab === 'library' ? <LibraryScreen app={shell} onSheet={onSheet} />
@@ -950,6 +951,7 @@ const MobileApp = ({ app }) => {
       {keepSource && <div style={{ display: view === 'source' ? 'block' : 'none' }}><SourceScreen app={shell} onSheet={onSheet} /></div>}
       {view === 'manga' && <MangaScreen app={shell} onSheet={onSheet} />}
       {showTabs && !subPage && <BottomNav tab={mTab} badges={badges} onSelect={(id) => { setSubPage(null); switchTab(id); }} />}
+      {subPage !== 'downloads' && <ActivityPill raised={showTabs && !subPage} onOpenDownloads={() => { app.setView('tabs'); setSubPage('downloads'); }} />}
       {sheet && <Sheet {...sheet} onClose={() => setSheet(null)} />}
     </div>
   );

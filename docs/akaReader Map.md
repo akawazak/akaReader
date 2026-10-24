@@ -32,7 +32,7 @@ flowchart LR
 ## Backend routes (`backend/server.js`)
 
 - `GET /api/ping`, `/api/health`, `/api/img` (Suwayomi-origin image proxy only)
-- `GET /api/extensions` (`?force=1`) → see [[#Extension pipeline]]
+- `GET /api/extensions` (`?force=1`) â†’ see [[#Extension pipeline]]
 - `POST /api/extensions/{install,uninstall,update}/:pkgName`
 - `GET /api/sources`
 - `GET /api/source/:sourceId/search`
@@ -41,11 +41,11 @@ flowchart LR
 
 ## Runtime helpers (`manga-nexus/runtime/*.cjs`)
 
-`backend-runtime` (packaged backend preflight) · `java-runtime` (Java 21.0.11+, managed JRE) · `extension-stores` (built-in/custom stores → `server.conf`) · `cloudflare-helper` (FlareSolverr install/start) · `source-verification` (embedded verify view) · `window-lifecycle` · `chapter-export` (CBZ) · `discord-presence`
+`backend-runtime` (packaged backend preflight) Â· `java-runtime` (Java 21.0.11+, managed JRE) Â· `extension-stores` (built-in/custom stores â†’ `server.conf`) Â· `cloudflare-helper` (FlareSolverr install/start) Â· `source-verification` (embedded verify view) Â· `window-lifecycle` Â· `chapter-export` (CBZ) Â· `discord-presence`
 
 ## Renderer utils (`manga-nexus/src/utils/`)
 
-`readerProgress` · `chapterTracking` · `chapterUpdates` · `downloadQueue` · `downloadStorage` · `browsePagination` · `libraryFilters` · `appBackup` · `sourceErrors` · `readerZoom` · `helpers`. Each one has a matching test in `manga-nexus/test/`.
+`readerProgress` Â· `chapterTracking` Â· `chapterUpdates` Â· `downloadQueue` Â· `downloadStorage` Â· `browsePagination` Â· `libraryFilters` Â· `appBackup` Â· `sourceErrors` Â· `readerZoom` Â· `helpers`. Each one has a matching test in `manga-nexus/test/`.
 
 ## Extension pipeline
 
@@ -68,27 +68,35 @@ flowchart LR
 
 `App.jsx` is about 7k lines. Don't read it top to bottom. Grep for a banner (`// ==================== NAME`) or a component name, then read only that range. Line numbers drift, so search by name.
 
-| Banner → component | What it holds |
+| Banner â†’ component | What it holds |
 |---|---|
 | `CONFIG & CONSTANTS` | `CONFIG`, `UPDATE_INTERVAL_OPTIONS`, `THEMES` (reader backgrounds), `proxyImg`, `IS_ANDROID_APP` |
-| `CONTEXT` → `DataProvider` | All persisted state (library, history, progress, settings, categories, download queue) and its actions. The `useData()` value is built at the end. |
+| `CONTEXT` â†’ `DataProvider` | All persisted state (library, history, progress, settings, categories, download queue) and its actions. The `useData()` value is built at the end. |
 | `UI PRIMITIVES` | `Spin`, `Btn` (takes `type`), `Badge`, `EmptyState`, `ContextMenu` |
-| `SETTINGS PAGE` | `SETTINGS_SECTIONS` holds each section's rail id, icon, lede and search keywords. Next come `SetGroup`, `SetRow`, `SetSegs`, `SetStatus`, `CategoryAddRow` and `ReaderPreview`, then `SettingsPage`. Each section renders from a `current.id === '…'` block in its return. Styles are the `.set-*` block at the end of `index.css`. The active section is saved as `settingsSection`. |
-| `UPDATES TAB` / `DOWNLOADS TAB` | `UpdatesTab`, `DownloadsTab` |
+| `SETTINGS PAGE` | `SETTINGS_SECTIONS` holds each section's rail id, icon, lede and search keywords. Next come `SetGroup`, `SetRow`, `SetSegs`, `SetStatus`, `CategoryAddRow` and `ReaderPreview`, then `SettingsAside`, the per-section right panel (app preview, reader preview, category counts, storage, extensions, Discord preview, backup contents), then `useBackupActions` (backup export/restore for desktop and phone, with `collectBackupPayload`), then `SettingsPage`. UI size (`settings.uiScale`) is applied by `GlobalStyles` through `electronAPI.setZoomFactor` (preload `webFrame`). Each section renders from a `current.id === 'â€¦'` block in its return. Styles are the `.set-*` block at the end of `index.css`. The active section is saved as `settingsSection`. |
+| `UPDATES TAB` / `DOWNLOADS TAB` | `UpdatesTab`, `DownloadsTab` (`.dl-layout`: activity + `ReadyToDownload` on the left, `StorageManager` on the right). `ReadyToDownload` queues each update's `newChapterDetails` that aren't already saved or queued. |
 | `DOWNLOADED CHAPTERS (IndexedDB)` | Offline blob helpers, then `Onboarding` |
 | `STARTUP SCREEN`, `ERROR RECOVERY MODAL` | Service startup UI |
 | `DISCOVER TAB`, `SOURCE MIGRATION`, `CATCH-UP MODE` | Feature screens and modals |
 | `MAIN APP` | (banner only). The Library tab renders inside `App` under `{tab === 'library'` as `.lib-bar` (category tabs + search/sort/select/view), `.lib-chips` (smart views), then the grid. The header subtitle is `librarySummary`. Styles are the `.lib-*` block in `index.css`. |
-| `App` → `NAV` / `nowReading` | Sidebar. `NAV` items carry a `group` (Read/Find/App), `badge` (action counts only), `meta` (muted text) and `live` (active downloads). The JSX is `<aside>` → `.side-nav`, then `.side-now` (resume card, hidden on Home), then `.side-foot` (streak + collapse). Styles are the `.side-*` block in `index.css`. Nav buttons keep `data-onboard="nav-<id>"` for the tutorial. |
-| `views/HomeView.jsx` | Home: `.home-top` (the `.home-cont` Continue card + the `.home-upnext` list of 3 other in-progress titles), or, with nothing else in progress, a `.home-stats` panel built from `App`'s `stats` prop; then New chapters (from `updates`), then the Recently added `HeroRow`. `chapterLabel()` hides an unknown chapter (`'0'`/empty). Styles are the `.home-*` block in `index.css`. |
-| `APP & ROOT COMPONENT` → `App` | Navigation state and handlers, in this order: the reader branch (`<NewReader phone={IS_ANDROID_APP}>`), the Android branch (`<MobileApp app={…}>`), then the desktop shell. Tabs render as `{tab === 'name' && …}`. |
+| `App` â†’ `NAV` / `nowReading` | Sidebar. `NAV` items carry a `group` (Read/Find/App), `badge` (action counts only), `meta` (muted text) and `live` (active downloads). The JSX is `<aside>` â†’ `.side-nav`, then `.side-now` (resume card, hidden on Home), then `.side-foot` (streak + collapse). Styles are the `.side-*` block in `index.css`. Nav buttons keep `data-onboard="nav-<id>"` for the tutorial. |
+| `views/HomeView.jsx` | Home: `.home-top` (the `.home-cont` Continue card + the `.home-upnext` list of 3 other in-progress titles), topped up with not-started library titles (`notStarted`); then New chapters (from `updates`), then the Recently added `HeroRow`. `chapterLabel()` hides an unknown chapter (`'0'`/empty). Styles are the `.home-*` block in `index.css`. |
+| `APP & ROOT COMPONENT` â†’ `App` | Navigation state and handlers, in this order: the reader branch (`<NewReader phone={IS_ANDROID_APP}>`), the Android branch (`<MobileApp app={â€¦}>`), then the desktop shell. Tabs render as `{tab === 'name' && â€¦}`. |
 
 Dark-theme contrast comes from the `:root` tokens in `index.css` (`--text-dim`, `--muted`, `--border`, `--card`). Raise those before overriding colours inline.
+
+## Account sync
+
+- Engine: `src/utils/cloudSync.mjs` (pure merge functions + Supabase client). State and timers: the `Account sync` block in `DataProvider` (grep `runCloudSync`). `recordSyncDetail`/`recordLibraryRemoval` sit next to the `syncIndex` state near the top of `DataProvider`.
+- UI: `SyncSettings` (desktop Settings > Sync) and `SyncCard` in `mobile/MobileSettings.jsx`.
+- Phone notifications: `mobile/MobileNotices.jsx` (`MobileToasts` rendered by `ToastProvider` on Android, `ActivityPill` in `MobileApp`).
+- Google sign-in: `cloud-oauth` IPC in `electron-main.js`, `startOAuth` in `preload.js` and in `MainActivity.kt`.
+- See [[ARCHITECTURE#Account Sync]] and [[KNOWN_BUGS#Account sync limits (2026-10-24)]].
 
 ## Phone UI and Android
 
 - `src/mobile/MobileApp.jsx` is the phone shell: floating pill nav; Library, Updates, Browse, History and More screens; the manga page; and sheets. It gets every handler from `App` through one `app` prop. Android Back arrives as an Escape keydown.
-- `src/mobile/MobileSettings.jsx` is the phone Settings page. It writes the same setting keys as `SettingsPage`, minus the desktop-only ones.
+- `src/mobile/MobileSettings.jsx` is the phone Settings page. It writes the same setting keys as `SettingsPage`, minus the desktop-only ones. Its Backup group calls `app.backup` (`useBackupActions` in App.jsx, shared with desktop Settings). `MainActivity.kt`'s `saveBackup`/`openBackup` open the system file picker.
 - `src/mobile/mobile.css`: every class starts with `m-`.
 - `Reader.jsx`'s `phone` prop adds a bottom control bar (page scrubber plus Scroll/Paged/Strip/Auto/Settings) and turns the settings panel into a bottom sheet. On phone, `uiAccent` is fixed orange so active states stay visible on white pages.
 - `android/`: see [[ARCHITECTURE#Android app (proof of concept)]] and [[DEV_WORKFLOW#Android App (proof of concept)]].

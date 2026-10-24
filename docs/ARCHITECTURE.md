@@ -117,6 +117,15 @@ Discord Rich Presence is deliberately optional and disabled by default. Its cont
 
 Packaged builds use `electron-updater` from the Electron main process. Before an update download and again immediately before an explicit restart/install, the renderer sends an allowlisted, versioned state snapshot to Electron. Electron size-checks it, writes it with a restricted file mode under `userData/backups`, and retains the latest five pre-update backups. Updates then download while the renderer stays interactive. Once downloaded, the banner tells the user the update will install when the app is closed; an explicit `Restart now` button remains available. Windows packaging uses a one-click NSIS installer so online update installs avoid a manual setup wizard.
 
+## Account Sync
+
+- `src/utils/cloudSync.mjs`: Supabase REST client (no SDK), PKCE helpers, and the pure document functions `indexMangaDetail`, `buildLocalDoc`, `mergeDocs` and `planLocalChanges` (covered by `test/cloudSync.test.mjs`).
+- `DataProvider` in `App.jsx` owns the session (`cloudSessionV1`), the ID index (`syncIndexV1`), library removal times (`syncRemovalsV1`), the last merged document (`syncDocV1`) and lookup back-off (`syncLookupsV1`). Sign-out clears everything except the index and the local library.
+- Merge rules: a title's library state follows its newest change (local `addedAt` or a recorded removal), read chapters are a union of chapter numbers (marking unread does not propagate yet), and progress follows the newest `lastRead`. Progress applied from another device may carry only `chapterNum`; `resolveContinueTarget` falls back to the chapter with that number.
+- Extensions: `doc.extensions[pkgName] = { name, installed, at }`. `installExt`/`uninstallExt` record user changes in `syncExtV1`; packages already installed count as `at: 0`. The newest change wins; after a sync, `planExtensionInstalls` installs up to ten missing packages the local store offers (a failed one waits six hours). Sync never uninstalls.
+- Google sign-in: the renderer builds the authorize URL with a PKCE challenge; Electron (`cloud-oauth` IPC, loopback port 54329) or Android (`startOAuth`, `akareader://auth-callback` intent filter on the singleTask `MainActivity`) returns the code, and the renderer exchanges it at `/auth/v1/token?grant_type=pkce`.
+- CSP: `connect-src` in `index.html` and the Electron response header both allow the Supabase project origin.
+
 ## Diagnostics and Backup Flow
 
 Settings can request a full health report through the preload bridge. Electron performs bounded checks of the authenticated local API, compatible Java runtime, Suwayomi GraphQL endpoint, managed server JAR, writable/free data storage, and optional protected-source helper. The report contains user-facing statuses and repair hints but never exposes the per-launch API token. `Repair automatically` verifies packaged backend files, installs Java only when incompatible, repairs the JAR/config only when required, starts the helper only when it was previously enabled, and restarts the managed services.

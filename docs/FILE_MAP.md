@@ -183,6 +183,12 @@ akareader/
   Context definition and `useData()` hook.
 - `manga-nexus/src/constants/index.js`
   Shared renderer constants used by helper/components such as `CONFIG`, `CATEGORIES`, and `THEMES`.
+- `manga-nexus/src/mobile/MobileNotices.jsx`
+  - phone-only notifications: heads-up toasts from the top (used by `ToastProvider` on Android) and the live activity pill for extension installs and chapter downloads
+- `manga-nexus/src/components/GoogleLogo.jsx`
+  - Google "G" for the Continue with Google buttons
+- `manga-nexus/src/utils/cloudSync.mjs`
+  - account sync: Supabase client, PKCE, and the merge rules for the per-user sync document
 - `manga-nexus/src/utils/helpers.js`
   Shared helper utilities, still partially duplicated in `App.jsx`.
 - `manga-nexus/src/utils/chapterTracking.mjs`

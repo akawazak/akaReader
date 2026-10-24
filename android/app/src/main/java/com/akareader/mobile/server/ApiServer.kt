@@ -81,6 +81,8 @@ class ApiServer(
             parts.size == 3 && parts[0] == "source" && parts[2] == "search" ->
                 search(parts[1].toLong(), q("q").orEmpty(), q("page")?.toIntOrNull()?.coerceAtLeast(1) ?: 1, q("sort") ?: "latest", q)
             parts.size == 4 && parts[0] == "source" && parts[2] == "manga" -> mangaDetail(parts[1].toLong(), parts[3].toLong())
+            // Account sync: a title from another device is known by its source URL; give it a local ID.
+            parts.size == 3 && parts[0] == "source" && parts[2] == "lookup" -> lookup(parts[1].toLong(), q("url").orEmpty(), q("title").orEmpty())
             parts.size == 4 && parts[0] == "source" && parts[2] == "chapter" -> chapterPages(parts[1].toLong(), parts[3].toLong())
             parts.size == 3 && parts[0] == "chapter" && parts[2] == "read" -> {
                 val body = HashMap<String, String>().also { session.parseBody(it) }["postData"].orEmpty()
@@ -166,6 +168,13 @@ class ApiServer(
         val filters = JSONObject().put("sort", sort).put("status", q("status") ?: "all")
             .put("contentType", q("contentType") ?: "all").put("tags", q("tags").orEmpty())
         return json(JSONObject().put("results", results).put("hasNextPage", result.hasNextPage).put("requestedFilters", filters))
+    }
+
+    private fun lookup(sourceId: Long, url: String, title: String): Response {
+        requireSource(sourceId)
+        if (url.isBlank()) throw IllegalArgumentException("Missing url")
+        val manga = SManga.create().also { it.url = url; it.title = title }
+        return json(JSONObject().put("id", db.upsertBrowseManga(sourceId, manga).toString()))
     }
 
     private fun mangaDetail(sourceId: Long, mangaId: Long): Response {

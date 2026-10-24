@@ -1893,6 +1893,40 @@ ipcMain.handle('export-manga-cbz', async (_, payload = {}) => {
     return { ok: false, error: error?.message || 'The manga could not be exported.' };
   }
 });
+// Account sign-in with Google (Supabase OAuth, PKCE). The renderer builds the authorize URL;
+// the system browser opens it and Supabase redirects back to this loopback port with ?code=.
+const OAUTH_CALLBACK_PORT = 54329;
+const OAUTH_ALLOWED_PREFIX = 'https://bmavfeblgaeyjnstcwad.supabase.co/auth/v1/authorize?';
+let oauthServer = null;
+ipcMain.handle('cloud-oauth', (_, url) => new Promise((resolve) => {
+  if (typeof url !== 'string' || !url.startsWith(OAUTH_ALLOWED_PREFIX)) return resolve({ ok: false, error: 'Invalid sign-in address.' });
+  if (oauthServer) { try { oauthServer.close(); } catch {} oauthServer = null; }
+  let settled = false;
+  const finish = (result) => {
+    if (settled) return;
+    settled = true;
+    clearTimeout(timer);
+    setTimeout(() => { try { server.close(); } catch {} if (oauthServer === server) oauthServer = null; }, 500);
+    if (mainWindow && !mainWindow.isDestroyed()) { mainWindow.show(); mainWindow.focus(); }
+    resolve(result);
+  };
+  const server = http.createServer((req, res) => {
+    const reqUrl = new URL(req.url, `http://127.0.0.1:${OAUTH_CALLBACK_PORT}`);
+    if (reqUrl.pathname !== '/auth/callback') { res.writeHead(404).end(); return; }
+    const code = reqUrl.searchParams.get('code');
+    const error = reqUrl.searchParams.get('error_description') || reqUrl.searchParams.get('error');
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`<!doctype html><meta charset="utf-8"><title>akaReader</title><body style="font-family:Segoe UI,sans-serif;background:#0c0c13;color:#e8eaf2;display:grid;place-items:center;height:90vh"><div style="text-align:center"><h2>${code ? 'Signed in to akaReader' : 'Sign-in did not finish'}</h2><p style="color:#8d95ae">You can close this tab and go back to the app.</p></div>`);
+    finish(code ? { ok: true, code } : { ok: false, error: error || 'Sign-in was cancelled.' });
+  });
+  oauthServer = server;
+  const timer = setTimeout(() => finish({ ok: false, cancelled: true }), 5 * 60 * 1000);
+  server.on('error', (error) => finish({ ok: false, error: error.code === 'EADDRINUSE' ? 'Another sign-in is already open. Try again.' : error.message }));
+  server.listen(OAUTH_CALLBACK_PORT, '127.0.0.1', () => {
+    shell.openExternal(url).catch(() => finish({ ok: false, error: 'Could not open the browser.' }));
+  });
+}));
+
 ipcMain.handle('export-app-backup', async (_, payload) => {
   try {
     const text = validateBackupPayload(payload);
@@ -2342,7 +2376,7 @@ app.whenReady().then(async () => {
           "font-src 'self' https://fonts.gstatic.com data:;",
           "img-src 'self' data: blob: http://localhost:* file:;",
           "script-src 'self' 'unsafe-inline' http://localhost:*;",
-          "connect-src 'self' http://localhost:* ws://localhost:*;"
+          "connect-src 'self' http://localhost:* ws://localhost:* https://bmavfeblgaeyjnstcwad.supabase.co;"
         ].join(' ')
       }
     });

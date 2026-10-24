@@ -55,3 +55,14 @@ test('unsupported or empty backups are rejected', () => {
   assert.equal(validateAppBackup({ schema: APP_BACKUP_SCHEMA, version: 999, data: {} }).ok, false);
   assert.equal(validateAppBackup({ schema: APP_BACKUP_SCHEMA, version: APP_BACKUP_VERSION, data: {} }).ok, false);
 });
+
+test('backup carries the installed extension list and rejects a malformed one', () => {
+  const backup = createAppBackup(key => (key === 'installedExtensions' ? ['eu.kanade.tachiyomi.extension.en.example'] : undefined));
+  assert.deepEqual(backup.data.installedExtensions, ['eu.kanade.tachiyomi.extension.en.example']);
+  const restored = [];
+  applyAppBackup(backup, key => restored.push(key));
+  assert.deepEqual(restored, ['installedExtensions']);
+
+  const bad = { ...backup, data: { library: [], installedExtensions: 'not-a-list' } };
+  assert.equal(validateAppBackup(bad).backup.data.installedExtensions, undefined);
+});

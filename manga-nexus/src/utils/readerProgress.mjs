@@ -24,6 +24,13 @@ export const resolveContinueTarget = (chapters, progress) => {
     }
   }
 
+  // Progress synced from another device knows the chapter number but not this device's ID.
+  const savedNumber = Number.parseFloat(progress?.chapterNum);
+  if (Number.isFinite(savedNumber) && String(progress?.chapterNum) !== '0') {
+    const byNumber = list.find(chapter => Number.parseFloat(chapter?.number) === savedNumber);
+    if (byNumber) return { chapter: byNumber, page: savedId ? 0 : normalizePage(progress?.page) };
+  }
+
   return { chapter: list.at(-1) || null, page: 0 };
 };
 

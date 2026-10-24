@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webFrame } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('before-window-close', listener);
   },
   completeWindowCloseFlush: requestId => ipcRenderer.send('window-close-flush-complete', requestId),
+  // UI size: whole-page zoom, clamped so a bad stored value can't make the app unusable.
+  setZoomFactor: (factor) => webFrame.setZoomFactor(Math.min(1.5, Math.max(0.8, Number(factor) || 1))),
 
   // Settings
   getCloseToTray:      () => ipcRenderer.invoke('get-close-to-tray'),
@@ -66,6 +68,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // App version (reads from package.json via Electron — always accurate)
   getVersion:  () => ipcRenderer.invoke('get-version'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  startOAuth: (url) => ipcRenderer.invoke('cloud-oauth', url),
   showNotification: (payload) => ipcRenderer.invoke('show-notification', payload),
   getCloudflareHelperInfo: () => ipcRenderer.invoke('get-cloudflare-helper-info'),
   ensureCloudflareHelper: () => ipcRenderer.invoke('ensure-cloudflare-helper'),
