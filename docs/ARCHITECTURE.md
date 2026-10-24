@@ -18,6 +18,20 @@ At runtime, the stack looks like this:
 
 Electron sits beside that flow and is responsible for booting and supervising both local services.
 
+### Android app (proof of concept)
+
+`android/` runs the same Vite build in a WebView and replaces both the Express proxy and Suwayomi with an in-process Kotlin server:
+
+`React renderer (WebView) -> NanoHTTPD loopback (127.0.0.1:42601) -> on-device extensions`
+
+- The server serves `manga-nexus/dist` and the `/api/*` routes from one origin, so the renderer uses relative `/api` with no Electron. A random per-launch token is injected at document start as `window.akaReaderAndroid.apiToken`, together with `verifySourceUrl`/`openExternal` native calls.
+- Extensions are Keiyoushi APKs read from `repo/index.pb` (protobuf), downloaded to private storage, checked against the store's SHA-256 signing key, made read-only, and loaded with a delegate-last class loader, following Mihon's ExtensionLoader (lib 1.4/1.6). The host classes extensions call (`eu.kanade.tachiyomi.source.*`, `network.*` including Mihon's CloudflareInterceptor, Injekt registrations, OkHttp brotli/zstd/DoH, rx, jsoup, QuickJS) are vendored from Mihon.
+- `LocalDb` (SQLite) maps (sourceId, url) titles and (manga, url) chapters to stable integer IDs, the role Suwayomi's database plays on desktop. Source IDs are the same Tachiyomi IDs Suwayomi uses, so source + URL is the cross-device sync key.
+- Images are returned as relative `/src-img/{sourceId}?u=&p=&i=&kind=` refs. The renderer's `proxyImg()` wraps them as `/api/img?url=...`; covers are a plain GET with the source headers and pages use `HttpSource.getImage()`, as in Mihon.
+- Cloudflare: the vendored interceptor solves challenges in a hidden WebView first. If that fails, the route returns `source-verification-required` and the renderer's existing recovery calls `window.akaReaderAndroid.verifySourceUrl()`, which opens `VerifyActivity`; it closes itself once a `cf_clearance` cookie exists for a non-challenge page, and the request retries.
+- `App.jsx` keeps all state and handlers and returns `<MobileApp>` instead of the desktop layout when `window.akaReaderAndroid` exists. The reader branch (`NewReader`) is still shared.
+- Google Play forbids apps that download and run code from outside Play, so this extension-loading build cannot ship on Play as-is.
+
 ## Frontend / Backend Split
 
 ### Frontend
@@ -93,7 +107,7 @@ Startup status delivery uses an explicit renderer-ready handshake. Electron queu
 
 Java discovery executes each candidate with `java -version` and accepts Java 21.0.11 or newer. An older system Java is left untouched. akaReader downloads and uses a private current Temurin 21 runtime under its data directory, validates the staged runtime before replacing an older managed copy, and exposes a renderer recovery action if automatic installation fails. Structured service issues keep the detected version, required version, explanation, and available repair action together so startup failures do not collapse into a generic offline message. The cached Suwayomi JAR is migrated into `suwayomi-runtime/`, with a dedicated `work/` child as the process working directory. This keeps the server executable and work path isolated from the managed Java and Suwayomi data paths, avoiding a reproducible Windows package-scan failure during GraphQL initialization. Suwayomi's first launch can also download browser components, so the readiness wait allows up to ten minutes while relaying the component-download percentage to the startup screen.
 
-Extension discovery is initialized by Electron before Suwayomi starts. akaReader always writes the maintained Keiyoushi index to the current `server.extensionStores` setting, merges validated and deduplicated custom HTTP(S) stores from `electron-settings.json`, and removes the obsolete `server.extensionRepos` managed block if present. The writer replaces an entire multiline list, not just its opening line, and removes the orphaned quoted-entry/closing-bracket tail left by the earlier migration bug. Settings reads and writes this same main-process state through preload IPC; adding or removing a custom store restarts the managed services so the catalog is actually refreshed.
+Extension discovery is initialized by Electron before Suwayomi starts. akaReader always writes the maintained Keiyoushi protobuf index (`https://github.com/keiyoushi/extensions/raw/repo/index.pb`; the old `index.min.json` is a stub and is treated as a legacy alias) to the current `server.extensionStores` setting, merges validated and deduplicated custom HTTP(S) stores from `electron-settings.json`, and removes the obsolete `server.extensionRepos` managed block if present. The writer replaces an entire multiline list, not just its opening line, and removes the orphaned quoted-entry/closing-bracket tail left by the earlier migration bug. Settings reads and writes this same main-process state through preload IPC; adding or removing a custom store restarts the managed services so the catalog is actually refreshed. Because Suwayomi persists the last fetched index in its database, the backend runs `fetchExtensions` once per launch before the first `/api/extensions` listing, and install/update refresh the index and retry once if the mutation fails, so stale APK locations never cause download 404s.
 
 ## Discord Rich Presence
 

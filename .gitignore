@@ -7,3 +7,6 @@ backend/node_modules/
 
 # Large binary — CI downloads this automatically
 backend/*.jar
+
+# Obsidian vault state (docs/ is opened as a vault)
+docs/.obsidian/

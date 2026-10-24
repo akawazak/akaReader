@@ -54,9 +54,22 @@ Suwayomi currently requires Java 21, and akaReader enforces a tested minimum of 
 
 Protected sources are handled adaptively. akaReader never downloads FlareSolverr at normal startup. Before protected-source support has been enabled, the helper also remains stopped. Once enabled, future launches warm the installed helper and its reusable `suwayomi` browser session after backend readiness, concurrently with Java/Suwayomi; this background task does not delay the main readiness promise, and selecting a source joins the same work instead of launching duplicates. When ready, the helper automatically retries the failed browse, manga-detail, or chapter request. If a challenge still appears, `Verify manually` remains usable while that warm-up runs. Electron watches for Cloudflare's same-source clearance cookie as well as page-readiness signals; after the user completes the check, the embedded website closes and the native request retries automatically, including when the source is stuck on its own loading/advertising shell. `Load now` remains only as a fallback. If that clean retry still fails and no helper exists, akaReader automatically downloads the pinned official Windows x64 ZIP (about 326 MB) or Linux x64 tar.gz (about 234 MB) without a second confirmation dialog. Electron verifies the platform-specific size and SHA-256, binds the helper to `127.0.0.1:8191`, runs it with `CAPTCHA_SOLVER=none` and media disabled, enables Suwayomi's helper settings, and retries. Linux installs restore executable permissions and use private XDG directories. The helper stops with akaReader.
 
-Electron also writes the built-in Keiyoushi catalog to Suwayomi's `server.extensionStores` setting before launch. Additional repositories added in Settings are validated as HTTP(S) URLs, persisted in `electron-settings.json`, and applied by restarting the managed local services. The built-in entry is intentionally visible but cannot be removed from the UI. Startup rewrites the complete list and automatically removes the dangling list tail created by the old line-only migration, so a previously malformed `server.conf` self-recovers.
+Electron also writes the built-in Keiyoushi catalog (`raw/repo/index.pb`) to Suwayomi's `server.extensionStores` setting before launch. Additional repositories added in Settings are validated as HTTP(S) URLs, persisted in `electron-settings.json`, and applied by restarting the managed local services. The built-in entry is intentionally visible but cannot be removed from the UI. Startup rewrites the complete list and automatically removes the dangling list tail created by the old line-only migration, so a previously malformed `server.conf` self-recovers.
 
 Discord Rich Presence is an Electron-only, opt-in feature. To check it manually, start the Discord desktop app, open akaReader Settings, enable **Discord Rich Presence**, then open and leave a reader session. Discord should show only `Browsing manga` or `Reading manga`; it must not show a manga title, chapter, source, URL, or history. Quit Discord and confirm akaReader continues normally with an unavailable status; reopen Discord or use Retry to reconnect. Disable the switch and confirm the activity clears.
+
+## Android App (proof of concept)
+
+Requires Android Studio's JBR as `JAVA_HOME` and SDK platform 37. From the repo root:
+
+```powershell
+cd manga-nexus; npm run build; cd ..\android
+$env:JAVA_HOME = 'C:\Program Files\Android\Android Studio\jbr'
+.\gradlew assembleDebug
+adb install -r app\build\outputs\apk\debug\app-debug.apk
+```
+
+The APK packages `manga-nexus/dist`, so rebuild the renderer first. Debug builds enable WebView remote debugging: `adb forward tcp:9333 localabstract:webview_devtools_remote_<pid>` exposes the page over the Chrome DevTools protocol, and renderer console output is logged to logcat under `akaReader.web` (API errors under `akaReader.api`, extension loading under `akaReader.ext`). Xiaomi devices need Developer options -> "Install via USB" enabled.
 
 ## Build Commands
 

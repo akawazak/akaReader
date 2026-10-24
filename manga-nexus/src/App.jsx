@@ -13,12 +13,13 @@ import {
   ChevronUp, ChevronDown, ZoomIn, ZoomOut, Settings, Sliders, BellRing,
   SlidersHorizontal, AlertCircle, RotateCcw, ChevronRightCircle,
   Pen, Sparkles, Bookmark, Award, StickyNote, Pencil, Pause, Settings2, Plus,
-  AlignJustify
+  AlignJustify, HardDrive, Info, Server, Plug, DatabaseBackup
 } from 'lucide-react';
 
 import { Reader as NewReader } from './components/reader/Reader';
 import { HomeView as HomeTab } from './views/HomeView';
 import { DataContext, useData } from './contexts/DataContext';
+import MobileApp from './mobile/MobileApp';
 import { ExtensionsTab } from './components/extensions/ExtensionsTab';
 import { StorageManager } from './components/downloads/StorageManager';
 import { countReadChapterIds } from './utils/chapterTracking.mjs';
@@ -38,7 +39,7 @@ import {
   storageCapacityResult,
 } from './utils/downloadQueue.mjs';
 import { applyAppBackup, createAppBackup } from './utils/appBackup.mjs';
-import { resolveContinueTarget } from './utils/readerProgress.mjs';
+import { calculateMangaProgressPercent, resolveContinueTarget } from './utils/readerProgress.mjs';
 import { downloadedMangaKeys } from './utils/downloadStorage.mjs';
 import {
   SMART_LIBRARY_FILTERS,
@@ -79,10 +80,13 @@ const DEFAULT_API_BASE =
     ? 'http://localhost:3001/api'
     : '/api';
 
+// The Android app injects window.akaReaderAndroid and gets the phone shell (src/mobile).
+const IS_ANDROID_APP = typeof window !== 'undefined' && !!window.akaReaderAndroid;
+
 const CONFIG = {
   API: import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE,
   SUWAYOMI: import.meta.env.VITE_SUWAYOMI_BASE_URL || 'http://localhost:4567',
-  API_TOKEN: typeof window !== 'undefined' ? (window.electronAPI?.apiToken || '') : '',
+  API_TOKEN: typeof window !== 'undefined' ? (window.electronAPI?.apiToken || window.akaReaderAndroid?.apiToken || '') : '',
   DEBOUNCE_DELAY: 300,
   UPDATE_INTERVAL: 3600000,
 };
@@ -220,7 +224,7 @@ const debounce = (fn, delay) => {
 };
 
 const BUILT_IN_EXTENSION_STORES = [
-  'https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.min.json',
+  'https://github.com/keiyoushi/extensions/raw/repo/index.pb',
 ];
 
 const calculateStreak = (history) => {
@@ -311,7 +315,9 @@ const ToastProvider = memo(({ children }) => {
   return (
     <ToastContext.Provider value={show}>
       {children}
-      <div style={{ position: 'fixed', top: 90, right: 20, zIndex: 9999, display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 360, pointerEvents: 'none' }}>
+      <div style={IS_ANDROID_APP
+        ? { position: 'fixed', left: 16, right: 16, bottom: 92, zIndex: 9999, display: 'flex', flexDirection: 'column-reverse', gap: 8, pointerEvents: 'none' }
+        : { position: 'fixed', top: 90, right: 20, zIndex: 9999, display: 'flex', flexDirection: 'column', gap: 10, maxWidth: 360, pointerEvents: 'none' }}>
         {toasts.map(t => (
           <div key={t.id} className="toast-enter" style={{
             padding: '14px 18px', borderRadius: 14, border: '1px solid var(--border)',
@@ -787,12 +793,28 @@ const DataProvider = memo(({ children }) => {
   }, []);
 
   const handleMigrate = useCallback(async (oldManga, newItem, newSource) => {
-    try {
+    {
       const newMangaDetail = await fetchJSON(`/source/${newSource.id}/manga/${newItem.id}`);
       if (!newMangaDetail || newMangaDetail.error) throw new Error('Failed to fetch new manga details');
 
       const oldKey = getMangaKey(oldManga.id, oldManga.sourceId);
       const newKey = getMangaKey(newItem.id, newSource.id);
+      const sameChapter = (a, b) => {
+        const x = String(a), y = String(b);
+        return x === y || (x !== '' && y !== '' && Number.isFinite(Number(x)) && Number(x) === Number(y));
+      };
+      // Read state is stored as source-specific chapter IDs, so map it by chapter number.
+      let oldChapters = Array.isArray(oldManga.chapters) ? oldManga.chapters : null;
+      if (!oldChapters && oldManga.sourceId) {
+        try { oldChapters = (await fetchJSON(`/source/${oldManga.sourceId}/manga/${oldManga.id}`))?.chapters || null; } catch { /* read state just won't transfer */ }
+      }
+      const oldRead = new Set((readChapters[oldKey] || []).map(String));
+      const migratedRead = oldChapters
+        ? oldChapters.filter(c => oldRead.has(String(c.id)))
+            .map(c => newMangaDetail.chapters.find(n => sameChapter(n.number, c.number))?.id)
+            .filter(Boolean).map(String)
+        : [];
+      if (migratedRead.length) setReadChapters(prev => ({ ...prev, [newKey]: [...new Set([...(prev[newKey] || []), ...migratedRead])] }));
       setChapterUpdateState(prev => {
         const next = { ...prev, [newKey]: chapterUpdateBaseline(newMangaDetail.chapters) };
         delete next[oldKey];
@@ -802,7 +824,7 @@ const DataProvider = memo(({ children }) => {
       // 1. Progress
       const oldProg = progress[oldKey];
       if (oldProg) {
-        const newCh = newMangaDetail.chapters.find(c => String(c.number) === String(oldProg.chapterNum));
+        const newCh = newMangaDetail.chapters.find(c => sameChapter(c.number, oldProg.chapterNum));
         if (newCh) setProgress(prev => ({ ...prev, [newKey]: { chapterId: newCh.id, chapterNum: newCh.number, page: oldProg.page, lastRead: Date.now() } }));
       }
 
@@ -811,7 +833,7 @@ const DataProvider = memo(({ children }) => {
       if (libEntry) {
         const cat = mangaCategories[oldKey];
         setLibrary(prev => {
-          const filtered = prev.filter(m => !(String(m.id) === String(oldManga.id) && String(m.sourceId) === String(oldManga.sourceId)));
+          const filtered = prev.filter(m => !(String(m.id) === String(oldManga.id) && String(m.sourceId) === String(oldManga.sourceId)) && !(String(m.id) === String(newItem.id) && String(m.sourceId) === String(newSource.id)));
           return [{ id: newItem.id, title: newItem.title, cover: newItem.cover, sourceId: newSource.id, addedAt: libEntry.addedAt }, ...filtered];
         });
         if (cat) setMangaCategories(prev => ({ ...prev, [newKey]: cat }));
@@ -819,7 +841,7 @@ const DataProvider = memo(({ children }) => {
 
       // 3. History
       setHistory(prev => {
-        const filtered = prev.filter(m => !(String(m.id) === String(oldManga.id) && String(m.sourceId) === String(oldManga.sourceId)));
+        const filtered = prev.filter(m => !(String(m.id) === String(oldManga.id) && String(m.sourceId) === String(oldManga.sourceId)) && !(String(m.id) === String(newItem.id) && String(m.sourceId) === String(newSource.id)));
         return [{ id: newItem.id, title: newMangaDetail.title, cover: newMangaDetail.cover, sourceId: newSource.id, author: newMangaDetail.author, lastRead: Date.now() }, ...filtered];
       });
 
@@ -829,10 +851,8 @@ const DataProvider = memo(({ children }) => {
       setReadChapters(prev => { const n = { ...prev }; delete n[oldKey]; return n; });
 
       return true;
-    } catch {
-      return false;
     }
-  }, [fetchJSON, progress, library, mangaCategories]);
+  }, [fetchJSON, progress, library, mangaCategories, readChapters]);
 
   const cancelDownload = useCallback((id) => {
     setDownloadQueue(prev => prev.map(d => {
@@ -1150,8 +1170,8 @@ const Btn = memo(({ children, variant = 'default', size = 'md', onClick, disable
   };
   return (
     <button type={type} title={title} style={{ ...base, ...(sizes[size] || sizes.md), ...(variants[variant] || variants.default), ...style }} disabled={disabled} onClick={onClick} className={className}
-      onMouseEnter={e => { if (!disabled && variant === 'default') { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 8px 24px rgba(249,115,22,0.4)'; } else if (!disabled) { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; } }}
-      onMouseLeave={e => { e.currentTarget.style.transform = ''; e.currentTarget.style.boxShadow = variant === 'default' ? '0 4px 16px rgba(249,115,22,0.3)' : ''; e.currentTarget.style.background = variants[variant]?.background || 'transparent'; }}
+      onMouseEnter={e => { if (!disabled && variant === 'default') { e.currentTarget.style.filter = 'brightness(1.08)'; } else if (!disabled) { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; } }}
+      onMouseLeave={e => { e.currentTarget.style.filter = ''; e.currentTarget.style.background = variants[variant]?.background || 'transparent'; }}
     >
       {Icon && <Icon size={size === 'sm' ? 14 : size === 'icon' ? 18 : 16} />}
       {children}
@@ -1383,7 +1403,7 @@ const RepoAddRow = memo(({ onAdd, disabled = false }) => {
       <div style={{ position: 'relative', flex: 1 }}>
         <Globe size={14} style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)', pointerEvents: 'none' }} />
         <input
-          placeholder="https://raw.githubusercontent.com/.../index.min.json"
+          placeholder="https://example.com/repo/index.min.json"
           value={val}
           disabled={disabled}
           onChange={e => setVal(e.target.value)}
@@ -1400,11 +1420,101 @@ const RepoAddRow = memo(({ onAdd, disabled = false }) => {
 
 // ==================== SETTINGS PAGE ====================
 
+const SETTINGS_SECTIONS = [
+  { id: 'general', label: 'General', icon: SlidersHorizontal, lede: 'How akaReader looks and behaves on this computer.', keywords: 'appearance app theme dark light accent color library layout grid list compact sidebar window tray start windows startup' },
+  { id: 'reader', label: 'Reader', icon: BookOpen, lede: 'Defaults for every chapter you open.', keywords: 'reading mode scroll paged webtoon fit height width original brightness background theme preview' },
+  { id: 'library', label: 'Library & updates', icon: Library, lede: 'Categories, and how often akaReader looks for new chapters.', keywords: 'categories chapter updates interval check notifications auto-download new chapters' },
+  { id: 'downloads', label: 'Downloads & storage', icon: HardDrive, lede: 'What happens to chapters saved for offline reading.', keywords: 'offline auto-delete read chapters storage data folder directory' },
+  { id: 'extensions', label: 'Extensions', icon: Puzzle, lede: 'Where akaReader finds extensions. Keiyoushi is built in.', keywords: 'repository repositories repo keiyoushi index store custom' },
+  { id: 'integrations', label: 'Integrations', icon: Plug, lede: 'Optional connections to other apps.', keywords: 'discord rich presence', divider: true },
+  { id: 'data', label: 'Backup & data', icon: DatabaseBackup, lede: 'Back up your library and reading data, or clear parts of it.', keywords: 'backup export import restore clear history progress reading time' },
+  { id: 'system', label: 'System', icon: Server, lede: "Local services akaReader runs for you. You normally won't need this page.", keywords: 'java suwayomi backend api server health check repair windows service config jar' },
+  { id: 'about', label: 'About', icon: Info, lede: '', keywords: 'version app updates github release' },
+];
+const SHORT_INTERVAL_LABELS = { 0: 'Manual', 900000: '15 min', 1800000: '30 min', 3600000: '1 hour', 10800000: '3 hours', 21600000: '6 hours' };
+const ACCENT_PRESETS = ['#f97316', '#ff5e00', '#ef4444', '#ec4899', '#8b5cf6', '#3b82f6', '#10b981', '#eab308'];
+
+const SetGroup = ({ title, note, children }) => (
+  <section className="set-group">
+    {title && <h3 className="set-group-title">{title}</h3>}
+    {note && <p className="set-note">{note}</p>}
+    <div className="set-card">{children}</div>
+  </section>
+);
+
+const SetRow = ({ label, sub, children }) => (
+  <div className="set-row">
+    <div className="set-row-text">
+      <p className="set-row-label">{label}</p>
+      {sub && <p className="set-row-sub">{sub}</p>}
+    </div>
+    {children && <div className="set-row-control">{children}</div>}
+  </div>
+);
+
+const SetSegs = ({ value, options, onChange, ariaLabel }) => (
+  <div className="set-segs" role="radiogroup" aria-label={ariaLabel}>
+    {options.map(([id, label]) => (
+      <button key={id} type="button" role="radio" aria-checked={value === id} className={value === id ? 'on' : ''} onClick={() => onChange(id)}>{label}</button>
+    ))}
+  </div>
+);
+
+// tone: ok | warn | bad
+const SetStatus = ({ tone, children }) => <span className={`set-status ${tone}`}><i />{children}</span>;
+
+const CategoryAddRow = memo(({ onAdd }) => {
+  const [name, setName] = useState('');
+  const [color, setColor] = useState('#f97316');
+  return (
+    <form className="set-row" onSubmit={e => { e.preventDefault(); if (name.trim()) { onAdd(name.trim(), color); setName(''); } }}>
+      <input className="set-input" value={name} onChange={e => setName(e.target.value)} placeholder="New category name" aria-label="New category name" />
+      <div className="set-row-control">
+        <input type="color" className="set-color" value={color} onChange={e => setColor(e.target.value)} aria-label="Category color" />
+        <Btn size="sm" type="submit" icon={Plus} disabled={!name.trim()}>Add</Btn>
+      </div>
+    </form>
+  );
+});
+
+// Mirrors the reader's mode, fit, background and brightness on a real cover from the library.
+const ReaderPreview = memo(({ settings, cover }) => {
+  const themeKey = settings?.readerTheme || 'dark';
+  const theme = THEMES[themeKey] || THEMES.dark;
+  const mode = settings?.readerMode || 'scroll';
+  const fit = settings?.fitMode || 'height';
+  const brightness = settings?.brightness || 100;
+  const src = proxyImg(cover);
+  const page = (key, style) => (src
+    ? <img key={key} src={src} alt="" draggable={false} style={{ display: 'block', ...style }} />
+    : <div key={key} className="set-preview-blank" style={style} />);
+  return (
+    <aside className="set-preview" aria-label="Reader preview">
+      <h3 className="set-group-title">Preview</h3>
+      <div className="set-preview-frame" style={{ background: theme.bg }}>
+        <div style={{ filter: `brightness(${brightness / 100})`, height: '100%', display: 'flex', justifyContent: 'center', alignItems: fit === 'height' || mode !== 'paged' ? 'flex-start' : 'center', overflow: 'hidden' }}>
+          {mode === 'paged'
+            ? page('page', fit === 'width' ? { width: '100%', alignSelf: 'flex-start' } : fit === 'original' ? { width: '140%', flexShrink: 0 } : { height: '100%' })
+            : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: mode === 'webtoon' ? 0 : 10, width: mode === 'webtoon' ? '100%' : '84%', paddingTop: mode === 'webtoon' ? 0 : 10 }}>
+                {[0, 1, 2].map(i => page(i, { width: '100%', aspectRatio: src ? undefined : '0.7' }))}
+              </div>
+            )}
+        </div>
+      </div>
+      <p className="set-preview-cap">
+        {mode === 'paged' ? `Paged · fit ${fit}` : mode === 'webtoon' ? 'Webtoon' : 'Scroll'} · {theme.label} · {brightness}%
+      </p>
+    </aside>
+  );
+});
+
+
 const SettingsPage = memo(() => {
   const {
     settings, updateSetting, backendOnline, checkHealth, library, history,
-    progress, readChapters, readingTime, sources, extensions, fetchSources, fetchExtensions,
-    suwayomiReady, categories, addCategory, removeCategory, getMangaKey
+    progress, readingTime, fetchSources, fetchExtensions,
+    suwayomiReady, categories, addCategory, removeCategory
   } = useData();
   const toast = useToast();
   const [confirmClear, setConfirmClear] = useState(null);
@@ -1421,6 +1531,8 @@ const SettingsPage = memo(() => {
   const [backupWorking, setBackupWorking] = useState(false);
   const [discordPresence, setDiscordPresence] = useState({ enabled: false, mode: 'browsing', status: 'unsupported' });
   const [discordPresenceWorking, setDiscordPresenceWorking] = useState(false);
+  const [section, setSection] = useState(() => storage.get('settingsSection', 'general'));
+  const [railQuery, setRailQuery] = useState('');
 
   const saveExtensionRepos = useCallback(async (nextRepos, successMessage) => {
     if (!window.electronAPI?.setExtensionRepos) {
@@ -1544,15 +1656,6 @@ const SettingsPage = memo(() => {
     });
   }, []);
 
-  const installedExtCount = useMemo(() => {
-    const seen = new Set();
-    extensions.forEach(ext => {
-      if (!ext?.isInstalled) return;
-      seen.add(ext.pkgName || `${ext.name}:${ext.lang}`);
-    });
-    return seen.size;
-  }, [extensions]);
-
   useEffect(() => {
     window.electronAPI?.getCloseToTray?.().then(val => {
       if (val !== undefined) updateSetting('closeToTray', val);
@@ -1617,30 +1720,6 @@ const SettingsPage = memo(() => {
   };
 
   const totalReadingMins = Object.values(readingTime).reduce((a, b) => a + b, 0);
-  const totalChapters = countReadChapterIds(readChapters);
-
-  const Section = ({ title, children }) => (
-    <div style={{ marginBottom: 32 }}>
-      <h3 style={{ fontFamily: "'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight: 700, fontSize: 16, color: 'var(--text)', marginBottom: 16, paddingBottom: 10, borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
-        {title}
-      </h3>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {children}
-      </div>
-    </div>
-  );
-
-  const Row = ({ label, sub, children }) => (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', background: 'var(--card)', borderRadius: 12, border: '1px solid var(--border)', gap: 16 }}>
-      <div>
-        <p style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)' }}>{label}</p>
-        {sub && <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 3 }}>{sub}</p>}
-      </div>
-      <div style={{ flexShrink: 0 }}>
-        {children}
-      </div>
-    </div>
-  );
 
   const Toggle = ({ value, onChange, ariaLabel, disabled = false }) => (
     <button type="button" role="switch" aria-label={ariaLabel} aria-checked={value} aria-disabled={disabled} disabled={disabled} onClick={() => { if (!disabled) onChange(!value); }} style={{ width: 48, height: 26, borderRadius: 13, background: value ? 'var(--accent)' : 'rgba(255,255,255,0.12)', border: 'none', cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1, position: 'relative', transition: 'background 0.3s' }}>
@@ -1808,387 +1887,387 @@ const SettingsPage = memo(() => {
     }
   }, [collectBackupPayload, toast]);
 
+  const accent = (settings?.accentColor || '#f97316').toLowerCase();
+  const customAccent = !ACCENT_PRESETS.includes(accent);
+  const backendTone = backendOnline === true ? 'ok' : backendOnline === false ? 'bad' : 'warn';
+  const systemIssue = backendOnline === false ? 'Offline'
+    : runtimeInfo.javaCompatible === false ? 'Java'
+      : diagnostics && diagnostics.status !== 'pass' ? 'Check' : null;
+  const railTags = {
+    system: systemIssue && { label: systemIssue, tone: 'warn' },
+    about: (appUpdateState.version || appUpdateState.downloaded) && { label: 'Update', tone: 'accent' },
+  };
+  const railQueryText = railQuery.trim().toLowerCase();
+  const visibleSections = railQueryText
+    ? SETTINGS_SECTIONS.filter(s => `${s.label} ${s.keywords}`.toLowerCase().includes(railQueryText))
+    : SETTINGS_SECTIONS;
+  const current = SETTINGS_SECTIONS.find(s => s.id === section) || SETTINGS_SECTIONS[0];
+  const openSection = (id) => { setSection(id); storage.set('settingsSection', id); };
+  const previewCover = history.find(m => m?.cover)?.cover || library.find(m => m?.cover)?.cover || null;
+  const pathText = { fontFamily: 'monospace', fontSize: 11 };
+
   return (
-    <div className="page-transition" style={{ maxWidth: 720, margin: '0 auto', padding: '0 0 60px' }}>
+    <div className="page-transition set-layout">
+      <nav className="set-rail" aria-label="Settings sections">
+        <label className="set-search">
+          <Search size={14} />
+          <input
+            value={railQuery}
+            onChange={e => setRailQuery(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && visibleSections[0]) openSection(visibleSections[0].id); if (e.key === 'Escape') setRailQuery(''); }}
+            placeholder="Search settings"
+            aria-label="Search settings"
+          />
+          {railQuery && <button type="button" aria-label="Clear search" onClick={() => setRailQuery('')}><X size={13} /></button>}
+        </label>
+        {visibleSections.map(s => {
+          const Icon = s.icon;
+          const tag = railTags[s.id];
+          return (
+            <React.Fragment key={s.id}>
+              {s.divider && !railQueryText && <div className="set-rail-sep" />}
+              <button type="button" className={`set-rail-item${s.id === current.id ? ' on' : ''}`} aria-current={s.id === current.id ? 'page' : undefined} onClick={() => openSection(s.id)}>
+                <Icon size={15} />
+                <span className="set-rail-label">{s.label}</span>
+                {tag && <span className={`set-tag ${tag.tone}`}>{tag.label}</span>}
+              </button>
+            </React.Fragment>
+          );
+        })}
+        {visibleSections.length === 0 && <p className="set-rail-empty">No settings match “{railQuery.trim()}”</p>}
+      </nav>
 
-      <Section title="📊 Reading Statistics">
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 12 }}>
-          {[
-            { label: 'Library', value: library.length, icon: '📚' },
-            { label: 'History', value: history.length, icon: '🕐' },
-            { label: 'Chapters Read', value: totalChapters, icon: '📖' },
-            { label: 'Reading Time', value: `${Math.floor(totalReadingMins / 3600)}h ${Math.floor((totalReadingMins % 3600) / 60)}m`, icon: '⏱' },
-            { label: 'Sources', value: Object.keys(sources).length, icon: '🌐' },
-            { label: 'Extensions', value: installedExtCount, icon: '🧩' },
-          ].map(s => (
-            <div key={s.label} style={{ padding: '18px 16px', background: 'var(--card)', borderRadius: 14, border: '1px solid var(--border)', textAlign: 'center' }}>
-              <div style={{ fontSize: 28, marginBottom: 8 }}>{s.icon}</div>
-              <p style={{ fontFamily: "'Segoe UI Variable Display','Segoe UI Variable','Segoe UI',system-ui,-apple-system,sans-serif", fontWeight: 800, fontSize: 22, color: 'var(--text)' }}>{s.value}</p>
-              <p style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{s.label}</p>
-            </div>
-          ))}
-        </div>
-      </Section>
+      <div className="set-pane" key={current.id}>
+        <h2 className="set-title">{current.label}</h2>
+        {current.lede && <p className="set-lede">{current.lede}</p>}
 
-      <Section title="📖 Reader Defaults">
-        <Row label="Default Mode" sub="Mode used when opening a chapter">
-          <select value={settings?.readerMode || 'scroll'} onChange={e => updateSetting('readerMode', e.target.value)} style={{ background: 'var(--card2)', border: '1px solid var(--border)', color: 'var(--text)', padding: '8px 14px', borderRadius: 8, fontSize: 13, cursor: 'pointer', outline: 'none' }}>
-            <option value="scroll">Scroll</option>
-            <option value="paged">Paged</option>
-            <option value="webtoon">Webtoon</option>
-          </select>
-        </Row>
-        <Row label="Default Fit Mode" sub="How images are sized in paged mode">
-          <select value={settings?.fitMode || 'height'} onChange={e => updateSetting('fitMode', e.target.value)} style={{ background: 'var(--card2)', border: '1px solid var(--border)', color: 'var(--text)', padding: '8px 14px', borderRadius: 8, fontSize: 13, cursor: 'pointer', outline: 'none' }}>
-            <option value="height">Fit Height</option>
-            <option value="width">Fit Width</option>
-            <option value="original">Original Size</option>
-          </select>
-        </Row>
-        <Row label="Default Brightness" sub={`Currently: ${settings?.brightness || 100}%`}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <input type="range" min="40" max="150" value={settings?.brightness || 100}
-              onPointerDown={e => e.stopPropagation()}
-              onTouchStart={e => e.stopPropagation()}
-              onChange={e => updateSetting('brightness', Number(e.target.value))} style={{ width: 120, height: '4px', accentColor: 'var(--accent)' }} />
-            <span style={{ fontSize: 12, color: 'var(--muted)', minWidth: 36 }}>{settings?.brightness || 100}%</span>
-          </div>
-        </Row>
-        <Row label="Reader Theme" sub="Background color while reading">
-          <div style={{ display: 'flex', gap: 8 }}>
-            {Object.entries(THEMES).map(([key, t]) => (
-              <button key={key} onClick={() => updateSetting('readerTheme', key)} title={key} style={{ width: 32, height: 32, borderRadius: 8, background: t.bg, border: `2px solid ${(settings?.readerTheme || 'dark') === key ? t.accent : 'rgba(255,255,255,0.15)'}`, cursor: 'pointer' }} />
-            ))}
-          </div>
-        </Row>
-      </Section>
-
-      <Section title="🖼 Display">
-        <Row label="App Theme" sub="Switch between light and dark interface">
-          <div style={{ display: 'flex', gap: 6 }}>
-            {[['dark', '🌙 Dark'], ['light', '☀️ Light']].map(([v, l]) => (
-              <button key={v} onClick={() => updateSetting('appTheme', v)} style={{ padding: '8px 16px', borderRadius: 10, border: `1.5px solid ${(settings?.appTheme || 'dark') === v ? 'var(--accent)' : 'var(--border)'}`, background: (settings?.appTheme || 'dark') === v ? 'rgba(249,115,22,0.12)' : 'transparent', color: (settings?.appTheme || 'dark') === v ? 'var(--accent)' : 'var(--muted)', fontSize: 13, fontWeight: 700, cursor: 'pointer', transition: 'all 0.2s' }}>{l}</button>
-            ))}
-          </div>
-        </Row>
-        <Row label="Library View" sub="Default layout for your library">
-          <div style={{ display: 'flex', gap: 6 }}>
-            {[['grid', 'Grid'], ['list', 'List'], ['compact', 'Compact']].map(([v, l]) => (
-              <button key={v} onClick={() => updateSetting('libraryView', v)} style={{ padding: '7px 14px', borderRadius: 8, border: 'none', background: (settings?.libraryView || 'grid') === v ? 'var(--accent)' : 'rgba(255,255,255,0.08)', color: (settings?.libraryView || 'grid') === v ? '#fff' : 'var(--muted)', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>{l}</button>
-            ))}
-          </div>
-        </Row>
-        <Row label="Accent Color" sub="Changes highlight color throughout the app">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <input type="color" value={settings?.accentColor || '#f97316'} onChange={e => updateSetting('accentColor', e.target.value)} style={{ width: 36, height: 36, borderRadius: 8, border: '1.5px solid var(--border)', background: 'none', cursor: 'pointer', padding: 2 }} />
-            <span style={{ fontSize: 12, color: 'var(--muted)', fontFamily: 'monospace' }}>{settings?.accentColor || '#f97316'}</span>
-            {settings?.accentColor && settings.accentColor !== '#f97316' && <Btn variant="ghost" size="sm" onClick={() => updateSetting('accentColor', '#f97316')}>Reset</Btn>}
-          </div>
-        </Row>
-        <Row label="Sidebar Collapsed" sub="Start with sidebar minimized">
-          <Toggle ariaLabel="Start with sidebar collapsed" value={settings?.sidebarCollapsed || false} onChange={v => updateSetting('sidebarCollapsed', v)} />
-        </Row>
-      </Section>
-
-      <Section title="🔌 Connection">
-        <Row label="Backend Status" sub={`API: ${CONFIG.API}`}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <div style={{ width: 8, height: 8, borderRadius: '50%', background: backendOnline === true ? '#22c55e' : backendOnline === false ? '#ef4444' : '#f59e0b', boxShadow: `0 0 10px ${backendOnline === true ? '#22c55e' : backendOnline === false ? '#ef4444' : '#f59e0b'}` }} />
-              <span style={{ fontSize: 13, fontWeight: 600, color: backendOnline === true ? '#4ade80' : backendOnline === false ? '#f87171' : '#facc15' }}>{backendOnline === true ? 'Online' : backendOnline === false ? 'Offline' : 'Checking...'}</span>
-            </div>
-            <Btn variant="outline" size="sm" onClick={() => { checkHealth(); fetchSources(); fetchExtensions(); toast('Refreshing...', 'info'); }}><RefreshCw size={14} /> Refresh</Btn>
-          </div>
-        </Row>
-        {window.electronAPI?.checkForAppUpdate && (
-          <Row label="App Updates" sub={appUpdateState.message || 'Checks GitHub releases and installs from inside akaReader'}>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <Btn variant="outline" size="sm" onClick={checkAppUpdate} disabled={appUpdateState.checking || appUpdateState.downloading}>
-                <RefreshCw size={14} /> {appUpdateState.checking ? 'Checking' : 'Check'}
-              </Btn>
-              {appUpdateState.downloaded ? (
-                <Btn variant="success" size="sm" onClick={installAppUpdateSafely}>
-                  Restart now
-                </Btn>
-              ) : appUpdateState.downloading ? (
-                <Btn variant="outline" size="sm" disabled style={{ opacity: 0.6 }}>
-                  Downloading {appUpdateState.pct ? `${appUpdateState.pct}%` : '…'}
-                </Btn>
-              ) : appUpdateState.version ? (
-                <Btn variant="default" size="sm" onClick={downloadAppUpdateSafely}>
-                  <Download size={14} /> Download
-                </Btn>
-              ) : null}
-            </div>
-          </Row>
-        )}
-        <Row label="Suwayomi Runtime" sub="The embedded server akaReader manages in the background">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <div style={{ width: 8, height: 8, borderRadius: '50%', background: suwayomiReady ? '#22c55e' : backendOnline === true ? '#f59e0b' : '#ef4444', boxShadow: `0 0 10px ${suwayomiReady ? '#22c55e' : backendOnline === true ? '#f59e0b' : '#ef4444'}` }} />
-            <span style={{ fontSize: 13, fontWeight: 600, color: suwayomiReady ? '#4ade80' : backendOnline === true ? '#facc15' : '#f87171' }}>
-              {suwayomiReady ? 'Ready' : backendOnline === true ? 'Starting in background' : 'Unavailable'}
-            </span>
-          </div>
-        </Row>
-        <Row label="Java Runtime" sub={runtimeInfo.javaPath || 'Resolving Java runtime...'}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 11, color: runtimeInfo.javaCompatible === false ? '#f87171' : 'var(--muted)', fontFamily: 'monospace', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {runtimeInfo.javaMajor
-                ? `Java ${runtimeInfo.javaVersion || runtimeInfo.javaMajor} · ${runtimeInfo.javaSource === 'managed' ? 'Managed' : 'System'}${runtimeInfo.javaCompatible === false ? ` · Needs ${runtimeInfo.requiredJavaVersion}+` : ''}`
-                : runtimeInfo.javaPath ? 'Version unknown' : 'Not found'}
-            </span>
-            {window.electronAPI?.installManagedJava && runtimeInfo.javaCompatible === false && (
-              <Btn size="sm" onClick={repairJava} disabled={javaRepairing}>
-                {javaRepairing ? <><Spin size={13} /> Installing...</> : <><Download size={13} /> Install Java 21.0.11</>}
-              </Btn>
-            )}
-          </div>
-        </Row>
-        <Row label="Embedded Server" sub={runtimeInfo.jarPath || 'Resolving embedded server path...'}>
-          <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'monospace', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            Bundled Suwayomi JAR
-          </span>
-        </Row>
-        <Row label="Suwayomi Config" sub={runtimeInfo.configPath || 'Config path will appear after startup'}>
-          <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'monospace', maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            Browser auto-open disabled
-          </span>
-        </Row>
-        {window.electronAPI?.getSystemDiagnostics && (
-          <div style={{ padding: '16px 18px', background: 'var(--card)', borderRadius: 14, border: `1px solid ${diagnostics?.status === 'fail' ? 'rgba(239,68,68,0.35)' : diagnostics?.status === 'warn' ? 'rgba(245,158,11,0.35)' : diagnostics?.status === 'pass' ? 'rgba(34,197,94,0.3)' : 'var(--border)'}` }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: diagnostics ? 14 : 0, flexWrap: 'wrap' }}>
-              <div style={{ flex: 1, minWidth: 220 }}>
-                <p style={{ fontSize: 14, fontWeight: 700 }}>System health</p>
-                <p style={{ fontSize: 12, color: 'var(--muted)', marginTop: 3 }}>
-                  {diagnostics?.status === 'pass' ? 'All required local parts are working.' : diagnostics ? 'A specific check needs attention.' : 'Checks the local API, Java, Suwayomi, storage, and protected-source helper.'}
-                </p>
-              </div>
-              <Btn variant="outline" size="sm" disabled={diagnosticsWorking || repairWorking} onClick={runDiagnostics}>
-                {diagnosticsWorking ? <><Spin size={13} /> Checking…</> : <><Activity size={13} /> Run full check</>}
-              </Btn>
-              {diagnostics && diagnostics.status !== 'pass' && (
-                <Btn size="sm" disabled={repairWorking || diagnosticsWorking} onClick={repairSystem}>
-                  {repairWorking ? <><Spin size={13} /> Repairing…</> : <><RotateCcw size={13} /> Repair automatically</>}
-                </Btn>
+        {current.id === 'general' && (
+          <>
+            <SetGroup title="Appearance">
+              <SetRow label="App theme">
+                <SetSegs ariaLabel="App theme" value={settings?.appTheme || 'dark'} options={[['dark', 'Dark'], ['light', 'Light']]} onChange={v => updateSetting('appTheme', v)} />
+              </SetRow>
+              <SetRow label="Accent color" sub="Buttons, highlights and progress bars">
+                <div className="set-swatches">
+                  {ACCENT_PRESETS.map(color => (
+                    <button key={color} type="button" aria-label={`Accent ${color}`} aria-pressed={accent === color} className={accent === color ? 'on' : ''} style={{ background: color }} onClick={() => updateSetting('accentColor', color)} />
+                  ))}
+                  <label className={`set-swatch-custom${customAccent ? ' on' : ''}`} title="Custom color" style={customAccent ? { background: accent } : undefined}>
+                    <input type="color" value={accent} onChange={e => updateSetting('accentColor', e.target.value)} aria-label="Custom accent color" />
+                    {!customAccent && <Plus size={13} />}
+                  </label>
+                </div>
+              </SetRow>
+              <SetRow label="Library layout" sub="Default layout for your library">
+                <SetSegs ariaLabel="Library layout" value={settings?.libraryView || 'grid'} options={[['grid', 'Grid'], ['list', 'List'], ['compact', 'Compact']]} onChange={v => updateSetting('libraryView', v)} />
+              </SetRow>
+              <SetRow label="Start with the sidebar collapsed">
+                <Toggle ariaLabel="Start with sidebar collapsed" value={settings?.sidebarCollapsed || false} onChange={v => updateSetting('sidebarCollapsed', v)} />
+              </SetRow>
+            </SetGroup>
+            <SetGroup title="Window">
+              <SetRow label="Close to tray" sub="Closing the window keeps akaReader running in the system tray">
+                <Toggle
+                  ariaLabel="Close to tray"
+                  value={settings?.closeToTray !== false}
+                  onChange={v => {
+                    updateSetting('closeToTray', v);
+                    window.electronAPI?.setCloseToTray?.(v);
+                  }}
+                />
+              </SetRow>
+              {window.electronAPI?.setStartWithWindows && (
+                <SetRow label="Start with Windows" sub="Launch akaReader when you sign in">
+                  <Toggle
+                    ariaLabel="Start with Windows"
+                    value={!!settings?.startWithWindows}
+                    onChange={v => {
+                      updateSetting('startWithWindows', v);
+                      window.electronAPI.setStartWithWindows(v);
+                      toast(`Start with Windows ${v ? 'enabled' : 'disabled'}`, 'success');
+                    }}
+                  />
+                </SetRow>
               )}
+            </SetGroup>
+          </>
+        )}
+
+        {current.id === 'reader' && (
+          <div className="set-split">
+            <div className="set-split-main">
+              <SetGroup title="Layout">
+                <SetRow label="Reading mode" sub="Used when a chapter opens">
+                  <SetSegs ariaLabel="Reading mode" value={settings?.readerMode || 'scroll'} options={[['scroll', 'Scroll'], ['paged', 'Paged'], ['webtoon', 'Webtoon']]} onChange={v => updateSetting('readerMode', v)} />
+                </SetRow>
+                <SetRow label="Fit pages to" sub="Paged mode">
+                  <SetSegs ariaLabel="Fit pages to" value={settings?.fitMode || 'height'} options={[['height', 'Height'], ['width', 'Width'], ['original', 'Original']]} onChange={v => updateSetting('fitMode', v)} />
+                </SetRow>
+              </SetGroup>
+              <SetGroup title="Look">
+                <SetRow label="Background" sub={(THEMES[settings?.readerTheme] || THEMES.dark)?.label}>
+                  <div className="set-swatches square">
+                    {Object.entries(THEMES).map(([key, t]) => (
+                      <button key={key} type="button" title={t.label} aria-label={`${t.label} background`} aria-pressed={(settings?.readerTheme || 'dark') === key} className={(settings?.readerTheme || 'dark') === key ? 'on' : ''} style={{ background: t.bg }} onClick={() => updateSetting('readerTheme', key)} />
+                    ))}
+                  </div>
+                </SetRow>
+                <SetRow label="Brightness" sub={`${settings?.brightness || 100}%`}>
+                  <input type="range" className="set-range" min="40" max="150" aria-label="Brightness" value={settings?.brightness || 100}
+                    onPointerDown={e => e.stopPropagation()}
+                    onTouchStart={e => e.stopPropagation()}
+                    onChange={e => updateSetting('brightness', Number(e.target.value))} />
+                </SetRow>
+              </SetGroup>
+              <p className="set-hint">All of these can also be changed while reading, from the reader's settings panel.</p>
             </div>
-            {diagnostics && (
-              <div style={{ display: 'grid', gap: 7 }}>
-                {diagnostics.checks.map(check => (
-                  <div key={check.id} style={{ display: 'flex', alignItems: 'flex-start', gap: 9, paddingTop: 7, borderTop: '1px solid var(--border)' }}>
-                    {check.status === 'pass' ? <Check size={14} style={{ color: '#4ade80', marginTop: 2, flexShrink: 0 }} /> : <AlertTriangle size={14} style={{ color: check.status === 'fail' ? '#f87171' : '#facc15', marginTop: 2, flexShrink: 0 }} />}
+            <ReaderPreview settings={settings} cover={previewCover} />
+          </div>
+        )}
+
+        {current.id === 'library' && (
+          <>
+            <SetGroup title="Chapter updates" note="akaReader checks every library title directly against its source. Checks keep running while the app is in the tray.">
+              <SetRow label="Check for new chapters">
+                <SetSegs
+                  ariaLabel="Automatic chapter update interval"
+                  value={Number(settings?.chapterUpdateInterval ?? CONFIG.UPDATE_INTERVAL)}
+                  options={UPDATE_INTERVAL_OPTIONS.map(option => [option.value, SHORT_INTERVAL_LABELS[option.value] || option.label])}
+                  onChange={v => updateSetting('chapterUpdateInterval', Number(v))}
+                />
+              </SetRow>
+              <SetRow label="Desktop notifications" sub="Only when an automatic check finds a new chapter">
+                <Toggle ariaLabel="Desktop notifications" value={settings?.notifyNewChapters !== false} onChange={value => updateSetting('notifyNewChapters', value)} />
+              </SetRow>
+              <SetRow label="Auto-download new chapters" sub="Queue new chapters for offline reading">
+                <Toggle ariaLabel="Auto-download new chapters" value={!!settings?.autoDownloadNewChapters} onChange={value => updateSetting('autoDownloadNewChapters', value)} />
+              </SetRow>
+            </SetGroup>
+            <SetGroup title={`Categories · ${categories.length}`}>
+              {categories.map(cat => {
+                const builtIn = DEFAULT_CATEGORIES.some(d => d.id === cat.id);
+                return (
+                  <SetRow key={cat.id} label={<><span className="set-dot" style={{ background: cat.color }} />{cat.name}</>} sub={builtIn ? 'Built in' : null}>
+                    {!builtIn && <Btn variant="ghost" size="icon" title={`Delete ${cat.name}`} onClick={() => removeCategory(cat.id)} style={{ color: 'var(--red)' }}><Trash2 size={14} /></Btn>}
+                  </SetRow>
+                );
+              })}
+              <CategoryAddRow onAdd={addCategory} />
+            </SetGroup>
+          </>
+        )}
+
+        {current.id === 'downloads' && (
+          <>
+            <SetGroup title="Offline chapters">
+              <SetRow label="Delete chapters after reading" sub="Removes a downloaded chapter once you finish it">
+                <Toggle ariaLabel="Auto-delete read chapters" value={settings?.autoDeleteRead || false} onChange={v => updateSetting('autoDeleteRead', v)} />
+              </SetRow>
+            </SetGroup>
+            {window.electronAPI?.openDataDir && (
+              <SetGroup title="Storage">
+                <SetRow label="Data folder" sub="Settings, backups and the embedded server's files">
+                  <Btn variant="outline" size="sm" onClick={() => window.electronAPI.openDataDir()}><ExternalLink size={14} /> Open folder</Btn>
+                </SetRow>
+              </SetGroup>
+            )}
+            <p className="set-hint">Stored chapters, sizes and cleanup are in the Downloads tab.</p>
+          </>
+        )}
+
+        {current.id === 'extensions' && (
+          <>
+            <SetGroup title="Repositories" note="Add another compatible index.min.json or index.pb URL if you need one. Changes safely restart the local services.">
+              {repoConfig.defaults.map(repo => (
+                <SetRow key={repo} label={<span style={{ ...pathText, fontSize: 12, fontWeight: 500 }}>{repo}</span>}>
+                  <span className="set-tag accent">Built in</span>
+                </SetRow>
+              ))}
+              {repoConfig.custom.map(repo => (
+                <SetRow key={repo} label={<span style={{ ...pathText, fontSize: 12, fontWeight: 500 }}>{repo}</span>}>
+                  <Btn variant="ghost" size="icon" title="Remove repository" disabled={repoWorking} onClick={() => saveExtensionRepos(repoConfig.custom.filter(value => value !== repo), 'Repository removed')} style={{ color: 'var(--red)' }}><X size={14} /></Btn>
+                </SetRow>
+              ))}
+            </SetGroup>
+            <div style={{ marginTop: 10 }}>
+              <RepoAddRow disabled={repoWorking} onAdd={(url) => {
+                if (repoConfig.defaults.includes(url) || repoConfig.custom.includes(url)) { toast('Already added', 'warning'); return false; }
+                return saveExtensionRepos([...repoConfig.custom, url], 'Repository added');
+              }} />
+            </div>
+          </>
+        )}
+
+        {current.id === 'integrations' && (
+          <SetGroup title="Discord" note="Discord only sees whether you are browsing or reading manga. Titles, chapters, sources and history stay private.">
+            <SetRow label="Rich Presence" sub={discordStatusCopy}>
+              <Toggle
+                ariaLabel="Discord Rich Presence"
+                value={discordPresence.enabled}
+                disabled={!window.electronAPI?.setDiscordPresenceEnabled || discordPresenceWorking}
+                onChange={setDiscordPresenceEnabled}
+              />
+            </SetRow>
+            {discordPresence.enabled && discordPresence.status !== 'connected' && window.electronAPI?.retryDiscordPresence && (
+              <SetRow label="Connection" sub="Keep the Discord desktop app open, then try again.">
+                <Btn variant="outline" size="sm" disabled={discordPresenceWorking} onClick={retryDiscordPresence}>
+                  {discordPresenceWorking ? <><Spin size={13} /> Connecting…</> : <><RefreshCw size={13} /> Retry</>}
+                </Btn>
+              </SetRow>
+            )}
+          </SetGroup>
+        )}
+
+        {current.id === 'data' && (
+          <>
+            <SetGroup title="Backup" note="Backups include your library, history, progress, categories, notes, settings and reading time. Downloaded chapter images stay on this device.">
+              <SetRow label="Export data" sub="Save a backup file wherever you choose">
+                <Btn variant="outline" size="sm" icon={Download} disabled={backupWorking} onClick={exportBackup}>{backupWorking ? 'Working…' : 'Export'}</Btn>
+              </SetRow>
+              <SetRow label="Import data" sub="Restore a current or older v2 akaReader backup">
+                <Btn variant="outline" size="sm" icon={Archive} disabled={backupWorking} onClick={importBackup}>{backupWorking ? 'Working…' : 'Import'}</Btn>
+              </SetRow>
+            </SetGroup>
+            <p className="set-hint">Before an app update downloads, akaReader also keeps a private safety backup in the data folder and retains the latest five.</p>
+            <SetGroup title="Clear data">
+              <SetRow label="Reading history" sub={`${history.length} ${history.length === 1 ? 'entry' : 'entries'}`}>
+                <Btn variant="danger" size="sm" disabled={history.length === 0} onClick={() => setConfirmClear('history')}><Trash2 size={14} /> Clear</Btn>
+              </SetRow>
+              <SetRow label="Reading progress" sub={`${Object.keys(progress).length} tracked titles`}>
+                <Btn variant="danger" size="sm" disabled={Object.keys(progress).length === 0} onClick={() => setConfirmClear('progress')}><Trash2 size={14} /> Clear</Btn>
+              </SetRow>
+              <SetRow label="Reading time" sub={`${Math.floor(totalReadingMins / 3600)}h ${Math.floor((totalReadingMins % 3600) / 60)}m tracked`}>
+                <Btn variant="danger" size="sm" disabled={totalReadingMins === 0} onClick={() => setConfirmClear('readingTime')}><Trash2 size={14} /> Clear</Btn>
+              </SetRow>
+            </SetGroup>
+          </>
+        )}
+
+        {current.id === 'system' && (
+          <>
+            <SetGroup title="Services">
+              <SetRow label="Local API" sub={CONFIG.API}>
+                <SetStatus tone={backendTone}>{backendOnline === true ? 'Online' : backendOnline === false ? 'Offline' : 'Checking…'}</SetStatus>
+                <Btn variant="outline" size="sm" onClick={() => { checkHealth(); fetchSources(); fetchExtensions(); toast('Refreshing...', 'info'); }}><RefreshCw size={14} /> Refresh</Btn>
+              </SetRow>
+              <SetRow label="Suwayomi" sub="The embedded server akaReader manages in the background">
+                <SetStatus tone={suwayomiReady ? 'ok' : backendOnline === true ? 'warn' : 'bad'}>{suwayomiReady ? 'Ready' : backendOnline === true ? 'Starting' : 'Unavailable'}</SetStatus>
+              </SetRow>
+              <SetRow label="Java" sub={<span style={pathText}>{runtimeInfo.javaPath || 'Resolving Java runtime…'}</span>}>
+                {runtimeInfo.javaMajor
+                  ? <SetStatus tone={runtimeInfo.javaCompatible === false ? 'bad' : 'ok'}>{`Java ${runtimeInfo.javaVersion || runtimeInfo.javaMajor} · ${runtimeInfo.javaSource === 'managed' ? 'Managed' : 'System'}${runtimeInfo.javaCompatible === false ? ` · needs ${runtimeInfo.requiredJavaVersion}+` : ''}`}</SetStatus>
+                  : <SetStatus tone={runtimeInfo.javaPath ? 'warn' : 'bad'}>{runtimeInfo.javaPath ? 'Version unknown' : 'Not found'}</SetStatus>}
+                {window.electronAPI?.installManagedJava && runtimeInfo.javaCompatible === false && (
+                  <Btn size="sm" onClick={repairJava} disabled={javaRepairing}>
+                    {javaRepairing ? <><Spin size={13} /> Installing...</> : <><Download size={13} /> Install Java 21.0.11</>}
+                  </Btn>
+                )}
+              </SetRow>
+              <SetRow label="Embedded server" sub={<span style={pathText}>{runtimeInfo.jarPath || 'Resolving embedded server path…'}</span>} />
+              <SetRow label="Suwayomi config" sub={<span style={pathText}>{runtimeInfo.configPath || 'Config path will appear after startup'}</span>} />
+            </SetGroup>
+
+            {window.electronAPI?.getSystemDiagnostics && (
+              <SetGroup title="Health check">
+                <SetRow
+                  label="System health"
+                  sub={diagnostics?.status === 'pass' ? 'All required local parts are working.' : diagnostics ? 'A specific check needs attention.' : 'Checks the local API, Java, Suwayomi, storage and the protected-source helper.'}
+                >
+                  {diagnostics && <SetStatus tone={diagnostics.status === 'pass' ? 'ok' : diagnostics.status === 'fail' ? 'bad' : 'warn'}>{diagnostics.status === 'pass' ? 'Healthy' : diagnostics.status === 'fail' ? 'Failing' : 'Warning'}</SetStatus>}
+                  <Btn variant="outline" size="sm" disabled={diagnosticsWorking || repairWorking} onClick={runDiagnostics}>
+                    {diagnosticsWorking ? <><Spin size={13} /> Checking…</> : <><Activity size={13} /> Run full check</>}
+                  </Btn>
+                  {diagnostics && diagnostics.status !== 'pass' && (
+                    <Btn size="sm" disabled={repairWorking || diagnosticsWorking} onClick={repairSystem}>
+                      {repairWorking ? <><Spin size={13} /> Repairing…</> : <><RotateCcw size={13} /> Repair automatically</>}
+                    </Btn>
+                  )}
+                </SetRow>
+                {diagnostics?.checks.map(check => (
+                  <div key={check.id} className="set-check">
+                    {check.status === 'pass' ? <Check size={14} style={{ color: '#4ade80' }} /> : <AlertTriangle size={14} style={{ color: check.status === 'fail' ? '#f87171' : '#facc15' }} />}
                     <div>
-                      <p style={{ fontSize: 12, fontWeight: 700 }}>{check.label}</p>
-                      <p style={{ fontSize: 11, color: 'var(--muted)', marginTop: 2, lineHeight: 1.5 }}>{check.detail}</p>
+                      <p className="set-row-label" style={{ fontSize: 13 }}>{check.label}</p>
+                      <p className="set-row-sub">{check.detail}</p>
                     </div>
                   </div>
                 ))}
-              </div>
+              </SetGroup>
             )}
-          </div>
-        )}
-      </Section>
 
-      <Section title="📂 Library Categories">
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {categories.map(cat => (
-            <div key={cat.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', background: 'var(--card)', borderRadius: 12, border: '1px solid var(--border)' }}>
-              <div style={{ width: 12, height: 12, borderRadius: '50%', background: cat.color }} />
-              <span style={{ fontSize: 13, fontWeight: 700, flex: 1 }}>{cat.name}</span>
-              {!DEFAULT_CATEGORIES.some(d => d.id === cat.id) && (
-                <button onClick={() => removeCategory(cat.id)} style={{ background: 'none', border: 'none', color: 'var(--red)', cursor: 'pointer', padding: 4 }}><Trash2 size={14} /></button>
-              )}
-            </div>
-          ))}
-          <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
-            <input id="new-cat-name" placeholder="New Category Name" style={{ flex: 1, background: 'var(--card2)', border: '1.5px solid var(--border)', borderRadius: 8, padding: '8px 12px', color: 'var(--text)', fontSize: 13, outline: 'none' }} />
-            <input id="new-cat-color" type="color" defaultValue="#f97316" style={{ width: 36, height: 36, border: 'none', background: 'none', cursor: 'pointer' }} />
-            <Btn size="sm" onClick={() => {
-              const name = document.getElementById('new-cat-name').value;
-              const color = document.getElementById('new-cat-color').value;
-              if (name) { addCategory(name, color); document.getElementById('new-cat-name').value = ''; }
-            }} icon={Plus}>Add</Btn>
-          </div>
-        </div>
-      </Section>
-
-      <Section title="🔔 Chapter Updates">
-        <div style={{ padding: '12px 16px', background: 'rgba(249,115,22,0.06)', borderRadius: 12, border: '1px solid rgba(249,115,22,0.15)', fontSize: 12, color: 'var(--muted)', lineHeight: 1.65 }}>
-          akaReader checks every library title directly against its source. Checks continue while the app is minimized to the tray.
-        </div>
-        <Row label="Automatic checks" sub="Choose how often to look for new chapters">
-          <select
-            aria-label="Automatic chapter update interval"
-            value={Number(settings?.chapterUpdateInterval ?? CONFIG.UPDATE_INTERVAL)}
-            onChange={event => updateSetting('chapterUpdateInterval', Number(event.target.value))}
-            style={{ background: 'var(--card2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 9, padding: '8px 10px', fontSize: 12, outline: 'none' }}
-          >
-            {UPDATE_INTERVAL_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-          </select>
-        </Row>
-        <Row label="Desktop notifications" sub="Notify you only when an automatic check discovers a new chapter">
-          <Toggle ariaLabel="Desktop notifications" value={settings?.notifyNewChapters !== false} onChange={value => updateSetting('notifyNewChapters', value)} />
-        </Row>
-        <Row label="Auto-download new chapters" sub="Queue newly discovered chapters for offline reading; disabled by default">
-          <Toggle ariaLabel="Auto-download new chapters" value={!!settings?.autoDownloadNewChapters} onChange={value => updateSetting('autoDownloadNewChapters', value)} />
-        </Row>
-      </Section>
-
-      <Section title="🟣 Discord">
-        <div style={{ padding: '12px 16px', background: 'rgba(88,101,242,0.09)', borderRadius: 12, border: '1px solid rgba(88,101,242,0.25)', fontSize: 12, color: 'var(--muted)', lineHeight: 1.65 }}>
-          When enabled, Discord only sees whether you are browsing manga or reading manga. Manga titles, chapter names, sources, and reading history stay private.
-        </div>
-        <Row label="Discord Rich Presence" sub={discordStatusCopy}>
-          <Toggle
-            ariaLabel="Discord Rich Presence"
-            value={discordPresence.enabled}
-            disabled={!window.electronAPI?.setDiscordPresenceEnabled || discordPresenceWorking}
-            onChange={setDiscordPresenceEnabled}
-          />
-        </Row>
-        {discordPresence.enabled && discordPresence.status !== 'connected' && window.electronAPI?.retryDiscordPresence && (
-          <Row label="Discord connection" sub="Keep the Discord desktop app open, then try again.">
-            <Btn variant="outline" size="sm" disabled={discordPresenceWorking} onClick={retryDiscordPresence}>
-              {discordPresenceWorking ? <><Spin size={13} /> Connecting…</> : <><RefreshCw size={13} /> Retry</>}
-            </Btn>
-          </Row>
-        )}
-      </Section>
-
-      <Section title="⚠️ Data Management">
-        <Row label="Auto-Delete Read Chapters" sub="Automatically remove offline downloaded chapters when you finish reading them">
-          <Toggle ariaLabel="Auto-delete read chapters" value={settings?.autoDeleteRead || false} onChange={v => updateSetting('autoDeleteRead', v)} />
-        </Row>
-        <Row label="Clear Reading History" sub={`${history.length} entries`}>
-          <Btn variant="danger" size="sm" onClick={() => setConfirmClear('history')}><Trash2 size={14} /> Clear</Btn>
-        </Row>
-        <Row label="Clear Progress" sub={`${Object.keys(progress).length} tracked manga`}>
-          <Btn variant="danger" size="sm" onClick={() => setConfirmClear('progress')}><Trash2 size={14} /> Clear</Btn>
-        </Row>
-        <Row label="Clear Reading Time" sub="Reset all tracked reading time">
-          <Btn variant="danger" size="sm" onClick={() => setConfirmClear('readingTime')}><Trash2 size={14} /> Clear</Btn>
-        </Row>
-      </Section>
-
-      <Section title="🖥️ App Behavior">
-        <Row label="Close to Tray" sub="Closing the window keeps the app running in the system tray instead of quitting">
-          <Toggle
-            ariaLabel="Close to tray"
-            value={settings?.closeToTray !== false}
-            onChange={v => {
-              updateSetting('closeToTray', v);
-              window.electronAPI?.setCloseToTray?.(v);
-            }}
-          />
-        </Row>
-        {window.electronAPI?.setStartWithWindows && (
-          <Row label="Start with Windows" sub="Launch akaReader automatically when you log in">
-            <Toggle
-              ariaLabel="Start with Windows"
-              value={!!settings?.startWithWindows}
-              onChange={v => {
-                updateSetting('startWithWindows', v);
-                window.electronAPI.setStartWithWindows(v);
-                toast(`Start with Windows ${v ? 'enabled' : 'disabled'}`, 'success');
-              }}
-            />
-          </Row>
-        )}
-        {window.electronAPI?.openDataDir && (
-          <Row label="Data Directory" sub="Open the folder where akaReader stores your settings and data">
-            <Btn variant="outline" size="sm" onClick={() => window.electronAPI.openDataDir()}>
-              <ExternalLink size={14} /> Open Folder
-            </Btn>
-          </Row>
-        )}
-      </Section>
-
-      {window.electronAPI?.platform === 'win32' && (window.electronAPI?.installService || window.electronAPI?.checkService) && (
-        <Section title="⚙️ Windows Service">
-          <div style={{ padding: '12px 16px', background: 'rgba(59,130,246,0.06)', borderRadius: 12, border: '1px solid rgba(59,130,246,0.15)', fontSize: 13, color: 'var(--muted)', lineHeight: 1.7, marginBottom: 4 }}>
-            Run the Suwayomi backend as a Windows service so it starts automatically and runs without a visible window.
-          </div>
-          <Row label="Service Status" sub="Current state of the Suwayomi Windows service">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <div style={{ width: 8, height: 8, borderRadius: '50%', background: serviceStatus === 'running' ? '#22c55e' : serviceStatus === 'stopped' ? '#f87171' : '#f59e0b', boxShadow: `0 0 8px ${serviceStatus === 'running' ? '#22c55e' : serviceStatus === 'stopped' ? '#f87171' : '#f59e0b'}` }} />
-                <span style={{ fontSize: 13, fontWeight: 600, color: serviceStatus === 'running' ? '#4ade80' : serviceStatus === 'stopped' ? '#f87171' : '#facc15' }}>
-                  {serviceStatus === 'running' ? 'Running' : serviceStatus === 'stopped' ? 'Not installed' : serviceWorking ? 'Working…' : 'Checking…'}
-                </span>
-              </div>
-              <Btn variant="outline" size="sm" disabled={serviceWorking} onClick={async () => {
-                setServiceWorking(true);
-                try { const r = await window.electronAPI.checkService(); setServiceStatus(r ? 'running' : 'stopped'); }
-                catch { setServiceStatus('stopped'); }
-                finally { setServiceWorking(false); }
-              }}><RefreshCw size={13} /> Check</Btn>
-            </div>
-          </Row>
-          <Row label={serviceStatus === 'running' ? 'Uninstall Service' : 'Install Service'} sub={serviceStatus === 'running' ? 'Remove the Windows service (Suwayomi will only run while akaReader is open)' : 'Install as a Windows service for automatic background startup'}>
-            {serviceStatus === 'running' ? (
-              <Btn variant="danger" size="sm" disabled={serviceWorking} onClick={async () => {
-                setServiceWorking(true);
-                try { await window.electronAPI.uninstallService(); setServiceStatus('stopped'); toast('Service uninstalled', 'warning'); }
-                catch (e) { toast(`Failed: ${e.message}`, 'error'); }
-                finally { setServiceWorking(false); }
-              }}>
-                {serviceWorking ? <><Spin size={13} /> Working…</> : <><Trash2 size={13} /> Uninstall</>}
-              </Btn>
-            ) : (
-              <Btn size="sm" disabled={serviceWorking} onClick={async () => {
-                setServiceWorking(true);
-                try { await window.electronAPI.installService(); setServiceStatus('running'); toast('Service installed and started', 'success'); }
-                catch (e) { toast(`Failed: ${e.message}`, 'error'); }
-                finally { setServiceWorking(false); }
-              }}>
-                {serviceWorking ? <><Spin size={13} /> Working…</> : 'Install Service'}
-              </Btn>
+            {window.electronAPI?.platform === 'win32' && (window.electronAPI?.installService || window.electronAPI?.checkService) && (
+              <SetGroup title="Windows service" note="Run the Suwayomi backend as a Windows service so it starts automatically without a visible window.">
+                <SetRow label="Service status">
+                  <SetStatus tone={serviceStatus === 'running' ? 'ok' : serviceStatus === 'stopped' ? 'idle' : 'warn'}>
+                    {serviceStatus === 'running' ? 'Running' : serviceStatus === 'stopped' ? 'Not installed' : serviceWorking ? 'Working…' : 'Checking…'}
+                  </SetStatus>
+                  <Btn variant="outline" size="sm" disabled={serviceWorking} onClick={async () => {
+                    setServiceWorking(true);
+                    try { const r = await window.electronAPI.checkService(); setServiceStatus(r ? 'running' : 'stopped'); }
+                    catch { setServiceStatus('stopped'); }
+                    finally { setServiceWorking(false); }
+                  }}><RefreshCw size={13} /> Check</Btn>
+                </SetRow>
+                <SetRow label={serviceStatus === 'running' ? 'Uninstall service' : 'Install service'} sub={serviceStatus === 'running' ? 'Suwayomi will then only run while akaReader is open' : 'Start Suwayomi automatically in the background'}>
+                  {serviceStatus === 'running' ? (
+                    <Btn variant="danger" size="sm" disabled={serviceWorking} onClick={async () => {
+                      setServiceWorking(true);
+                      try { await window.electronAPI.uninstallService(); setServiceStatus('stopped'); toast('Service uninstalled', 'warning'); }
+                      catch (e) { toast(`Failed: ${e.message}`, 'error'); }
+                      finally { setServiceWorking(false); }
+                    }}>
+                      {serviceWorking ? <><Spin size={13} /> Working…</> : <><Trash2 size={13} /> Uninstall</>}
+                    </Btn>
+                  ) : (
+                    <Btn size="sm" disabled={serviceWorking} onClick={async () => {
+                      setServiceWorking(true);
+                      try { await window.electronAPI.installService(); setServiceStatus('running'); toast('Service installed and started', 'success'); }
+                      catch (e) { toast(`Failed: ${e.message}`, 'error'); }
+                      finally { setServiceWorking(false); }
+                    }}>
+                      {serviceWorking ? <><Spin size={13} /> Working…</> : 'Install service'}
+                    </Btn>
+                  )}
+                </SetRow>
+              </SetGroup>
             )}
-          </Row>
-        </Section>
-      )}
-
-      <Section title="📦 Extension Repositories">
-        <div style={{ padding: '12px 16px', background: 'rgba(249,115,22,0.06)', borderRadius: 12, border: '1px solid rgba(249,115,22,0.15)', fontSize: 13, color: 'var(--muted)', lineHeight: 1.7, marginBottom: 4 }}>
-          The Keiyoushi repository is built in and applied automatically. Add another compatible <code style={{ background: 'var(--card2)', padding: '1px 6px', borderRadius: 4, fontSize: 11 }}>index.min.json</code> URL below if needed. Changes safely restart the local services.
-        </div>
-        {repoConfig.defaults.map(repo => (
-          <div key={repo} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', background: 'var(--card)', borderRadius: 12, border: '1px solid rgba(249,115,22,0.28)' }}>
-            <Globe size={14} style={{ color: 'var(--accent)', flexShrink: 0 }} />
-            <span style={{ flex: 1, fontSize: 12, color: 'var(--text-dim)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{repo}</span>
-            <Badge variant="update" size="sm">Built in</Badge>
-          </div>
-        ))}
-        {repoConfig.custom.map(repo => (
-          <div key={repo} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', background: 'var(--card)', borderRadius: 12, border: '1px solid var(--border)' }}>
-            <Globe size={14} style={{ color: 'var(--accent)', flexShrink: 0 }} />
-            <span style={{ flex: 1, fontSize: 12, color: 'var(--text-dim)', fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{repo}</span>
-            <Btn variant="danger" size="sm" disabled={repoWorking} onClick={() => saveExtensionRepos(repoConfig.custom.filter(value => value !== repo), 'Repository removed')}><X size={12} /></Btn>
-          </div>
-        ))}
-        {repoConfig.custom.length === 0 && (
-          <div style={{ padding: '20px', textAlign: 'center', color: 'var(--muted)', fontSize: 13, background: 'var(--card)', borderRadius: 12, border: '1px solid var(--border)' }}>
-            No additional custom repositories
-          </div>
+          </>
         )}
-        <RepoAddRow disabled={repoWorking} onAdd={(url) => {
-          if (repoConfig.defaults.includes(url) || repoConfig.custom.includes(url)) { toast('Already added', 'warning'); return false; }
-          return saveExtensionRepos([...repoConfig.custom, url], 'Repository added');
-        }} />
-      </Section>
 
-      <Section title="💾 Backup & Restore">
-        <div style={{ padding: '12px 16px', background: 'rgba(59,130,246,0.06)', borderRadius: 12, border: '1px solid rgba(59,130,246,0.15)', fontSize: 12, color: 'var(--muted)', lineHeight: 1.65 }}>
-          Backups include your library, history, reading progress, categories, notes, settings, and reading time. Downloaded chapter images stay on this device because they can be very large.
-        </div>
-        <Row label="Export data" sub="Save a validated akaReader backup to a location you choose">
-          <Btn variant="outline" size="sm" icon={Download} disabled={backupWorking} onClick={exportBackup}>{backupWorking ? 'Working…' : 'Export'}</Btn>
-        </Row>
-        <Row label="Import data" sub="Restore a current or older v2 akaReader backup">
-          <Btn variant="outline" size="sm" icon={Archive} disabled={backupWorking} onClick={importBackup}>{backupWorking ? 'Working…' : 'Import'}</Btn>
-        </Row>
-        <p style={{ fontSize: 11, color: 'var(--muted)', padding: '0 4px', lineHeight: 1.6 }}>Before an app update downloads, akaReader also keeps a private safety backup in the data folder and retains the latest five.</p>
-      </Section>
+        {current.id === 'about' && (
+          <>
+            <div className="set-about">
+              <div className="set-about-logo"><BookOpen size={22} /></div>
+              <div>
+                <p className="set-title" style={{ fontSize: 18 }}>akaReader</p>
+                <p className="set-lede" style={{ margin: 0 }}>Version {import.meta.env.PACKAGE_VERSION || 'unknown'}</p>
+              </div>
+            </div>
+            {window.electronAPI?.checkForAppUpdate && (
+              <SetGroup title="Updates">
+                <SetRow label="App updates" sub={appUpdateState.message || 'Checks GitHub releases and installs from inside akaReader'}>
+                  <Btn variant="outline" size="sm" onClick={checkAppUpdate} disabled={appUpdateState.checking || appUpdateState.downloading}>
+                    <RefreshCw size={14} /> {appUpdateState.checking ? 'Checking' : 'Check'}
+                  </Btn>
+                  {appUpdateState.downloaded ? (
+                    <Btn variant="success" size="sm" onClick={installAppUpdateSafely}>Restart now</Btn>
+                  ) : appUpdateState.downloading ? (
+                    <Btn variant="outline" size="sm" disabled style={{ opacity: 0.6 }}>
+                      Downloading {appUpdateState.pct ? `${appUpdateState.pct}%` : '…'}
+                    </Btn>
+                  ) : appUpdateState.version ? (
+                    <Btn variant="default" size="sm" onClick={downloadAppUpdateSafely}><Download size={14} /> Download</Btn>
+                  ) : null}
+                </SetRow>
+              </SetGroup>
+            )}
+            <SetGroup title="Built with">
+              <SetRow label="Suwayomi" sub="The embedded server that runs extensions" />
+              <SetRow label="Keiyoushi extensions" sub="The built-in extension repository" />
+            </SetGroup>
+          </>
+        )}
+      </div>
       {confirmClear && (
         <div className="anim-fadeIn" style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
           <div style={{ background: 'var(--card)', border: '1px solid var(--border)', borderRadius: 20, padding: 32, maxWidth: 380, width: '90%', textAlign: 'center' }}>
@@ -2254,7 +2333,7 @@ const GlobalSearch = memo(({ sources, onSelectManga, onClose, fetchJSON }) => {
         setResults(prev => ({ ...prev, [src.id]: { loading: false, results: [], error: e.message, sourceName: src.name } }));
       }
     });
-  }, [sources, fetchJSON, toast]);
+  }, [sources, fetchJSON, toast, saveToHistory]);
 
   const dSearch = useMemo(() => debounce(doSearch, 500), [doSearch]);
 
@@ -4604,44 +4683,6 @@ const ShareCardModal = memo(({ library, history, progress, readChapters, setting
 
 
 
-const StatsStrip = memo(({ library, history, progress, readChapters }) => {
-  const { getMangaKey } = useData();
-  const totalRead = useMemo(() => countReadChapterIds(readChapters), [readChapters]);
-  const streak = useMemo(() => calculateStreak(history), [history]);
-  const completing = useMemo(() => {
-    const keys = Object.keys(progress);
-    if (!keys.length) return 0;
-    return keys.filter(k => {
-      const p = progress[k];
-      const m = library.find(m => getMangaKey(m.id, m.sourceId) === k);
-      if (!m || !p) return false;
-      return (parseInt(p.chapterNum) || 0) >= (m.totalChapters || 999);
-    }).length;
-  }, [progress, library]);
-
-  const items = [
-    { label: 'In Library', value: library.length, icon: Bookmark, color: 'var(--accent)' },
-    { label: 'Chapters Read', value: totalRead, icon: BookOpen, color: '#4ade80' },
-    { label: 'Day Streak', value: `${streak}🔥`, icon: Flame, color: '#fb923c' },
-    { label: 'Completed', value: completing, icon: Award, color: '#a78bfa' },
-  ];
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(140px,1fr))', gap: 10, marginBottom: 28 }}>
-      {items.map(item => (
-        <div key={item.label} style={{ padding: '14px 16px', background: 'var(--card)', borderRadius: 14, border: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12 }}>
-          <div style={{ width: 36, height: 36, borderRadius: 10, background: `${item.color}18`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-            <item.icon size={18} style={{ color: item.color }} />
-          </div>
-          <div>
-            <p style={{ fontWeight: 800, fontSize: 20, color: 'var(--text)', lineHeight: 1 }}>{item.value}</p>
-            <p style={{ fontSize: 10, color: 'var(--muted)', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.04em', marginTop: 3 }}>{item.label}</p>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-});
-
 // ==================== APP & ROOT COMPONENT ====================
 
 const App = memo(() => {
@@ -4965,7 +5006,9 @@ const App = memo(() => {
       toast('No source page is available for verification.', 'warning');
       return;
     }
-    if (!window.electronAPI?.verifySourceUrl) {
+    // Desktop uses the Electron bridge; the Android app exposes the same calls natively.
+    const nativeApi = window.electronAPI?.verifySourceUrl ? window.electronAPI : window.akaReaderAndroid;
+    if (!nativeApi?.verifySourceUrl) {
       window.electronAPI?.openExternal?.(verificationUrl);
       toast('Solve the source challenge, then retry.', 'info');
       return;
@@ -4973,7 +5016,7 @@ const App = memo(() => {
     manualSourceVerificationActiveRef.current = true;
     setSourceVerifying(true);
     try {
-      const result = await window.electronAPI.verifySourceUrl(verificationUrl, options);
+      const result = await nativeApi.verifySourceUrl(verificationUrl, options);
       if (result?.ok) {
         toast('Verification confirmed. Loading results automatically...', 'info');
         await retry?.();
@@ -5155,7 +5198,7 @@ const App = memo(() => {
 
   useEffect(() => {
     if (browseFailure?.kind !== 'verification' || !verificationUrl || !activeSource?.id) return;
-    if (!window.electronAPI?.verifySourceUrl || sourceVerifying) return;
+    if (!(window.electronAPI?.verifySourceUrl || window.akaReaderAndroid?.verifySourceUrl) || sourceVerifying) return;
 
     const verificationKey = `${activeSource.id}:${verificationUrl}`;
     if (automaticVerificationKeyRef.current === verificationKey) return;
@@ -5603,6 +5646,13 @@ const App = memo(() => {
     getMangaKey,
     ...smartFilterState,
   }), [library, getMangaKey, smartFilterState]);
+  const librarySummary = useMemo(() => {
+    const parts = [`${library.length} ${library.length === 1 ? 'title' : 'titles'}`];
+    if (librarySmartCounts.unread) parts.push(`${librarySmartCounts.unread} with unread`);
+    const chaptersRead = countReadChapterIds(readChapters);
+    if (chaptersRead) parts.push(`${chaptersRead.toLocaleString()} chapters read`);
+    return parts.join(' · ');
+  }, [library.length, librarySmartCounts, readChapters]);
 
   const filteredLibrary = useMemo(() => {
     let list = activeCategory === 'all' ? library : library.filter(m => mangaCategories[getMangaKey(m.id, m.sourceId)] === activeCategory);
@@ -5744,16 +5794,28 @@ const App = memo(() => {
     return { streak, totalChapters, totalMinutes: Math.round(totalMinutes), inLib, activityDays };
   }, [readChapters, history, library, readingTime]);
 
-  const NAV = useMemo(() => [
-    { id: 'home', label: 'Home', Icon: Flame },
-    { id: 'browse', label: 'Browse', Icon: BookOpen },
-    { id: 'extensions', label: 'Extensions', Icon: Puzzle, badge: installedExts.filter(e => e.hasUpdate).length || installedExts.length },
-    { id: 'library', label: 'Library', Icon: Library, badge: library.length },
-    { id: 'history', label: 'History', Icon: History, badge: history.length },
-    { id: 'updates', label: 'Updates', Icon: BellRing, badge: updates.length },
-    { id: 'downloads', label: 'Downloads', Icon: Download, badge: downloadQueue.filter(d => d.status === 'pending' || d.status === 'downloading').length || undefined },
-    { id: 'settings', label: 'Settings', Icon: Settings },
-  ], [installedExts, library.length, history.length, updates.length, downloadQueue]);
+  // Badges only appear when they ask for action; Library's size is plain context.
+  const NAV = useMemo(() => {
+    const extUpdates = installedExts.filter(e => e.hasUpdate).length;
+    const activeDownloads = downloadQueue.filter(d => d.status === 'pending' || d.status === 'downloading').length;
+    return [
+      { id: 'home', label: 'Home', Icon: Flame, group: 'Read' },
+      { id: 'library', label: 'Library', Icon: Library, group: 'Read', meta: library.length || null },
+      { id: 'history', label: 'History', Icon: History, group: 'Read' },
+      { id: 'updates', label: 'Updates', Icon: BellRing, group: 'Read', badge: updates.length },
+      { id: 'browse', label: 'Browse', Icon: BookOpen, group: 'Find' },
+      { id: 'extensions', label: 'Extensions', Icon: Puzzle, group: 'Find', badge: extUpdates, meta: extUpdates ? `${extUpdates} ${extUpdates === 1 ? 'update' : 'updates'}` : null },
+      { id: 'downloads', label: 'Downloads', Icon: Download, group: 'App', live: activeDownloads },
+      { id: 'settings', label: 'Settings', Icon: Settings, group: 'App' },
+    ];
+  }, [installedExts, library.length, updates.length, downloadQueue]);
+
+  const nowReading = useMemo(() => {
+    const manga = history.find(m => progress[getMangaKey(m.id, m.sourceId)]);
+    if (!manga) return null;
+    const saved = progress[getMangaKey(manga.id, manga.sourceId)];
+    return { manga, chapterNum: saved?.chapterNum, percent: calculateMangaProgressPercent(manga, saved) };
+  }, [history, progress, getMangaKey]);
 
   const managedStartup = !!window.electronAPI?.ensureServices;
   const canUseShellOffline = !managedStartup && backendOnline !== null;
@@ -5836,6 +5898,26 @@ const App = memo(() => {
         mangaId={readerMangaId}
         mangaSourceId={readerSourceId}
         mangaCover={mangaDetail?.cover || selectedManga?.cover} isLoading={pagesLoading}
+        phone={IS_ANDROID_APP}
+      />
+    );
+  }
+
+  if (IS_ANDROID_APP) {
+    return (
+      <MobileApp
+        app={{
+          tab, view, setView, switchTab, goBack,
+          activeSource, enterSource, inputVal, setInputVal, debouncedSearch,
+          results, browseLoading, browseError, hasNextPage, loadingMore, browseFilters, handleFilterChange,
+          retryBrowse: () => doSearch(query, activeSource, 1, false, browseFilters),
+          selectedManga, mangaDetail, mangaLoading, mangaError, mangaRefreshing, refreshMangaDetails,
+          openManga, openChapter, handleContinueReading, handleDownload, handleTagClick, handleDeleteStoredChapters,
+          verifySourceThenRetry, sourceVerifying, sourceRepairing,
+          installedSources: groupedInstalledSources, extensions: normalizedExts,
+          extensionUpdates: installedExts.filter(e => e.hasUpdate).length,
+          hasSources: installedSources.length > 0,
+        }}
       />
     );
   }
@@ -6002,88 +6084,61 @@ const App = memo(() => {
           </div>
         )}
 
-        <nav style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: sidebarIsCollapsed ? 2 : 3, padding: sidebarIsCollapsed ? '0 8px' : '0 10px', overflowY: 'auto', overflowX: 'hidden' }}>
-          {NAV.map(({ id, label, Icon, badge }, i) => {
+        <nav className={`side-nav${sidebarIsCollapsed ? ' collapsed' : ''}`} aria-label="Main">
+          {NAV.map(({ id, label, Icon, group, badge, meta, live }, i) => {
             const active = tab === id;
+            const firstOfGroup = i === 0 || NAV[i - 1].group !== group;
             return (
-              <button key={id} onClick={() => switchTab(id)} className={`anim-slideLeft delay-${i}`}
-                data-onboard={`nav-${id}`} style={{ display: 'flex', alignItems: 'center', gap: sidebarIsCollapsed ? 0 : 12, padding: sidebarIsCollapsed ? '8px' : '11px 14px', borderRadius: 12, border: 'none', background: active ? 'rgba(249,115,22,0.12)' : 'transparent', color: active ? 'var(--accent)' : 'var(--text-dim)', cursor: 'pointer', justifyContent: sidebarIsCollapsed ? 'center' : 'flex-start', position: 'relative', width: '100%', transition: 'all 0.2s' }}
-                onMouseEnter={e => { if (!active) e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; }}
-                onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}>
-                {active && !sidebarIsCollapsed && <div style={{ position: 'absolute', left: 0, width: 3, height: 22, background: 'var(--accent)', borderRadius: '0 3px 3px 0' }} />}
-                <div style={{ position: 'relative' }}>
-                  <Icon size={21} style={{ color: active ? 'var(--accent)' : 'var(--muted)', transition: 'color 0.2s' }} />
-                  {badge > 0 && sidebarIsCollapsed && (
-                    <span style={{ position: 'absolute', top: -4, right: -4, width: 15, height: 15, background: 'var(--accent)', borderRadius: '50%', fontSize: 9, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff' }}>{badge > 9 ? '9+' : badge}</span>
+              <React.Fragment key={id}>
+                {firstOfGroup && (sidebarIsCollapsed ? i > 0 && <div className="side-sep" /> : <p className="side-group">{group}</p>)}
+                <button type="button" onClick={() => switchTab(id)} data-onboard={`nav-${id}`} title={sidebarIsCollapsed ? label : undefined}
+                  aria-current={active ? 'page' : undefined} className={`side-item${active ? ' on' : ''}`}>
+                  <span className="side-icon">
+                    <Icon size={sidebarIsCollapsed ? 20 : 18} />
+                    {sidebarIsCollapsed && badge > 0 && <b className="side-dot">{badge > 9 ? '9+' : badge}</b>}
+                    {sidebarIsCollapsed && live > 0 && <i className="side-live-dot" />}
+                  </span>
+                  {!sidebarIsCollapsed && (
+                    <>
+                      <span className="side-label">{label}</span>
+                      {id === 'updates' && badge > 0 && <b className="side-new">{badge}</b>}
+                      {id !== 'updates' && meta != null && <small className="side-meta">{meta}</small>}
+                      {live > 0 && <span className="side-live" title={`${live} downloading`}>{live}</span>}
+                    </>
                   )}
-                </div>
-                {!sidebarIsCollapsed && (
-                  <>
-                    <span style={{ flex: 1, fontWeight: 600, fontSize: 14, textAlign: 'left' }}>{label}</span>
-                    {badge > 0 && <span style={{ background: active ? 'var(--accent)' : 'rgba(255,255,255,0.1)', color: active ? '#fff' : 'var(--text)', borderRadius: 20, fontSize: 11, padding: '2px 9px', fontWeight: 700 }}>{badge}</span>}
-                  </>
-                )}
-              </button>
+                </button>
+              </React.Fragment>
             );
           })}
         </nav>
 
-        {!sidebarIsCollapsed && (
-          <div style={{ padding: '0 14px', marginBottom: 14, marginTop: 'auto', flexShrink: 0 }}>
-            <div style={{ padding: '14px 14px 12px', background: 'var(--card)', borderRadius: 12, border: '1px solid var(--border)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <Flame size={13} style={{ color: 'var(--accent)' }} />
-                  <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-dim)', letterSpacing: '.04em' }}>
-                    {stats.streak > 0 ? `${stats.streak} day streak` : 'No streak yet'}
-                  </span>
-                </div>
-                <span style={{ fontSize: 10, color: 'var(--muted)' }}>{stats.totalChapters} ch read</span>
-              </div>
-              <div style={{ display: 'flex', gap: 3, alignItems: 'flex-end' }}>
-                {stats.activityDays?.map((d, i) => (
-                  <div key={i} title={d.date} style={{
-                    flex: 1, height: d.read ? 18 : 8,
-                    borderRadius: 3, transition: 'height .2s ease',
-                    background: d.read ? 'var(--accent)' : 'rgba(255,255,255,0.07)',
-                    boxShadow: d.read ? '0 0 6px var(--accent-glow)' : 'none'
-                  }} />
-                ))}
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
-                <span style={{ fontSize: 9, color: 'var(--muted)' }}>14 days ago</span>
-                <span style={{ fontSize: 9, color: 'var(--muted)' }}>today</span>
-              </div>
-              {stats.inLib > 0 && (
-                <div style={{
-                  marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)',
-                  display: 'flex', justifyContent: 'space-between'
-                }}>
-                  <span style={{ fontSize: 11, color: 'var(--muted)' }}>{stats.inLib} in library</span>
-                  {stats.totalMinutes > 0 && (
-                    <span style={{ fontSize: 11, color: 'var(--muted)' }}>
-                      {stats.totalMinutes >= 60 ? `${Math.floor(stats.totalMinutes / 60)}h read` : `${stats.totalMinutes}m read`}
-                    </span>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
+        {/* Home's hero already shows this title, so the card only appears elsewhere. */}
+        {nowReading && tab !== 'home' && (
+          <button type="button" className={`side-now${sidebarIsCollapsed ? ' collapsed' : ''}`} onClick={() => handleContinueReading(nowReading.manga)}
+            title={`Resume ${nowReading.manga.title}`}>
+            {nowReading.manga.cover && !sidebarIsCollapsed && <img className="side-now-bg" src={proxyImg(nowReading.manga.cover)} alt="" aria-hidden="true" />}
+            <span className="side-now-cover">
+              {nowReading.manga.cover ? <img src={proxyImg(nowReading.manga.cover)} alt="" /> : <BookOpen size={16} />}
+              {sidebarIsCollapsed && nowReading.percent !== null && <i style={{ width: `${nowReading.percent}%` }} />}
+            </span>
+            {!sidebarIsCollapsed && (
+              <span className="side-now-text">
+                <b>{nowReading.manga.title}</b>
+                <small>{nowReading.chapterNum != null && nowReading.chapterNum !== '' ? `Ch. ${nowReading.chapterNum} · ` : ''}<Play size={10} fill="currentColor" /> Resume</small>
+                {nowReading.percent !== null && <span className="side-now-bar"><i style={{ width: `${nowReading.percent}%` }} /></span>}
+              </span>
+            )}
+          </button>
         )}
 
-        <div style={{ padding: sidebarIsCollapsed ? '0 8px 6px' : '0 10px 12px', borderTop: '1px solid rgba(255,255,255,0.05)', paddingTop: sidebarIsCollapsed ? 6 : 10 }}>
-          <button onClick={() => setSidebarCollapsed(c => !c)}
-            title={sidebarIsCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-            style={{
-              width: '100%', display: 'flex', alignItems: 'center',
-              justifyContent: sidebarIsCollapsed ? 'center' : 'flex-end',
-              gap: 6, padding: '7px 8px', borderRadius: 'var(--r-sm)',
-              border: 'none', background: 'transparent', cursor: 'pointer',
-              color: 'var(--muted)', transition: 'all .15s',
-            }}
-            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = 'var(--text-dim)'; }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--muted)'; }}>
-            {!sidebarIsCollapsed && <span style={{ fontSize: 11 }}>Collapse</span>}
+        <div className={`side-foot${sidebarIsCollapsed ? ' collapsed' : ''}`}>
+          {!sidebarIsCollapsed && (
+            <span className="side-streak" title={`${stats.totalChapters} chapters read`}>
+              <Flame size={13} />{stats.streak > 0 ? <><b>{stats.streak}</b> day streak</> : 'No streak yet'}
+            </span>
+          )}
+          <button type="button" className="side-collapse" onClick={() => setSidebarCollapsed(c => !c)}
+            title={sidebarIsCollapsed ? 'Expand sidebar' : 'Collapse sidebar'} aria-label={sidebarIsCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
             {sidebarIsCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
           </button>
         </div>
@@ -6163,7 +6218,7 @@ const App = memo(() => {
                   {tab === 'browse' && view === 'source' ? `${results.length} results${activeFilterCount > 0 ? ` • ${activeFilterCount} filter${activeFilterCount > 1 ? 's' : ''} active` : ''}` :
                     tab === 'home' ? '' : tab === 'browse' ? `${groupedInstalledSources.length} source group${groupedInstalledSources.length === 1 ? '' : 's'} available` :
                       tab === 'extensions' ? `${installedExts.length} installed • ${normalizedExts.length} total` :
-                        tab === 'library' ? `${filteredLibrary.length} manga` :
+                        tab === 'library' ? librarySummary :
                           tab === 'history' ? `${history.length} entries` :
                             tab === 'updates' ? `${updates.length} updates` :
                               tab === 'downloads' ? `${downloadQueue.filter(d => d.status === 'pending' || d.status === 'downloading').length} active` : 'Customize your experience'}
@@ -6300,7 +6355,7 @@ const App = memo(() => {
                         <Btn variant={inLibrary(mangaDetail.id, activeSource?.id || mangaDetail.sourceId) ? 'default' : 'outline'} onClick={() => toggleLibrary(mangaDetail, activeSource?.id || mangaDetail.sourceId)} icon={Heart}>
                           {inLibrary(mangaDetail.id, activeSource?.id || mangaDetail.sourceId) ? 'In Library' : 'Add to Library'}
                         </Btn>
-                        <Btn variant="outline" onClick={() => setMigrateManga(mangaDetail)} icon={RefreshCw} title="Find this on other sources">
+                        <Btn variant="outline" onClick={() => setMigrateManga({ ...mangaDetail, sourceId: activeSource?.id || mangaDetail.sourceId })} icon={RefreshCw} title="Find this on other sources">
                           Migrate
                         </Btn>
                       </div>
@@ -6636,78 +6691,75 @@ const App = memo(() => {
           {tab === 'library' && (
             <div className="anim-fadeIn">
               <DuplicateBanner library={library} onRemove={(id, sid) => { const m = library.find(x => x.id === id && x.sourceId === sid); if (m) toggleLibrary(m, sid); }} />
-              <StatsStrip library={library} history={history} progress={progress} readChapters={readChapters} />
-              <div style={{ display: 'flex', gap: 8, marginBottom: 16, overflowX: 'auto', paddingBottom: 4 }}>
-                <button onClick={() => setActiveCategory('all')} style={{ padding: '9px 18px', borderRadius: 20, border: 'none', background: activeCategory === 'all' ? 'var(--accent)' : 'var(--card)', color: activeCategory === 'all' ? '#fff' : 'var(--text-dim)', fontWeight: 600, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', boxShadow: activeCategory === 'all' ? '0 4px 16px rgba(249,115,22,0.3)' : 'none', transition: 'all 0.2s' }}>All ({library.length})</button>
-                {categories.map(cat => {
-                  const count = library.filter(m => mangaCategories[getMangaKey(m.id, m.sourceId)] === cat.id).length;
-                  return <button key={cat.id} onClick={() => setActiveCategory(cat.id)} style={{ padding: '9px 18px', borderRadius: 20, border: 'none', background: activeCategory === cat.id ? cat.color : 'var(--card)', color: activeCategory === cat.id ? '#fff' : 'var(--text-dim)', fontWeight: 600, fontSize: 13, cursor: 'pointer', whiteSpace: 'nowrap', opacity: count === 0 ? 0.5 : 1, boxShadow: activeCategory === cat.id ? `0 4px 16px ${cat.color}40` : 'none', transition: 'all 0.2s' }}>{cat.name} ({count})</button>;
-                })}
+              <div className="lib-bar">
+                <div className="lib-tabs" role="tablist" aria-label="Library categories">
+                  <button type="button" role="tab" aria-selected={activeCategory === 'all'} className={activeCategory === 'all' ? 'on' : ''} onClick={() => setActiveCategory('all')}>
+                    All<small>{library.length}</small>
+                  </button>
+                  {categories.map(cat => {
+                    const count = library.filter(m => mangaCategories[getMangaKey(m.id, m.sourceId)] === cat.id).length;
+                    return (
+                      <button key={cat.id} type="button" role="tab" aria-selected={activeCategory === cat.id} className={`${activeCategory === cat.id ? 'on' : ''}${count === 0 ? ' empty' : ''}`} onClick={() => setActiveCategory(cat.id)}>
+                        <i style={{ background: cat.color }} />{cat.name}<small>{count}</small>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="lib-tools">
+                  <label className="lib-search">
+                    <Search size={14} />
+                    <input placeholder="Search library" aria-label="Search library" value={librarySearch} onChange={e => setLibrarySearch(e.target.value)} onKeyDown={e => { if (e.key === 'Escape') setLibrarySearch(''); }} />
+                    {librarySearch && <button type="button" aria-label="Clear search" onClick={() => setLibrarySearch('')}><X size={13} /></button>}
+                  </label>
+                  <div className="lib-sort">
+                    <select aria-label="Sort library" value={librarySort} onChange={e => setLibrarySort(e.target.value)}>
+                      <option value="recent">Last read</option>
+                      <option value="added">Date added</option>
+                      <option value="alpha">A → Z</option>
+                      <option value="unread">Most unread</option>
+                      <option value="progress">Most progress</option>
+                    </select>
+                    <ChevronDown size={13} />
+                  </div>
+                  <button type="button" className={`lib-icon${bulkMode ? ' on' : ''}`} title={bulkMode ? 'Stop selecting' : 'Select titles'} aria-pressed={bulkMode}
+                    onClick={() => { setBulkMode(m => !m); setBulkSelected(new Set()); }}>
+                    <Check size={15} />
+                  </button>
+                  <div className="lib-views" role="radiogroup" aria-label="Library layout">
+                    {[['grid', <LayoutGrid size={15} />], ['list', <List size={15} />], ['compact', <Columns size={15} />], ['shelf', <BookOpen size={15} />]].map(([m, icon]) => (
+                      <button key={m} type="button" role="radio" aria-checked={libraryView === m} className={`lib-icon${libraryView === m ? ' on' : ''}`}
+                        title={m === 'shelf' ? 'Bookshelf view' : m === 'compact' ? 'Compact view' : m === 'list' ? 'List view' : 'Grid view'}
+                        onClick={() => { setLibraryView(m); updateSetting('libraryView', m); }}>{icon}</button>
+                    ))}
+                  </div>
+                </div>
               </div>
 
-              <div aria-label="Smart library views" style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 14, overflowX: 'auto', paddingBottom: 3 }}>
-                <span style={{ paddingRight: 4, color: 'var(--muted)', fontSize: 10, fontWeight: 750, letterSpacing: '.08em', textTransform: 'uppercase', whiteSpace: 'nowrap' }}>Smart views</span>
+              <div className="lib-chips" aria-label="Smart library views">
                 {SMART_LIBRARY_FILTERS.map(filter => {
                   const selected = librarySmartFilter === filter.id;
                   const count = librarySmartCounts[filter.id] || 0;
                   return (
-                    <button key={filter.id} type="button" aria-pressed={selected} onClick={() => setLibrarySmartFilter(filter.id)} style={{ padding: '6px 11px', borderRadius: 9, border: `1px solid ${selected ? 'rgba(249,115,22,.45)' : 'var(--border)'}`, background: selected ? 'rgba(249,115,22,.12)' : 'var(--card)', color: selected ? 'var(--accent)' : 'var(--text-dim)', fontWeight: 650, fontSize: 11, cursor: 'pointer', whiteSpace: 'nowrap', opacity: filter.id !== 'all' && count === 0 ? .5 : 1 }}>
-                      {filter.label} <span style={{ color: selected ? 'var(--accent)' : 'var(--muted)' }}>{count}</span>
+                    <button key={filter.id} type="button" aria-pressed={selected} className={`${selected ? 'on' : ''}${filter.id !== 'all' && count === 0 ? ' empty' : ''}`} onClick={() => setLibrarySmartFilter(filter.id)}>
+                      {filter.label}{filter.id !== 'all' && <small>{count}</small>}
                     </button>
                   );
                 })}
-              </div>
-
-              <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 18, flexWrap: 'wrap' }}>
-                <div style={{ position: 'relative', flex: '1 1 200px', minWidth: 180 }}>
-                  <Search size={14} style={{ position: 'absolute', left: 13, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)', pointerEvents: 'none' }} />
-                  <input placeholder="Search library..." value={librarySearch}
-                    onChange={e => setLibrarySearch(e.target.value)}
-                    style={{ width: '100%', background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 10, padding: '9px 36px 9px 38px', color: 'var(--text)', fontSize: 13, outline: 'none', transition: 'border-color 0.2s' }}
-                    onFocus={e => e.target.style.borderColor = 'var(--accent)'}
-                    onBlur={e => e.target.style.borderColor = 'var(--border)'} />
-                  {librarySearch && <button onClick={() => setLibrarySearch('')} style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--muted)', padding: 4 }}><X size={13} /></button>}
-                </div>
-
-                <div style={{ position: 'relative', flexShrink: 0 }}>
-                  <select value={librarySort} onChange={e => setLibrarySort(e.target.value)}
-                    style={{ appearance: 'none', WebkitAppearance: 'none', background: 'var(--card)', border: '1.5px solid var(--border)', borderRadius: 10, padding: '9px 32px 9px 14px', color: 'var(--text)', fontSize: 12, fontWeight: 600, cursor: 'pointer', outline: 'none', transition: 'border-color .2s' }}
-                    onFocus={e => e.target.style.borderColor = 'var(--accent)'}
-                    onBlur={e => e.target.style.borderColor = 'var(--border)'}>
-                    <option value="recent">Last Read</option>
-                    <option value="added">Date Added</option>
-                    <option value="alpha">A → Z</option>
-                    <option value="unread">Most Unread</option>
-                    <option value="progress">Most Progress</option>
-                  </select>
-                  <ChevronDown size={13} style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)', pointerEvents: 'none' }} />
-                </div>
-
-                <Btn variant={bulkMode ? 'default' : 'ghost'} size="sm"
-                  onClick={() => { setBulkMode(m => !m); setBulkSelected(new Set()); }}>
-                  {bulkMode ? <><Check size={13} /> {bulkSelected.size > 0 ? `${bulkSelected.size} selected` : 'Select'}</> : 'Select'}
-                </Btn>
-
-                {bulkMode && bulkSelected.size > 0 && (
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    <Btn variant="outline" size="sm" onClick={() => {
-                      bulkSelected.forEach(mKey => {
-                        const m = library.find(x => getMangaKey(x.id, x.sourceId) === mKey);
-                        if (m) toggleLibrary(m, m.sourceId);
-                      });
-                      setBulkSelected(new Set()); setBulkMode(false);
-                      toast(`Removed ${bulkSelected.size} manga`, 'success');
-                    }}><Trash2 size={13} /> Remove</Btn>
+                {bulkMode && (
+                  <div className="lib-bulk">
+                    <span>{bulkSelected.size > 0 ? `${bulkSelected.size} selected` : 'Click covers to select'}</span>
+                    {bulkSelected.size > 0 && (
+                      <Btn variant="outline" size="sm" onClick={() => {
+                        bulkSelected.forEach(mKey => {
+                          const m = library.find(x => getMangaKey(x.id, x.sourceId) === mKey);
+                          if (m) toggleLibrary(m, m.sourceId);
+                        });
+                        setBulkSelected(new Set()); setBulkMode(false);
+                        toast(`Removed ${bulkSelected.size} manga`, 'success');
+                      }}><Trash2 size={13} /> Remove</Btn>
+                    )}
                   </div>
                 )}
-
-                <div style={{ display: 'flex', gap: 4, marginLeft: 'auto' }}>
-                  {[['grid', <LayoutGrid size={16} />], ['list', <List size={16} />], ['compact', <Columns size={16} />], ['shelf', <BookOpen size={16} />]].map(([m, icon]) => (
-                    <Btn key={m} variant={libraryView === m ? 'default' : 'ghost'} size="icon"
-                      title={m === 'shelf' ? 'Bookshelf view' : m === 'compact' ? 'Compact view' : m === 'list' ? 'List view' : 'Grid view'}
-                      onClick={() => { setLibraryView(m); updateSetting('libraryView', m); }}>{icon}</Btn>
-                  ))}
-                </div>
               </div>
 
               {filteredLibrary.length === 0 ? (

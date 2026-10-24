@@ -9,6 +9,15 @@ import { Btn } from '../ui/Btn';
 
 const DEFAULT_ACCENT_COLOR = 'rgb(249, 115, 22)';
 const normalizePages = (value) => Array.isArray(value) ? value.filter(Boolean) : [];
+// Adaptive colors arrive as rgb(...) strings, so alpha can't be appended as hex.
+const tint = (color, alpha) => (String(color).startsWith('rgb(')
+  ? String(color).replace('rgb(', 'rgba(').replace(')', `, ${alpha})`)
+  : `${color}${Math.round(alpha * 255).toString(16).padStart(2, '0')}`);
+const PHONE_MODES = [
+  { id: 'scroll', label: 'Scroll', Icon: Columns },
+  { id: 'paged', label: 'Paged', Icon: BookOpen },
+  { id: 'webtoon', label: 'Strip', Icon: AlignJustify },
+];
 
 const Droplet = ({ size }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22a7 7 0 0 0 7-7c0-2-1-3.9-3-5.5s-3.5-4-4-6.5c-.5 2.5-2 4.9-4 6.5C6 11.1 5 13 5 15a7 7 0 0 0 7 7z"></path></svg>;
 const Contrast = ({ size }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"></circle><path d="M12 18a6 6 0 0 0 0-12v12z"></path></svg>;
@@ -163,15 +172,26 @@ const Toggle = ({ val, onChange, label, sub, kbd }) => (
   </div>
 );
 
+// Remembers each page's natural aspect ratio so re-mounted pages reserve their real
+// height before the image decodes, instead of jumping the scroll position.
+const pageRatioCache = new Map();
+const rememberPageRatio = (url, image) => {
+  if (!url || !image.naturalWidth || !image.naturalHeight) return;
+  if (pageRatioCache.size > 3000) pageRatioCache.delete(pageRatioCache.keys().next().value);
+  pageRatioCache.set(url, image.naturalWidth / image.naturalHeight);
+};
+
 const PageImage = memo(({ url, alt, style, loading = 'eager', adaptTall = false }) => {
   const [failed, setFailed] = useState(false);
   const [retry, setRetry] = useState(0);
   const [isTallStrip, setIsTallStrip] = useState(false);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     setFailed(false);
     setRetry(0);
     setIsTallStrip(false);
+    setLoaded(false);
   }, [url]);
 
   const src = useMemo(() => {
@@ -226,19 +246,24 @@ const PageImage = memo(({ url, alt, style, loading = 'eager', adaptTall = false 
       loading={loading}
       decoding="async"
       onLoad={event => {
-        if (!adaptTall) return;
         const image = event.currentTarget;
+        rememberPageRatio(url, image);
+        setLoaded(true);
+        if (!adaptTall) return;
         setIsTallStrip(image.naturalWidth > 0 && image.naturalHeight / image.naturalWidth >= 3);
       }}
       onError={() => setFailed(true)}
-      style={isTallStrip ? {
+      style={adaptTall && isTallStrip ? {
         ...style,
         width: 'min(100%, 860px)',
         maxWidth: '100%',
         height: 'auto',
         maxHeight: 'none',
         zoom: undefined
-      } : style}
+      } : loaded ? style : (pageRatioCache.has(url)
+        ? { ...style, aspectRatio: pageRatioCache.get(url) }
+        : { ...style, minHeight: '70vh' })}
+      className={loaded ? undefined : 'anim-shimmer'}
     />
   );
 });
@@ -279,13 +304,15 @@ export const Reader = memo(({
   pages: initialPages, currentChapter: initialChapter, mangaTitle,
   onBack, onNextChapter, onPrevChapter, fetchNextChapter,
   hasNext, hasPrev, onPageChange, initialPage = 0, mangaId, mangaSourceId,
-  mangaCover, isLoading
+  mangaCover, isLoading, phone = false
 }) => {
   const [adaptiveColor, setAdaptiveColor] = useState(DEFAULT_ACCENT_COLOR);
   const safeInitialPages = useMemo(() => normalizePages(initialPages), [initialPages]);
 
   useEffect(() => {
-    getAdaptiveColor(mangaCover).then(setAdaptiveColor);
+    let cancelled = false;
+    getAdaptiveColor(mangaCover).then(color => { if (!cancelled) setAdaptiveColor(color); });
+    return () => { cancelled = true; };
   }, [mangaCover]);
   const data = useData();
   const { updateProgress, addReadingTime, settings, markChapterRead } = data || {};
@@ -383,6 +410,8 @@ export const Reader = memo(({
 
   const T = THEMES[theme] || THEMES.dark;
   const accent = adaptiveColor;
+  // On a phone, control states use the app accent; the page-derived color can be near-white.
+  const uiAccent = phone ? '#ff5e00' : accent;
 
   const nudgeUI = useCallback(() => {
     setUiVisible(true);
@@ -849,9 +878,9 @@ export const Reader = memo(({
     ...(zoom <= 1
       ? {
           maxWidth: doublePage ? '50vw' : '100vw',
-          maxHeight: uiVisible ? 'calc(100vh - 154px)' : '100vh',
+          maxHeight: uiVisible ? (phone ? 'calc(100vh - 200px)' : 'calc(100vh - 154px)') : '100vh',
           width: fitMode === 'width' ? (doublePage ? '50vw' : '100vw') : 'auto',
-          height: fitMode === 'height' ? (uiVisible ? 'calc(100vh - 154px)' : '100vh') : 'auto',
+          height: fitMode === 'height' ? (uiVisible ? (phone ? 'calc(100vh - 200px)' : 'calc(100vh - 154px)') : '100vh') : 'auto',
         }
       : {
           maxWidth: 'none',
@@ -902,7 +931,7 @@ export const Reader = memo(({
         '--r-accent': accent,
         '--r-aura': adaptiveColor,
       }}
-      onMouseMove={nudgeUI}
+      onMouseMove={phone ? undefined : nudgeUI}
     >
       {/* ── Adaptive Aura Background ── */}
       <div style={{
@@ -921,6 +950,13 @@ export const Reader = memo(({
       `}</style>
       {/* ── Progress Aura ── */}
       <div style={{ position: 'fixed', top: 0, left: 0, right: 0, height: 120, background: `radial-gradient(ellipse at top, ${adaptiveColor}12 0%, transparent 70%)`, pointerEvents: 'none', zIndex: 1, opacity: uiVisible ? 1 : 0, transition: 'opacity 0.4s' }} />
+
+      {/* Slim chapter progress line, only while the toolbar is hidden */}
+      {chapterRange.end > chapterRange.start && (
+        <div aria-hidden="true" style={{ position: 'fixed', left: 0, right: 0, bottom: 0, height: 3, zIndex: 250, pointerEvents: 'none', background: 'rgba(255,255,255,0.06)', opacity: uiVisible ? 0 : 1, transition: 'opacity 0.3s' }}>
+          <div style={{ height: '100%', width: `${Math.min(100, Math.max(0, ((page - chapterRange.start) / (chapterRange.end - chapterRange.start)) * 100))}%`, background: adaptiveColor, transition: 'width 0.2s ease-out' }} />
+        </div>
+      )}
 
       {/* Reading Receipt */}
       {showReceipt && (
@@ -964,8 +1000,78 @@ export const Reader = memo(({
         </div>
       </div>
 
+      {/* ── Phone controls: page scrubber + mode / auto-scroll / settings ── */}
+      {phone && (
+        <div style={{
+          position: 'fixed', left: 10, right: 10, bottom: 10, zIndex: 300,
+          background: 'rgba(16,16,24,0.92)', backdropFilter: 'blur(24px) saturate(1.6)',
+          border: '1px solid rgba(255,255,255,0.08)', borderRadius: 20, padding: '10px 10px 8px',
+          boxShadow: '0 14px 40px rgba(0,0,0,0.55)',
+          transition: 'transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.25s',
+          transform: uiVisible ? 'translateY(0)' : 'translateY(130%)',
+          opacity: uiVisible ? 1 : 0,
+          pointerEvents: uiVisible ? 'auto' : 'none',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              onClick={() => { if (chapterRange.start === 0 && hasPrev) onPrevChapter?.(); else jumpToPage(chapterRange.start - 1); }}
+              disabled={chapterRange.start === 0 && !hasPrev}
+              aria-label="Previous chapter"
+              style={{ width: 40, height: 40, borderRadius: 12, border: 'none', background: 'rgba(255,255,255,0.06)', color: (chapterRange.start > 0 || hasPrev) ? 'rgba(255,255,255,0.75)' : 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+            >
+              <SkipBack size={17} />
+            </button>
+            <span style={{ fontSize: 13, fontWeight: 700, color: '#fff', minWidth: 26, textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+              {(allPages[page]?.localIndex || 0) + 1}
+            </span>
+            <input type="range"
+              aria-label="Page"
+              min={chapterRange.start}
+              max={chapterRange.end}
+              value={page}
+              onInput={e => {
+                const nextPage = +e.target.value;
+                jumpToPage(nextPage, false);
+                persistPage(allPagesRef.current[nextPage]);
+              }}
+              style={{ flex: 1, minWidth: 0, accentColor: uiAccent, height: 28 }}
+            />
+            <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.45)', minWidth: 26, fontVariantNumeric: 'tabular-nums' }}>
+              {chapterRange.total}
+            </span>
+            <button
+              onClick={() => {
+                if (chapterRange.end >= pages.length - 1 && localHasNext) onNextChapter?.();
+                else jumpToPage(chapterRange.end + 1);
+              }}
+              disabled={!localHasNext && page === pages.length - 1}
+              aria-label="Next chapter"
+              style={{ width: 40, height: 40, borderRadius: 12, border: 'none', background: 'rgba(255,255,255,0.06)', color: (localHasNext || page < pages.length - 1) ? 'rgba(255,255,255,0.75)' : 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+            >
+              <SkipForward size={17} />
+            </button>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 4, marginTop: 6 }}>
+            {PHONE_MODES.map(({ id, label, Icon }) => (
+              <button key={id} onClick={() => setMode(id)} aria-pressed={mode === id}
+                style={{ height: 50, borderRadius: 12, border: 'none', background: mode === id ? tint(uiAccent, 0.16) : 'transparent', color: mode === id ? uiAccent : 'rgba(255,255,255,0.6)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 3, fontSize: 11, fontWeight: 700, fontFamily: 'inherit' }}>
+                <Icon size={18} />{label}
+              </button>
+            ))}
+            <button onClick={() => setAutoScroll(a => !a)} aria-pressed={autoScroll}
+              style={{ height: 50, borderRadius: 12, border: 'none', background: autoScroll ? tint(uiAccent, 0.16) : 'transparent', color: autoScroll ? uiAccent : 'rgba(255,255,255,0.6)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 3, fontSize: 11, fontWeight: 700, fontFamily: 'inherit' }}>
+              {autoScroll ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}{autoScroll ? 'Pause' : 'Auto'}
+            </button>
+            <button ref={settingsButtonRef} onClick={() => setPanelOpen(true)} aria-label="Reader settings" aria-haspopup="dialog" aria-expanded={panelOpen}
+              style={{ height: 50, borderRadius: 12, border: 'none', background: 'transparent', color: 'rgba(255,255,255,0.6)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 3, fontSize: 11, fontWeight: 700, fontFamily: 'inherit' }}>
+              <Settings2 size={18} />Settings
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── Bottom Floating Controls ── */}
-      <div style={{
+      {!phone && <div style={{
         position: 'fixed', bottom: 24, left: '50%', transform: `translateX(-50%) ${uiVisible ? 'translateY(0)' : 'translateY(40px)'}`,
         width: 'min(840px, calc(100vw - 24px))', zIndex: 300,
         background: 'rgba(15,16,25,0.85)', backdropFilter: 'blur(32px) saturate(2)',
@@ -1088,7 +1194,7 @@ export const Reader = memo(({
             </button>
           </div>
         </div>
-      </div>
+      </div>}
 
       {/* ── Settings Drawer ── */}
       {panelOpen && (
@@ -1097,7 +1203,14 @@ export const Reader = memo(({
           background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(8px)',
           animation: 'fadeIn 0.3s ease'
         }} onClick={() => setPanelOpen(false)} role="presentation">
-          <div style={{
+          <div style={phone ? {
+            position: 'absolute', left: 0, right: 0, bottom: 0, maxHeight: '78vh',
+            background: 'rgba(16,16,24,0.97)', backdropFilter: 'blur(40px) saturate(2)',
+            borderTop: '1px solid rgba(255,255,255,0.08)', borderRadius: '22px 22px 0 0',
+            padding: '20px 20px 28px', display: 'flex', flexDirection: 'column',
+            overflowY: 'auto', animation: 'm-up 0.25s cubic-bezier(0.2, 0.8, 0.2, 1)',
+            boxShadow: '0 -20px 60px rgba(0,0,0,0.5)'
+          } : {
             position: 'absolute', right: 0, top: 0, bottom: 0,
             width: '100%', maxWidth: 360,
             background: 'rgba(15,16,24,0.92)', backdropFilter: 'blur(40px) saturate(2)',
@@ -1106,19 +1219,19 @@ export const Reader = memo(({
             overflowY: 'auto', animation: 'slideInRight 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
             boxShadow: '-20px 0 60px rgba(0,0,0,0.5)'
           }} onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="reader-settings-title">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 32 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: phone ? 20 : 32 }}>
               <h3 id="reader-settings-title" style={{ fontSize: 20, fontWeight: 800, color: '#fff', margin: 0, letterSpacing: -0.5 }}>Reader Settings</h3>
               <button ref={panelCloseButtonRef} onClick={() => setPanelOpen(false)} title="Close reader settings" aria-label="Close reader settings" style={{ width: 32, height: 32, borderRadius: 10, border: 'none', background: 'rgba(255,255,255,0.06)', color: 'rgba(255,255,255,0.4)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                 <X size={16} />
               </button>
             </div>
 
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 32, scrollbarWidth: 'none' }}>
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: phone ? 24 : 32, scrollbarWidth: 'none' }}>
               <Section title="Reading Mode">
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
-                  <ModeCard active={mode === 'scroll'} accent={accent} onClick={() => setMode('scroll')} icon={<Columns size={22} />} label="Scroll" />
-                  <ModeCard active={mode === 'paged'} accent={accent} onClick={() => setMode('paged')} icon={<BookOpen size={22} />} label="Paged" />
-                  <ModeCard active={mode === 'webtoon'} accent={accent} onClick={() => setMode('webtoon')} icon={<AlignJustify size={22} />} label="Strip" />
+                  <ModeCard active={mode === 'scroll'} accent={uiAccent} onClick={() => setMode('scroll')} icon={<Columns size={22} />} label="Scroll" />
+                  <ModeCard active={mode === 'paged'} accent={uiAccent} onClick={() => setMode('paged')} icon={<BookOpen size={22} />} label="Paged" />
+                  <ModeCard active={mode === 'webtoon'} accent={uiAccent} onClick={() => setMode('webtoon')} icon={<AlignJustify size={22} />} label="Strip" />
                 </div>
               </Section>
 
@@ -1174,7 +1287,7 @@ export const Reader = memo(({
           }}
           style={{ height: '100vh', width: '100vw', overflow: zoom > 1.05 ? 'auto' : 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: zoom > 1.05 ? 'grab' : 'default', touchAction: zoom > 1.05 ? 'pan-x pan-y' : 'auto' }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: direction === 'rtl' ? 'row-reverse' : 'row', gap: doublePage ? 2 : 0, minWidth: zoom > 1.05 ? `${zoom * 100}vw` : '100vw', minHeight: zoom > 1.05 ? `${zoom * 100}vh` : '100vh', padding: uiVisible ? '54px 0 100px' : '4px 0' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: direction === 'rtl' ? 'row-reverse' : 'row', gap: doublePage ? 2 : 0, minWidth: zoom > 1.05 ? `${zoom * 100}vw` : '100vw', minHeight: zoom > 1.05 ? `${zoom * 100}vh` : '100vh', padding: uiVisible ? (phone ? '54px 0 140px' : '54px 0 100px') : '4px 0' }}>
             <PageImage url={pages[page]} alt={`Page ${page + 1}`}
               style={getPagedStyle()}
             />
@@ -1234,7 +1347,7 @@ export const Reader = memo(({
                 </div>
               )}
               <div data-page={i} style={{ display: 'flex', justifyContent: 'center', width: '100%', marginBottom: pageGap }}>
-                <PageImage url={p.url} alt={`Page ${i + 1}`} style={{ ...getScrollStyle(isWebtoon, fitMode, zoom) }} loading={i < page + 5 ? 'eager' : 'lazy'} adaptTall />
+                <PageImage url={p.url} alt={`Page ${i + 1}`} style={{ ...getScrollStyle(isWebtoon, fitMode, zoom) }} loading={i < page + 5 ? 'eager' : 'lazy'} adaptTall={!isWebtoon && fitMode !== 'width' && fitMode !== 'original'} />
               </div>
             </React.Fragment>
           ))}

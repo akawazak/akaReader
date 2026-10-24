@@ -14,7 +14,14 @@ const {
 
 test('includes the maintained Keiyoushi store by default', () => {
   assert.deepEqual(configuredExtensionStores(), [...DEFAULT_EXTENSION_STORES]);
-  assert.match(DEFAULT_EXTENSION_STORES[0], /keiyoushi\/extensions\/repo\/index\.min\.json$/);
+  assert.equal(DEFAULT_EXTENSION_STORES[0], 'https://github.com/keiyoushi/extensions/raw/repo/index.pb');
+});
+
+test('drops legacy spellings of the built-in store from custom lists', () => {
+  assert.deepEqual(normalizeExtensionStoreUrls([
+    'https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.min.json',
+    'https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.pb',
+  ]), []);
 });
 
 test('normalizes custom stores without duplicating the built-in store', () => {
@@ -38,7 +45,7 @@ test('writes extensionStores and removes the obsolete managed block', () => {
   const next = buildSuwayomiConfig(existing, ['https://example.com/repo/index.min.json']);
 
   assert.doesNotMatch(next, /extensionRepos/);
-  assert.match(next, /server\.extensionStores = \["https:\/\/raw\.githubusercontent\.com\/keiyoushi\/extensions\/repo\/index\.min\.json","https:\/\/example\.com\/repo\/index\.min\.json"\]/);
+  assert.match(next, /server\.extensionStores = \["https:\/\/github\.com\/keiyoushi\/extensions\/raw\/repo\/index\.pb","https:\/\/example\.com\/repo\/index\.min\.json"\]/);
   assert.match(next, /server\.initialOpenInBrowserEnabled = false/);
   assert.match(next, /server\.systemTrayEnabled = false/);
 });
@@ -46,14 +53,14 @@ test('writes extensionStores and removes the obsolete managed block', () => {
 test('repairs a multiline extensionStores assignment and its old orphaned tail', () => {
   const malformed = [
     'server.extensionStores = ["https://old.example/index.json"]',
-    '    "https://github.com/keiyoushi/extensions/raw/repo/index.pb"',
+    '    "https://orphan.example/repo/index.json"',
     ']',
     'server.maxSourcesInParallel = 6',
   ].join('\n');
   const next = buildSuwayomiConfig(malformed);
 
   assert.match(next, new RegExp(`server\\.extensionStores = \\["${DEFAULT_EXTENSION_STORES[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"\\]`));
-  assert.doesNotMatch(next, /index\.pb|^\s*\]\s*$/m);
+  assert.doesNotMatch(next, /orphan\.example|^\s*\]\s*$/m);
   assert.match(next, /server\.maxSourcesInParallel = 6/);
 });
 

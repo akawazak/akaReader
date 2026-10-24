@@ -1,7 +1,14 @@
+// Same rule as App.jsx: the packaged desktop page (file:) talks to the loopback backend,
+// the Vite dev server and the Android app serve the API from the page's own origin.
+const DEFAULT_API_BASE =
+  typeof window !== 'undefined' && window.location.protocol === 'file:'
+    ? 'http://localhost:3001/api'
+    : '/api';
+
 export const CONFIG = {
-  API: 'http://localhost:3001/api',
+  API: import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE,
   SUWAYOMI: 'http://localhost:4567',
-  API_TOKEN: typeof window !== 'undefined' ? (window.electronAPI?.apiToken || '') : '',
+  API_TOKEN: typeof window !== 'undefined' ? (window.electronAPI?.apiToken || window.akaReaderAndroid?.apiToken || '') : '',
   DEBOUNCE_DELAY: 350,
   UPDATE_INTERVAL: 3600000,
 };

@@ -6,6 +6,7 @@ This map intentionally excludes `node_modules`, `dist`, `build`, `.git`, cache f
 akareader/
 |- AGENTS.md
 |- README.md
+|- android/                     (Android app: WebView shell + on-device extension engine)
 |- docs/
 |  |- ARCHITECTURE.md
 |  |- DEV_WORKFLOW.md
@@ -79,6 +80,8 @@ akareader/
   Durable internal documentation for architecture, risks, workflows, and file ownership.
 - `docs/PUBLISHING.md`
   Pre-tag release checklist and publishing notes.
+- `docs/akaReader Map.md`
+  Obsidian hub note (open `docs/` as a vault): process diagram, routes, runtime helpers, extension pipeline, and wikilinks to the other docs.
 
 ### CI
 
@@ -149,7 +152,7 @@ akareader/
 - `manga-nexus/test/javaRuntime.test.mjs`
   Regression coverage for legacy/current Java versions, minimum-version enforcement, repairable startup diagnosis, and canonical loopback Cloudflare-helper configuration.
 - `manga-nexus/test/extensionStores.test.mjs`
-  Regression coverage for the built-in Keiyoushi store, custom-store normalization, migration from `extensionRepos` to `extensionStores`, and malformed multiline-tail repair.
+  Regression coverage for the built-in Keiyoushi `index.pb` store, legacy `index.min.json` alias removal, custom-store normalization, migration from `extensionRepos` to `extensionStores`, and malformed multiline-tail repair.
 - `manga-nexus/vite.config.js`
   Vite config and `/api` proxy to the local backend in development.
 - `manga-nexus/eslint.config.js`

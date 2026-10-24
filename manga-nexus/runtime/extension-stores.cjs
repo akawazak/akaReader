@@ -1,5 +1,14 @@
+// Keiyoushi now publishes its full index as protobuf; index.min.json is only an
+// "Outdated App" stub. This is the exact URL Suwayomi normalizes the store to.
 const DEFAULT_EXTENSION_STORES = Object.freeze([
+  'https://github.com/keiyoushi/extensions/raw/repo/index.pb',
+]);
+
+// Older spellings of the built-in store, dropped from custom lists so they never
+// add the stub index alongside the real one.
+const LEGACY_DEFAULT_EXTENSION_STORES = Object.freeze([
   'https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.min.json',
+  'https://raw.githubusercontent.com/keiyoushi/extensions/repo/index.pb',
 ]);
 
 function isValidExtensionStoreUrl(value) {
@@ -14,7 +23,7 @@ function isValidExtensionStoreUrl(value) {
 
 function normalizeExtensionStoreUrls(values) {
   if (!Array.isArray(values)) return [];
-  const seen = new Set(DEFAULT_EXTENSION_STORES);
+  const seen = new Set([...DEFAULT_EXTENSION_STORES, ...LEGACY_DEFAULT_EXTENSION_STORES]);
   const normalized = [];
   for (const value of values) {
     const url = typeof value === 'string' ? value.trim() : '';

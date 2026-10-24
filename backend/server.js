@@ -295,6 +295,7 @@ const removeExtensionFiles = async pkg => {
   return removed;
 };
 
+let extensionsSyncedThisLaunch = false;
 const syncExtensions = async () => {
   await gql('mutation { fetchExtensions(input: {}) { clientMutationId } }', {}, 0);
 };
@@ -409,8 +410,10 @@ app.get('/api/extensions', async (_, res) => {
     const force = ['1', 'true'].includes(String(_.query.force || '').toLowerCase());
     const cached = !force && caches.extensions.get('all');
     if (cached) return res.json(cached);
-    if (force) {
-      await syncExtensions().catch(() => {});
+    // Refresh the store index once per backend launch so installs never use
+    // APK locations persisted from an older store index.
+    if (force || !extensionsSyncedThisLaunch) {
+      await syncExtensions().then(() => { extensionsSyncedThisLaunch = true; }).catch(() => {});
     }
     let result = await queryExtensions();
     if (!result.length) {
@@ -438,8 +441,18 @@ const extAction = async (action, pkg) => {
       }
     }
   `, { id: pkg }, 0);
-  let data = await mutate();
-  if (!data.updateExtension?.extension && action === 'install') {
+  // Suwayomi keeps the last fetched store index in its database. When a store
+  // moves its APKs (Keiyoushi's index.pb switch), stale rows 404 on download;
+  // gql() throws on that, so refresh the index and retry once on either path.
+  let data;
+  try {
+    data = await mutate();
+  } catch (e) {
+    if (action === 'uninstall') throw e;
+    await syncExtensions();
+    data = await mutate();
+  }
+  if (!data.updateExtension?.extension && action !== 'uninstall') {
     await syncExtensions();
     data = await mutate();
   }

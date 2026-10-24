@@ -7,6 +7,18 @@ Severity labels:
 - `P2` medium-risk instability or incorrect UX
 - `P3` cleanup/refactor debt
 
+### Fixed 2026-10-18: Extension installs failed with HTTP 404 after Keiyoushi's index change
+
+- Files:
+  - `backend/server.js`
+  - `manga-nexus/runtime/extension-stores.cjs`
+  - `manga-nexus/src/App.jsx`
+  - `manga-nexus/test/extensionStores.test.mjs`
+- Symptom: installing any extension failed. Suwayomi tried to download APKs from locations that no longer exist and got HTTP 404.
+- Cause: Keiyoushi now publishes its full catalog as gzipped protobuf (`repo/index.pb`), with APKs under GitHub release assets. `index.min.json` is only an "outdated app" stub. Suwayomi keeps the last fetched index in its database, and nothing refreshed it at launch, so installs kept using stale rows with empty or old APK names. `gql()` throws on GraphQL errors, so the existing resync-and-retry fallback in `extAction` never ran.
+- Fix: the built-in store is now `https://github.com/keiyoushi/extensions/raw/repo/index.pb`, the exact URL Suwayomi normalizes to. Both old raw.githubusercontent spellings are dropped from custom lists as legacy aliases. `/api/extensions` runs `fetchExtensions` once per backend launch (and on `?force=1`) before listing. Install and update now refresh the index and retry once when the mutation throws or returns no extension.
+- Regression proof: `npm test` (76 passing), including a legacy-alias normalization test. Live run: after a refresh, an install from the new index succeeded where it had failed with 404 before.
+
 ### Improved 2026-08-30: Optional privacy-safe Discord Rich Presence
 
 - Files: `manga-nexus/runtime/discord-presence.cjs`, `manga-nexus/electron-main.js`, `manga-nexus/preload.js`, `manga-nexus/src/App.jsx`
@@ -559,6 +571,14 @@ Verification run:
 - Result: `npm run electron:dev` can complete JRE discovery, JRE download, and Suwayomi startup on a Linux desktop with a system Java installed; previously it failed at the JRE step because the Windows-only JRE ZIP was extracted by `powershell Expand-Archive`.
 
 ## Confirmed / Highly Likely Open Problems
+
+### Android app gaps (2026-10-24)
+
+- The phone reader (`NewReader` with `phone`) and `mobile/MobileSettings.jsx` were checked on a device once. The last change (a fixed orange accent for the phone reader controls, and a 3x2 update-interval grid) is installed on the phone but has not been looked at on screen.
+- No sync yet; library/progress live in the WebView's localStorage on each device.
+- Downloads reuse the IndexedDB path; offline reading was not verified on device.
+- Manual source verification compiles and is wired to the renderer's recovery flow, but has not been exercised against a real Cloudflare-protected source.
+- The extension engine downloads and executes code, which Google Play does not allow; a Play build needs a different content model.
 
 ## Risky Async / State Code
 
