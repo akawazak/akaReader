@@ -6124,7 +6124,7 @@ const App = memo(() => {
             {!sidebarIsCollapsed && (
               <span className="side-now-text">
                 <b>{nowReading.manga.title}</b>
-                <small>{nowReading.chapterNum != null && nowReading.chapterNum !== '' ? `Ch. ${nowReading.chapterNum} · ` : ''}<Play size={10} fill="currentColor" /> Resume</small>
+                <small>{nowReading.chapterNum != null && !['', '0'].includes(String(nowReading.chapterNum).trim()) ? `Ch. ${nowReading.chapterNum} · ` : ''}<Play size={10} fill="currentColor" /> Resume</small>
                 {nowReading.percent !== null && <span className="side-now-bar"><i style={{ width: `${nowReading.percent}%` }} /></span>}
               </span>
             )}
@@ -6546,7 +6546,7 @@ const App = memo(() => {
           {tab === 'home' && (
             <HomeTab
               history={history} library={library} progress={progress}
-              sources={sources} updates={updates}
+              sources={sources} updates={updates} stats={stats}
               getMangaKey={getMangaKey}
               onSelect={openManga}
               onContinue={handleContinueReading}

@@ -181,8 +181,8 @@ input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
 @media (prefers-reduced-motion:reduce) { *, *::before, *::after { animation-duration:.01ms !important; transition-duration:.01ms !important; } }
 
 /* ── Settings (rail + one section at a time) ── */
-.set-layout { display: flex; gap: 28px; align-items: flex-start; max-width: 1180px; margin: 0 auto; padding-bottom: 60px; }
-.set-rail { position: sticky; top: 0; width: 224px; flex-shrink: 0; display: flex; flex-direction: column; gap: 2px; }
+.set-layout { display: flex; gap: 32px; align-items: flex-start; padding-bottom: 60px; }
+.set-rail { position: sticky; top: 0; width: 236px; flex-shrink: 0; display: flex; flex-direction: column; gap: 2px; }
 .set-search { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px; margin-bottom: 10px; background: var(--card); border: 1px solid var(--border); border-radius: 10px; color: var(--muted); transition: border-color .2s; }
 .set-search:focus-within { border-color: var(--accent); }
 .set-search input { flex: 1; min-width: 0; background: none; border: none; outline: none; color: var(--text); font: inherit; font-size: 13px; }
@@ -198,7 +198,7 @@ input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
 .set-tag { flex-shrink: 0; padding: 1px 6px; border: 1px solid; border-radius: 6px; font-size: 10.5px; font-weight: 600; }
 .set-tag.warn { color: #f59e0b; background: rgba(245,158,11,.08); border-color: rgba(245,158,11,.3); }
 .set-tag.accent { color: var(--accent); background: var(--accent-pale); border-color: var(--accent-mid); }
-.set-pane { flex: 1; min-width: 0; animation: set-in .22s ease-out; }
+.set-pane { flex: 1; min-width: 0; max-width: 1160px; animation: set-in .22s ease-out; }
 @keyframes set-in { from { opacity: 0; transform: translateY(4px); } }
 .set-title { font-family: var(--font-display); font-size: 22px; font-weight: 700; color: var(--text); letter-spacing: -0.01em; }
 .set-lede { margin: 3px 0 4px; font-size: 13px; color: var(--muted); }
@@ -237,8 +237,8 @@ input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
 .set-check svg { flex-shrink: 0; margin-top: 2px; }
 .set-split { display: flex; gap: 24px; align-items: flex-start; }
 .set-split-main { flex: 1; min-width: 0; }
-.set-preview { width: 260px; flex-shrink: 0; margin-top: 20px; }
-.set-preview-frame { height: 380px; overflow: hidden; border: 1px solid var(--border); border-radius: 14px; transition: background .2s; }
+.set-preview { width: clamp(260px, 22vw, 400px); flex-shrink: 0; margin-top: 20px; }
+.set-preview-frame { height: clamp(380px, 58vh, 680px); overflow: hidden; border: 1px solid var(--border); border-radius: 14px; transition: background .2s; }
 .set-preview-blank { background: linear-gradient(180deg, rgba(128,128,140,.28), rgba(128,128,140,.16)); }
 .set-preview-cap { margin: 8px 4px 0; font-size: 12px; color: var(--muted); }
 .set-about { display: flex; align-items: center; gap: 14px; margin-top: 18px; }
@@ -362,3 +362,9 @@ input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
 .side-collapse { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; border: none; border-radius: 8px; background: none; color: var(--muted); cursor: pointer; transition: background .15s, color .15s; }
 .side-collapse:hover { background: color-mix(in srgb, var(--text) 6%, transparent); color: var(--text-dim); }
 @media (max-width: 1050px) { .home-top { flex-direction: column; } .home-upnext { max-width: none; } }
+.home-stats { gap: 14px; }
+.home-stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.home-stat-grid > div { padding: 12px 14px; border-radius: 12px; background: var(--card2); border: 1px solid var(--border); }
+.home-stat-grid b { display: block; font-family: var(--font-display); font-size: 24px; font-weight: 800; line-height: 1.1; color: var(--text); font-variant-numeric: tabular-nums; }
+.home-stat-grid b.accent { color: var(--accent); }
+.home-stat-grid small { font-size: 12px; color: var(--muted); }

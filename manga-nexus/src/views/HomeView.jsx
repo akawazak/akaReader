@@ -43,7 +43,7 @@ const HeroRow = memo(({ title, link, onLink, items, progress, getMangaKey, onSel
   );
 });
 
-export const HomeView = memo(({ history, library, progress, sources, updates = [], getMangaKey, onSelect, onContinue, onSwitchTab }) => {
+export const HomeView = memo(({ history, library, progress, sources, updates = [], stats = null, getMangaKey, onSelect, onContinue, onSwitchTab }) => {
   const [heroLoaded, setHeroLoaded] = useState(false);
   const hero = useMemo(() => history.find(m => progress[getMangaKey(m.id, m.sourceId)]) || history[0] || null, [history, progress, getMangaKey]);
   const continueReading = useMemo(() => history.filter(m => progress[getMangaKey(m.id, m.sourceId)]).slice(0, 15), [history, progress, getMangaKey]);
@@ -133,6 +133,22 @@ return (
                   {continueReading.length - upNext.length - 1} more in progress <ChevronRight size={14} />
                 </button>
               )}
+            </section>
+          )}
+
+          {upNext.length === 0 && stats && (
+            <section className="home-upnext home-stats" aria-label="Your reading">
+              <h2>Your reading</h2>
+              <div className="home-stat-grid">
+                <div><b className="accent">{stats.streak || 0}</b><small>day streak</small></div>
+                <div><b>{(stats.totalChapters || 0).toLocaleString()}</b><small>chapters read</small></div>
+                <div><b>{stats.totalMinutes >= 60 ? `${Math.floor(stats.totalMinutes / 60)}h ${stats.totalMinutes % 60}m` : `${stats.totalMinutes || 0}m`}</b><small>reading time</small></div>
+                <div><b>{library.length}</b><small>in library</small></div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 'auto', flexWrap: 'wrap' }}>
+                <Btn variant="outline" size="sm" icon={BookOpen} onClick={() => onSwitchTab('browse')}>Find something new</Btn>
+                <Btn variant="ghost" size="sm" onClick={() => onSwitchTab('library')}>Open library</Btn>
+              </div>
             </section>
           )}
         </div>
